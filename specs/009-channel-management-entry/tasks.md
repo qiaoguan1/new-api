@@ -6,6 +6,6 @@
 - [x] T004 Implement the integrated Channel Monitor actions
 - [x] T005 Implement the standalone monitor patch
 - [x] T006 Run frontend and patch verification
-- [ ] T007 Back up and deploy production assets
-- [ ] T008 Verify links, permissions, and create-dialog behavior
+- [x] T007 Back up and deploy production assets
+- [x] T008 Verify links, permissions, and create-dialog behavior
 - [ ] T009 Commit, open the PR, and update the project after the completed review
