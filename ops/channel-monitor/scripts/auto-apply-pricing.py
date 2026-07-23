@@ -38,7 +38,13 @@ BASE_MULTIPLIER = 10.0
 MARKUP = BASE_MULTIPLIER * EXPECTED_GROUP_RATIO
 MIN_MARKUP = 1.2
 DEFAULT_MAX_CHANGE_RATIO = 5.0
-RECOVERABLE_UNDERPRICING_ALERT_TYPES = frozenset({"price_below_upstream_input"})
+RECOVERABLE_UNDERPRICING_ALERT_TYPES = frozenset(
+    {
+        "price_below_upstream_input",
+        "price_below_actual_input",
+        "price_below_actual_output",
+    }
+)
 DB_USER = os.environ.get("CHANNEL_MONITOR_DB_USER", "newapi")
 DB_NAME = os.environ.get("CHANNEL_MONITOR_DB_NAME", "new-api")
 OPTION_KEYS = ("ModelRatio", "CompletionRatio", "ModelPrice")

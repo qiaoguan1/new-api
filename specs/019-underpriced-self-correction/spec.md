@@ -31,6 +31,9 @@ worker from calculating that increase.
    `gpt-5.6-sol` must be checked against the upstream ledger and NewAPI options.
 7. Ten post-deployment validation rounds must pass without changing models that
    lack trustworthy actual cost.
+8. The daily audit must compare the site sell price with complete model-level
+   actual billing cost. An upstream catalog/list price must not be labeled as
+   actual cost or create a critical underpricing alert.
 
 ## Acceptance Scenarios
 
@@ -43,4 +46,7 @@ worker from calculating that increase.
 - Given a proposed change above the movement limit, no price is changed.
 - Given an unrelated healthy model on the same channel, it remains independently
   eligible.
-
+- Given a catalog price above the site price but complete actual cost below the
+  site price, the audit emits no critical underpricing alert.
+- Given a complete actual input or output cost above the corresponding site
+  price, the audit emits a recoverable critical actual-cost alert.
