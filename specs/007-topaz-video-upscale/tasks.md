@@ -12,4 +12,4 @@
 - [x] T010 Complete comprehensive and security review; address every finding
 - [x] T011 Back up production source/image/database and deploy the reviewed build
 - [x] T012 Create `tp视频放大`, refresh live models, and verify health without paid processing
-- [ ] T013 Commit, push, open PR, update Issue/Project, and record verification
+- [x] T013 Commit, push, open PR, update Issue/Project, and record verification
