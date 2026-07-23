@@ -13,6 +13,6 @@
 - [x] T011 Run focused and full relevant tests
 - [x] T012 Perform comprehensive and security review; fix every finding
 - [x] T013 Run production dry-run and verify all decisions without database writes
-- [ ] T014 Back up and deploy the reviewed worker and NewAPI build with rollback verification
-- [ ] T015 Verify public runtime prices and the next scheduled execution path
-- [ ] T016 Commit, push, open the linked PR, and update project state
+- [x] T014 Back up and deploy the reviewed worker and NewAPI build with rollback verification
+- [x] T015 Verify public runtime prices and the next scheduled execution path
+- [x] T016 Commit, push, open the linked PR, and update project state
