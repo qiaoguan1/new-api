@@ -16,6 +16,7 @@ import (
 	relaychannel "github.com/QuantumNous/new-api/relay/channel"
 	"github.com/QuantumNous/new-api/relay/channel/gemini"
 	"github.com/QuantumNous/new-api/relay/channel/ollama"
+	"github.com/QuantumNous/new-api/relay/channel/task/topaz"
 	"github.com/QuantumNous/new-api/service"
 
 	"github.com/gin-gonic/gin"
@@ -1023,6 +1024,22 @@ func FetchModels(c *gin.Context) {
 			return
 		}
 
+		c.JSON(http.StatusOK, gin.H{
+			"success": true,
+			"data":    models,
+		})
+		return
+	}
+
+	if req.Type == constant.ChannelTypeTopaz {
+		models, err := topaz.FetchUpscaleModels(baseURL, key, "")
+		if err != nil {
+			c.JSON(http.StatusOK, gin.H{
+				"success": false,
+				"message": fmt.Sprintf("Failed to fetch Topaz models: %s", err.Error()),
+			})
+			return
+		}
 		c.JSON(http.StatusOK, gin.H{
 			"success": true,
 			"data":    models,

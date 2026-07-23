@@ -116,6 +116,18 @@ export const CHANNEL_TYPE_CONFIGS: Record<number, ChannelTypeConfig> = {
       baseUrl: 'Default: https://api.replicate.com',
     },
   },
+  58: {
+    id: 58,
+    name: CHANNEL_TYPES[58],
+    icon: 'topaz',
+    defaultBaseUrl: 'https://api.topazlabs.com',
+    hints: {
+      key: 'Topaz API key',
+      models:
+        'Use Fetch Models to load currently available video upscaling models',
+      baseUrl: 'Default: https://api.topazlabs.com',
+    },
+  },
 }
 
 /**

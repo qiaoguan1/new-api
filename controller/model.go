@@ -14,6 +14,7 @@ import (
 	"github.com/QuantumNous/new-api/relay/channel/lingyiwanwu"
 	"github.com/QuantumNous/new-api/relay/channel/minimax"
 	"github.com/QuantumNous/new-api/relay/channel/moonshot"
+	"github.com/QuantumNous/new-api/relay/channel/task/topaz"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	"github.com/QuantumNous/new-api/relay/helper"
 	"github.com/QuantumNous/new-api/service"
@@ -104,6 +105,7 @@ func init() {
 		adaptor.Init(meta)
 		channelId2Models[i] = adaptor.GetModelList()
 	}
+	channelId2Models[constant.ChannelTypeTopaz] = append([]string(nil), topaz.ModelList...)
 	openAIModels = lo.UniqBy(openAIModels, func(m dto.OpenAIModels) string {
 		return m.Id
 	})

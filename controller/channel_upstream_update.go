@@ -16,6 +16,7 @@ import (
 	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/relay/channel/gemini"
 	"github.com/QuantumNous/new-api/relay/channel/ollama"
+	"github.com/QuantumNous/new-api/relay/channel/task/topaz"
 	"github.com/QuantumNous/new-api/service"
 
 	"github.com/gin-gonic/gin"
@@ -283,6 +284,18 @@ func fetchChannelUpstreamModelIDs(channel *model.Channel) ([]string, error) {
 		}
 		key = strings.TrimSpace(key)
 		models, err := gemini.FetchGeminiModels(baseURL, key, channel.GetSetting().Proxy)
+		if err != nil {
+			return nil, err
+		}
+		return normalizeModelNames(models), nil
+	}
+
+	if channel.Type == constant.ChannelTypeTopaz {
+		key, _, apiErr := channel.GetNextEnabledKey()
+		if apiErr != nil {
+			return nil, fmt.Errorf("failed to get Topaz channel key: %w", apiErr)
+		}
+		models, err := topaz.FetchUpscaleModels(baseURL, strings.TrimSpace(key), channel.GetSetting().Proxy)
 		if err != nil {
 			return nil, err
 		}
