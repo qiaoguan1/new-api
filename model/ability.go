@@ -103,44 +103,68 @@ func getChannelQuery(group string, model string, retry int) (*gorm.DB, error) {
 	return channelQuery, nil
 }
 
-func GetChannel(group string, model string, retry int) (*Channel, error) {
+func GetChannel(group string, model string, excluded map[int]bool) (*Channel, error) {
 	var abilities []Ability
 
-	var err error = nil
-	channelQuery, err := getChannelQuery(group, model, retry)
-	if err != nil {
+	channelQuery := DB.Where(commonGroupCol+" = ? and model = ? and enabled = ?", group, model, true)
+	if err := channelQuery.Order("weight DESC").Find(&abilities).Error; err != nil {
 		return nil, err
 	}
-	if common.UsingSQLite || common.UsingPostgreSQL {
-		err = channelQuery.Order("weight DESC").Find(&abilities).Error
-	} else {
-		err = channelQuery.Order("weight DESC").Find(&abilities).Error
-	}
-	if err != nil {
-		return nil, err
-	}
-	channel := Channel{}
-	if len(abilities) > 0 {
-		// Randomly choose one
-		weightSum := uint(0)
-		for _, ability_ := range abilities {
-			weightSum += ability_.Weight + 10
+
+	filtered := make([]Ability, 0, len(abilities))
+	for _, ability := range abilities {
+		if excluded != nil && excluded[ability.ChannelId] {
+			continue
 		}
-		// Randomly choose one
-		weight := common.GetRandomInt(int(weightSum))
-		for _, ability_ := range abilities {
-			weight -= int(ability_.Weight) + 10
-			//log.Printf("weight: %d, ability weight: %d", weight, *ability_.Weight)
-			if weight <= 0 {
-				channel.Id = ability_.ChannelId
-				break
-			}
-		}
-	} else {
+		filtered = append(filtered, ability)
+	}
+	if len(filtered) == 0 {
 		return nil, nil
 	}
-	err = DB.First(&channel, "id = ?", channel.Id).Error
-	return &channel, err
+
+	maxPriority := filtered[0].Priority
+	if maxPriority == nil {
+		zero := int64(0)
+		maxPriority = &zero
+	}
+	for _, ability := range filtered[1:] {
+		if ability.Priority != nil && *ability.Priority > *maxPriority {
+			maxPriority = ability.Priority
+		}
+	}
+
+	targetAbilities := make([]Ability, 0, len(filtered))
+	for _, ability := range filtered {
+		if ability.Priority != nil && *ability.Priority == *maxPriority {
+			targetAbilities = append(targetAbilities, ability)
+		}
+	}
+	if len(targetAbilities) == 0 {
+		return nil, nil
+	}
+
+	weightSum := uint(0)
+	for _, ability := range targetAbilities {
+		weightSum += ability.Weight + 10
+	}
+	weight := common.GetRandomInt(int(weightSum))
+	channelID := 0
+	for _, ability := range targetAbilities {
+		weight -= int(ability.Weight) + 10
+		if weight <= 0 {
+			channelID = ability.ChannelId
+			break
+		}
+	}
+	if channelID == 0 {
+		channelID = targetAbilities[0].ChannelId
+	}
+
+	channel := Channel{}
+	if err := DB.First(&channel, "id = ?", channelID).Error; err != nil {
+		return nil, err
+	}
+	return &channel, nil
 }
 
 func (channel *Channel) AddAbilities(tx *gorm.DB) error {

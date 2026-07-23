@@ -20,6 +20,9 @@ import type {
   WaffoPaymentResponse,
   WaffoPancakePaymentRequest,
   WaffoPancakePaymentResponse,
+  WechatPayRequest,
+  WechatPayCreateResponse,
+  WechatPayOrderResponse,
 } from './types'
 
 // ============================================================================
@@ -99,6 +102,25 @@ export async function requestStripePayment(
   const res = await api.post('/api/user/stripe/pay', request, {
     skipBusinessError: true,
   } as Record<string, unknown>)
+  return res.data
+}
+
+export async function requestWechatPayNative(
+  request: WechatPayRequest
+): Promise<WechatPayCreateResponse> {
+  const res = await api.post('/api/user/wechatpay/native/pay', request, {
+    skipBusinessError: true,
+  } as Record<string, unknown>)
+  return res.data
+}
+
+export async function getWechatPayOrder(
+  tradeNo: string
+): Promise<WechatPayOrderResponse> {
+  const res = await api.get(
+    `/api/user/wechatpay/order/${encodeURIComponent(tradeNo)}`,
+    { skipBusinessError: true } as Record<string, unknown>
+  )
   return res.data
 }
 

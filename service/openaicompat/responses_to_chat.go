@@ -37,6 +37,7 @@ func ResponsesResponseToChatCompletionsResponse(resp *dto.OpenAIResponsesRespons
 		if resp.Usage.CompletionTokenDetails.ReasoningTokens != 0 {
 			usage.CompletionTokenDetails.ReasoningTokens = resp.Usage.CompletionTokenDetails.ReasoningTokens
 		}
+		usage.Cost = resp.Usage.Cost
 	}
 
 	created := resp.CreatedAt

@@ -516,7 +516,8 @@ func getHardcodedCompletionModelRatio(name string) (float64, bool) {
 		// gpt-5 匹配
 		if strings.HasPrefix(name, "gpt-5") {
 			if strings.HasPrefix(name, "gpt-5.5") {
-				return 6, true
+				// Allow the database CompletionRatio to override the default.
+				return 6, false
 			}
 			if strings.HasPrefix(name, "gpt-5.4") {
 				if strings.HasPrefix(name, "gpt-5.4-nano") {

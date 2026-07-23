@@ -65,7 +65,7 @@ func testChannel(channel *model.Channel, testModel string, endpointType string, 
 		constant.ChannelTypeSunoAPI,
 		constant.ChannelTypeKling,
 		constant.ChannelTypeJimeng,
-		constant.ChannelTypeDoubaoVideo,
+		// constant.ChannelTypeDoubaoVideo,  // removed: now supported via VolcEngine path
 		constant.ChannelTypeVidu,
 	}
 	if lo.Contains(unsupportedTestChannelTypes, channel.Type) {
@@ -94,6 +94,13 @@ func testChannel(channel *model.Channel, testModel string, endpointType string, 
 
 	endpointType = normalizeChannelTestEndpoint(channel, testModel, endpointType)
 
+	// video model (seedance) uses async RelayTask, skip sync relay test
+	if channel.Type == constant.ChannelTypeDoubaoVideo &&
+		strings.Contains(strings.ToLower(testModel), "seedance") {
+		common.SysLog(fmt.Sprintf("testing channel %d: video model %s, skipping async video generation test", channel.Id, testModel))
+		return testResult{}
+	}
+
 	requestPath := "/v1/chat/completions"
 
 	// 如果指定了端点类型，使用指定的端点类型
@@ -118,7 +125,10 @@ func testChannel(channel *model.Channel, testModel string, endpointType string, 
 		}
 
 		// VolcEngine 图像生成模型
-		if channel.Type == constant.ChannelTypeVolcEngine && strings.Contains(testModel, "seedream") {
+		if (channel.Type == constant.ChannelTypeVolcEngine ||
+			channel.Type == constant.ChannelTypeDoubaoVideo) &&
+			(strings.Contains(strings.ToLower(testModel), "seedream") ||
+				strings.Contains(strings.ToLower(testModel), "doubao-seed")) {
 			requestPath = "/v1/images/generations"
 		}
 
@@ -697,7 +707,7 @@ func buildTestRequest(model string, endpointType string, channel *model.Channel,
 				Model:  model,
 				Prompt: "a cute cat",
 				N:      lo.ToPtr(uint(1)),
-				Size:   "1024x1024",
+				Size:   "1920x1920",
 			}
 		case constant.EndpointTypeJinaRerank:
 			// 返回 RerankRequest
@@ -744,6 +754,19 @@ func buildTestRequest(model string, endpointType string, channel *model.Channel,
 		}
 	}
 
+	// VolcEngine / DoubaoVideo 图像生成模型（seedream 系列）
+	if channel != nil &&
+		(channel.Type == constant.ChannelTypeVolcEngine ||
+			channel.Type == constant.ChannelTypeDoubaoVideo) &&
+		(strings.Contains(strings.ToLower(model), "seedream") ||
+			strings.Contains(strings.ToLower(model), "doubao-seed")) {
+		return &dto.ImageRequest{
+			Model:  model,
+			Prompt: "a cute cat",
+			N:      lo.ToPtr(uint(1)),
+			Size:   "1920x1920",
+		}
+	}
 	// 自动检测逻辑（保持原有行为）
 	if strings.Contains(strings.ToLower(model), "rerank") {
 		return &dto.RerankRequest{

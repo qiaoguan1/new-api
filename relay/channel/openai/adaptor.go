@@ -163,6 +163,9 @@ func (a *Adaptor) GetRequestURL(info *relaycommon.RelayInfo) (string, error) {
 		url = strings.Replace(url, "{model}", info.UpstreamModelName, -1)
 		return url, nil
 	default:
+		if (info.RelayMode == relayconstant.RelayModeImagesGenerations || info.RelayMode == relayconstant.RelayModeImagesEdits) && isRunningHubEndpoint(info.ChannelBaseUrl) {
+			return runningHubSubmitURL(info.ChannelBaseUrl), nil
+		}
 		if (info.RelayFormat == types.RelayFormatClaude || info.RelayFormat == types.RelayFormatGemini) &&
 			info.RelayMode != relayconstant.RelayModeResponses &&
 			info.RelayMode != relayconstant.RelayModeResponsesCompact {
@@ -425,7 +428,15 @@ func (a *Adaptor) ConvertAudioRequest(c *gin.Context, info *relaycommon.RelayInf
 
 func (a *Adaptor) ConvertImageRequest(c *gin.Context, info *relaycommon.RelayInfo, request dto.ImageRequest) (any, error) {
 	switch info.RelayMode {
+	case relayconstant.RelayModeImagesGenerations:
+		if isRunningHubEndpoint(info.ChannelBaseUrl) {
+			return runningHubImageSubmitPayload(request, info.ChannelBaseUrl)
+		}
+		fallthrough
 	case relayconstant.RelayModeImagesEdits:
+		if isRunningHubEndpoint(info.ChannelBaseUrl) {
+			return runningHubImageSubmitPayload(request, info.ChannelBaseUrl)
+		}
 		if isJSONRequest(c) {
 			return request, nil
 		}
@@ -623,7 +634,11 @@ func (a *Adaptor) DoResponse(c *gin.Context, resp *http.Response, info *relaycom
 	case relayconstant.RelayModeAudioTranscription:
 		err, usage = OpenaiSTTHandler(c, resp, info, a.ResponseFormat)
 	case relayconstant.RelayModeImagesGenerations, relayconstant.RelayModeImagesEdits:
-		usage, err = OpenaiHandlerWithUsage(c, info, resp)
+		if isRunningHubEndpoint(info.ChannelBaseUrl) {
+			usage, err = runningHubImageSubmitHandler(c, info, resp)
+		} else {
+			usage, err = OpenaiHandlerWithUsage(c, info, resp)
+		}
 	case relayconstant.RelayModeRerank:
 		usage, err = common_handler.RerankHandler(c, info, resp)
 	case relayconstant.RelayModeResponses:

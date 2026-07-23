@@ -133,7 +133,7 @@ func Distribute() func(c *gin.Context) {
 						ModelName:  modelRequest.Model,
 						TokenGroup: usingGroup,
 						Retry:      common.GetPointer(0),
-					})
+					}, nil)
 					if err != nil {
 						showGroup := usingGroup
 						if usingGroup == "auto" {

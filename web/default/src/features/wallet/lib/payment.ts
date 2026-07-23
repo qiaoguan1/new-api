@@ -57,6 +57,10 @@ export function isStripePayment(paymentType: string): boolean {
   return paymentType === PAYMENT_TYPES.STRIPE
 }
 
+export function isWechatPayment(paymentType: string): boolean {
+  return paymentType === PAYMENT_TYPES.WECHAT
+}
+
 /**
  * Check if payment method is Waffo Pancake
  *
@@ -85,6 +89,10 @@ export function getDefaultPaymentType(topupInfo: TopupInfo | null): string {
     return PAYMENT_TYPES.STRIPE
   }
 
+  if (topupInfo.enable_wechatpay_topup) {
+    return PAYMENT_TYPES.WECHAT
+  }
+
   if (topupInfo.enable_waffo_topup) {
     return PAYMENT_TYPES.WAFFO
   }
@@ -110,6 +118,10 @@ export function getMinTopupAmount(topupInfo: TopupInfo | null): number {
 
   if (topupInfo.enable_stripe_topup) {
     return topupInfo.stripe_min_topup
+  }
+
+  if (topupInfo.enable_wechatpay_topup) {
+    return topupInfo.min_topup
   }
 
   if (topupInfo.enable_waffo_topup) {

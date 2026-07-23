@@ -55,6 +55,8 @@ type textQuotaSummary struct {
 	AudioInputPrice          float64
 	ImageGenerationCallPrice float64
 	ToolCallSurchargeQuota   decimal.Decimal
+	UpstreamCost             float64
+	UseUpstreamCostBilling   bool
 }
 
 func cacheWriteTokensTotal(summary textQuotaSummary) int {
@@ -195,6 +197,13 @@ func calculateTextQuotaSummary(ctx *gin.Context, relayInfo *relaycommon.RelayInf
 	isOpenRouterClaudeBilling := relayInfo.ChannelMeta != nil &&
 		relayInfo.ChannelType == constant.ChannelTypeOpenRouter &&
 		summary.IsClaudeUsageSemantic
+	upstreamCost, hasUpstreamCost := 0.0, false
+	if usage != nil {
+		upstreamCost, hasUpstreamCost = usage.Cost.(float64)
+	}
+	useUpstreamCostBilling := hasUpstreamCost && upstreamCost > 0
+	summary.UpstreamCost = upstreamCost
+	summary.UseUpstreamCostBilling = useUpstreamCostBilling
 
 	if isOpenRouterClaudeBilling {
 		summary.PromptTokens -= summary.CacheTokens
@@ -229,7 +238,9 @@ func calculateTextQuotaSummary(ctx *gin.Context, relayInfo *relaycommon.RelayInf
 	summary.ToolCallSurchargeQuota = calculateTextToolCallSurcharge(ctx, relayInfo, &summary)
 
 	var audioInputQuota decimal.Decimal
-	if !relayInfo.PriceData.UsePrice {
+	if useUpstreamCostBilling {
+		summary.Quota = calculateQuotaFromUpstreamCost(upstreamCost)
+	} else if !relayInfo.PriceData.UsePrice {
 		baseTokens := dPromptTokens
 
 		var cachedTokensWithRatio decimal.Decimal
@@ -300,13 +311,18 @@ func calculateTextQuotaSummary(ctx *gin.Context, relayInfo *relaycommon.RelayInf
 		summary.Quota = int(quotaCalculateDecimal.Round(0).IntPart())
 	}
 
-	if summary.TotalTokens == 0 {
+	if summary.TotalTokens == 0 && !useUpstreamCostBilling {
 		summary.Quota = 0
 	} else if !ratio.IsZero() && summary.Quota == 0 {
 		summary.Quota = 1
 	}
 
 	return summary
+}
+
+func calculateQuotaFromUpstreamCost(upstreamCost float64) int {
+	quotaCalculateDecimal := decimal.NewFromFloat(upstreamCost).Mul(decimal.NewFromFloat(common.QuotaPerUnit))
+	return int(quotaCalculateDecimal.Round(0).IntPart())
 }
 
 func usageSemanticFromUsage(relayInfo *relaycommon.RelayInfo, usage *dto.Usage) string {
@@ -338,7 +354,10 @@ func PostTextConsumeQuota(ctx *gin.Context, relayInfo *relaycommon.RelayInfo, us
 		if snap := relayInfo.TieredBillingSnapshot; snap != nil {
 			tieredUsedVars = billingexpr.UsedVars(snap.ExprString)
 		}
-		tieredOk, tieredQuota, tieredRes := TryTieredSettle(relayInfo, BuildTieredTokenParams(usage, summary.IsClaudeUsageSemantic, tieredUsedVars))
+		tieredOk, tieredQuota, tieredRes := false, 0, (*billingexpr.TieredResult)(nil)
+		if !summary.UseUpstreamCostBilling {
+			tieredOk, tieredQuota, tieredRes = TryTieredSettle(relayInfo, BuildTieredTokenParams(usage, summary.IsClaudeUsageSemantic, tieredUsedVars))
+		}
 		if tieredOk {
 			tieredBillingApplied = true
 			tieredResult = tieredRes
@@ -362,7 +381,7 @@ func PostTextConsumeQuota(ctx *gin.Context, relayInfo *relaycommon.RelayInfo, us
 		extraContent = append(extraContent, fmt.Sprintf("Image Generation Call 花费 %s", decimal.NewFromFloat(summary.ImageGenerationCallPrice).Mul(decimal.NewFromFloat(summary.GroupRatio)).Mul(decimal.NewFromFloat(common.QuotaPerUnit)).String()))
 	}
 
-	if summary.TotalTokens == 0 {
+	if summary.TotalTokens == 0 && !summary.UseUpstreamCostBilling {
 		extraContent = append(extraContent, "上游没有返回计费信息，无法扣费（可能是上游超时）")
 		logger.LogError(ctx, fmt.Sprintf("total tokens is 0, cannot consume quota, userId %d, channelId %d, tokenId %d, model %s， pre-consumed quota %d", relayInfo.UserId, relayInfo.ChannelId, relayInfo.TokenId, summary.ModelName, relayInfo.FinalPreConsumedQuota))
 	} else {
@@ -397,6 +416,10 @@ func PostTextConsumeQuota(ctx *gin.Context, relayInfo *relaycommon.RelayInfo, us
 		other["usage_semantic"] = "anthropic"
 	} else {
 		other = GenerateTextOtherInfo(ctx, relayInfo, summary.ModelRatio, summary.GroupRatio, summary.CompletionRatio, summary.CacheTokens, summary.CacheRatio, summary.ModelPrice, relayInfo.PriceData.GroupRatioInfo.GroupSpecialRatio)
+	}
+	if summary.UseUpstreamCostBilling {
+		other["upstream_cost"] = summary.UpstreamCost
+		other["upstream_cost_billing"] = true
 	}
 	if adminRejectReason != "" {
 		other["reject_reason"] = adminRejectReason

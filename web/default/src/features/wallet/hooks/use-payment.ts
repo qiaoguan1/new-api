@@ -11,6 +11,7 @@ import {
 } from '../api'
 import {
   isStripePayment,
+  isWechatPayment,
   isWaffoPancakePayment,
   submitPaymentForm,
 } from '../lib'
@@ -64,6 +65,10 @@ export function usePayment() {
         setProcessing(true)
 
         const isStripe = isStripePayment(paymentType)
+        if (isWechatPayment(paymentType)) {
+          toast.error(i18next.t('Please use WeChat QR code payment'))
+          return false
+        }
         const amount = Math.floor(topupAmount)
 
         const response = isStripe
