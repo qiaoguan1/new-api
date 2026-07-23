@@ -4,11 +4,16 @@ import { ChannelsDialogs } from './components/channels-dialogs'
 import { ChannelsPrimaryButtons } from './components/channels-primary-buttons'
 import { ChannelsProvider } from './components/channels-provider'
 import { ChannelsTable } from './components/channels-table'
+import type { InitialChannelDialog } from './lib/channel-entry'
 
-export function Channels() {
+export function Channels({
+  initialDialog = null,
+}: {
+  initialDialog?: InitialChannelDialog
+}) {
   const { t } = useTranslation()
   return (
-    <ChannelsProvider>
+    <ChannelsProvider initialOpen={initialDialog}>
       <SectionPageLayout>
         <SectionPageLayout.Title>{t('Channels')}</SectionPageLayout.Title>
         <SectionPageLayout.Description>

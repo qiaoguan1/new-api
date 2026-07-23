@@ -50,8 +50,14 @@ const ChannelsContext = createContext<ChannelsContextType | undefined>(
 // Provider
 // ============================================================================
 
-export function ChannelsProvider({ children }: { children: React.ReactNode }) {
-  const [open, setOpen] = useState<DialogType>(null)
+export function ChannelsProvider({
+  children,
+  initialOpen = null,
+}: {
+  children: React.ReactNode
+  initialOpen?: DialogType
+}) {
+  const [open, setOpen] = useState<DialogType>(initialOpen)
   const [currentRow, setCurrentRow] = useState<Channel | null>(null)
   const [currentTag, setCurrentTag] = useState<string | null>(null)
   const [enableTagMode, setEnableTagMode] = useState(() => {
