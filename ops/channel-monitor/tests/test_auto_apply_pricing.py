@@ -2,11 +2,14 @@ import importlib.util
 import math
 import pathlib
 import subprocess
+import sys
 import unittest
 from unittest import mock
 
 
 SCRIPT_PATH = pathlib.Path(__file__).resolve().parents[1] / "scripts" / "auto-apply-pricing.py"
+if str(SCRIPT_PATH.parent) not in sys.path:
+    sys.path.insert(0, str(SCRIPT_PATH.parent))
 SPEC = importlib.util.spec_from_file_location("auto_apply_pricing", SCRIPT_PATH)
 pricing = importlib.util.module_from_spec(SPEC)
 assert SPEC.loader is not None

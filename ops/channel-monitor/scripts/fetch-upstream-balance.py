@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Collect the previous UTC day's actual upstream account deductions.
+"""Collect the previous Beijing day's actual upstream account deductions.
 
 Supports classic NewAPI accounts and the newer /api/v1 auth/usage API. Every
 credential receives a dated ledger row. A cost of zero is only written after a
@@ -7,7 +7,6 @@ complete log query; failures are written as incomplete with null cost.
 """
 
 import base64
-import datetime
 import json
 import math
 import os
@@ -18,6 +17,12 @@ import time
 from urllib.parse import urlsplit
 
 import requests
+
+from monitor_time import (
+    beijing_day_for_epoch,
+    beijing_iso_now,
+    resolve_beijing_business_day,
+)
 
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
@@ -58,13 +63,8 @@ def write_json(path, value):
     os.replace(temporary, path)
 
 
-def target_utc_day():
-    override = os.environ.get("CHANNEL_MONITOR_DAY", "").strip()
-    if override:
-        datetime.datetime.strptime(override, "%Y-%m-%d")
-        return override
-    now = datetime.datetime.now(datetime.timezone.utc)
-    return (now - datetime.timedelta(days=1)).strftime("%Y-%m-%d")
+def target_beijing_day():
+    return resolve_beijing_business_day(os.environ.get("CHANNEL_MONITOR_DAY", ""))
 
 
 def safe_float(value, default=None):
@@ -196,9 +196,7 @@ def standard_logs(session, origin, day):
             break
         for item in items:
             try:
-                item_day = datetime.datetime.fromtimestamp(
-                    int(item.get("created_at")), datetime.timezone.utc
-                ).strftime("%Y-%m-%d")
+                item_day = beijing_day_for_epoch(item.get("created_at"))
             except (TypeError, ValueError, OSError):
                 continue
             if item_day < day:
@@ -602,7 +600,7 @@ def failed_entry(prior_entry, error):
 
 def main():
     started = time.time()
-    day = target_utc_day()
+    day = target_beijing_day()
     upstreams = read_json(UPSTREAMS_PATH, [])
     credentials = read_json(CRED_PATH, {})
     ledger = read_json(LEDGER_PATH, {"days": {}})
@@ -641,7 +639,7 @@ def main():
     while len(ledger.get("days") or {}) > 90:
         ledger["days"].pop(sorted(ledger["days"])[0], None)
     ledger["updated_at"] = int(time.time())
-    ledger["updated_at_iso"] = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    ledger["updated_at_iso"] = beijing_iso_now()
     write_json(LEDGER_PATH, ledger)
 
     summary = {

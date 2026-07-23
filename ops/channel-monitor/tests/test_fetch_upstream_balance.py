@@ -1,10 +1,13 @@
 import importlib.util
 import pathlib
+import sys
 import unittest
 from unittest import mock
 
 
 SCRIPT_PATH = pathlib.Path(__file__).resolve().parents[1] / "scripts" / "fetch-upstream-balance.py"
+if str(SCRIPT_PATH.parent) not in sys.path:
+    sys.path.insert(0, str(SCRIPT_PATH.parent))
 SPEC = importlib.util.spec_from_file_location("fetch_upstream_balance", SCRIPT_PATH)
 collector = importlib.util.module_from_spec(SPEC)
 assert SPEC.loader is not None

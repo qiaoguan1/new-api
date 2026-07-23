@@ -48,6 +48,14 @@ const number = (value?: number, digits = 0) =>
     value || 0
   )
 
+const beijingTime = new Intl.DateTimeFormat('zh-CN', {
+  timeZone: 'Asia/Shanghai',
+  hour12: false,
+  hour: '2-digit',
+  minute: '2-digit',
+  second: '2-digit',
+})
+
 function statusFor(successRate: number) {
   if (successRate >= 99) {
     return { label: '稳定', variant: 'default' as const }
@@ -177,7 +185,7 @@ export function ModelStatus() {
               }
               detail={
                 updatedAt
-                  ? `更新于 ${updatedAt.toLocaleTimeString('zh-CN')}`
+                  ? `北京时间 ${beijingTime.format(updatedAt)} 更新`
                   : '等待更新'
               }
             />
