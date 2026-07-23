@@ -38,6 +38,7 @@ BASE_MULTIPLIER = 10.0
 MARKUP = BASE_MULTIPLIER * EXPECTED_GROUP_RATIO
 MIN_MARKUP = 1.2
 DEFAULT_MAX_CHANGE_RATIO = 5.0
+RECOVERABLE_UNDERPRICING_ALERT_TYPES = frozenset({"price_below_upstream_input"})
 DB_USER = os.environ.get("CHANNEL_MONITOR_DB_USER", "newapi")
 DB_NAME = os.environ.get("CHANNEL_MONITOR_DB_NAME", "new-api")
 OPTION_KEYS = ("ModelRatio", "CompletionRatio", "ModelPrice")
@@ -192,6 +193,7 @@ def build_audit_policy(daily_audit, day):
 
     blocked_channels = set()
     blocked_models = set()
+    underpricing_alerts = {}
     for alert in daily_audit.get("alerts") or []:
         if not isinstance(alert, dict) or alert.get("severity") != "critical":
             continue
@@ -200,7 +202,14 @@ def build_audit_policy(daily_audit, day):
         if channel_id is None and not model:
             raise PricingError(f"global critical audit alert: {alert.get('type', 'unknown')}")
         if isinstance(model, str) and model:
-            blocked_models.add(model)
+            alert_type = alert.get("type")
+            if (
+                isinstance(alert_type, str)
+                and alert_type in RECOVERABLE_UNDERPRICING_ALERT_TYPES
+            ):
+                underpricing_alerts.setdefault(model, set()).add(alert_type)
+            else:
+                blocked_models.add(model)
         elif channel_id is not None:
             blocked_channels.add(channel_id)
 
@@ -236,6 +245,7 @@ def build_audit_policy(daily_audit, day):
         "model_expected_sources": model_expected_sources,
         "blocked_models": blocked_models,
         "blocked_channels": blocked_channels,
+        "underpricing_alerts": underpricing_alerts,
     }
 
 
@@ -373,6 +383,9 @@ def build_pricing_plan(ledger, daily_audit, day, current_options, *, max_change_
 
     for model in sorted(discovered):
         decision = _base_decision(model)
+        underpricing_alert_types = sorted(policy["underpricing_alerts"].get(model, set()))
+        if underpricing_alert_types:
+            decision["underpricing_alert_types"] = underpricing_alert_types
         if model in policy["blocked_models"]:
             decision["reason"] = "critical_model_alert"
             decisions.append(decision)
@@ -420,8 +433,14 @@ def build_pricing_plan(ledger, daily_audit, day, current_options, *, max_change_
                 decision.update(
                     {
                         "action": "apply",
-                        "reason": "ok",
+                        "reason": (
+                            "underpriced_self_correction"
+                            if underpricing_alert_types
+                            else "ok"
+                        ),
                         "billing_kind": "text",
+                        "old_model_ratio": current_options["ModelRatio"].get(model),
+                        "old_completion_ratio": current_options["CompletionRatio"].get(model),
                         "worst_input_cost_cny_per_m": worst_input,
                         "worst_input_source": input_source,
                         "worst_output_cost_cny_per_m": worst_output,
@@ -449,8 +468,13 @@ def build_pricing_plan(ledger, daily_audit, day, current_options, *, max_change_
                 decision.update(
                     {
                         "action": "apply",
-                        "reason": "ok",
+                        "reason": (
+                            "underpriced_self_correction"
+                            if underpricing_alert_types
+                            else "ok"
+                        ),
                         "billing_kind": "fixed",
+                        "old_model_price": current_options["ModelPrice"].get(model),
                         "worst_cost_cny_per_call": worst_cost,
                         "worst_source": source,
                         "new_model_price": round(new_price, 12),
@@ -512,7 +536,20 @@ def _summary(plan, dry_run):
                     "billing_kind",
                     "action",
                     "reason",
+                    "underpricing_alert_types",
                     "incomplete_sources",
+                    "old_model_ratio",
+                    "old_completion_ratio",
+                    "old_model_price",
+                    "worst_input_cost_cny_per_m",
+                    "worst_input_source",
+                    "worst_output_cost_cny_per_m",
+                    "worst_output_source",
+                    "worst_cost_cny_per_call",
+                    "worst_source",
+                    "new_model_ratio",
+                    "new_completion_ratio",
+                    "new_model_price",
                     "input_sell_cny_per_m",
                     "output_sell_cny_per_m",
                     "sell_cny_per_call",
