@@ -65,6 +65,11 @@ export function useSidebarData(): SidebarData {
             icon: LayoutDashboard,
           },
           {
+            title: '模型状态',
+            url: '/channel-health',
+            icon: Gauge,
+          },
+          {
             title: t('API Keys'),
             url: '/keys',
             icon: Key,
@@ -107,11 +112,6 @@ export function useSidebarData(): SidebarData {
             title: t('Channels'),
             url: '/channels',
             icon: Radio,
-          },
-          {
-            title: '渠道监控',
-            url: '/channel-health',
-            icon: Gauge,
           },
           {
             title: t('Models'),
