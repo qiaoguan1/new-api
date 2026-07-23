@@ -8,4 +8,4 @@
 - [x] T006 Run frontend and patch verification
 - [x] T007 Back up and deploy production assets
 - [x] T008 Verify links, permissions, and create-dialog behavior
-- [ ] T009 Commit, open the PR, and update the project after the completed review
+- [x] T009 Commit, open the PR, and update the project after the completed review
