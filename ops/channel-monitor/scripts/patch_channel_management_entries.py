@@ -18,10 +18,18 @@ SUMMARY_OLD = """      </header>
 
       <section class="summary" id="summary"></section>"""
 
-SUMMARY_NEW = """      </header>
+SUMMARY_V1 = """      </header>
 
       <section class="meta channel-setup-guide">
         <span><strong>新增渠道需要两步：</strong>先添加 NewAPI 渠道，再填写上游账单账号与充值换算率；两步完成后才会纳入每日实际扣费对账与自动改价。</span>
+      </section>
+
+      <section class="summary" id="summary"></section>"""
+
+SUMMARY_NEW = """      </header>
+
+      <section class="meta channel-setup-guide">
+        <span><strong>新增渠道需要两步：</strong>先添加 NewAPI 渠道，再填写上游账单账号与充值换算率；两步完成后才会纳入每日实际扣费对账与自动改价。<strong>命名规则：</strong>统一使用“上游名 · 用途”，例如“Paisio · 视频”。</span>
       </section>
 
       <section class="summary" id="summary"></section>"""
@@ -43,9 +51,11 @@ def transform(source):
     source = _replace_once_or_verify(
         source, TOOLBAR_OLD, TOOLBAR_NEW, "channel toolbar"
     )
-    return _replace_once_or_verify(
-        source, SUMMARY_OLD, SUMMARY_NEW, "channel setup guide"
-    )
+    if source.count(SUMMARY_NEW) == 1:
+        return source
+    if source.count(SUMMARY_V1) == 1:
+        return source.replace(SUMMARY_V1, SUMMARY_NEW, 1)
+    return _replace_once_or_verify(source, SUMMARY_OLD, SUMMARY_NEW, "channel setup guide")
 
 
 def main():
