@@ -12,4 +12,4 @@
 - [x] T010 Back up and deploy reviewed production scripts
 - [x] T011 Run the 08:20 fetch, 08:30 audit, and 08:40 pricing jobs sequentially
 - [x] T012 Manually verify account coverage, model counts, costs, database options, and public prices
-- [ ] T013 Commit, push, open/update the PR, and move the Issue to review
+- [x] T013 Commit, push, open PR #6, and move the Issue to review

@@ -3,6 +3,8 @@
 **Production day**: 2026-07-22  
 **Executed**: 2026-07-23 (Asia/Shanghai)
 
+**Pull request**: https://github.com/qiaoguan1/new-api/pull/6
+
 ## Credentials
 
 - Imported 11 recognized account groups and preserved the existing codeplan entry: 12 total.
