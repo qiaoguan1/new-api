@@ -40,7 +40,11 @@ def ledger(**sources):
 
 
 def source(**models):
-    return {"per_model_real_cost": models}
+    return {
+        "collection_status": "complete",
+        "actual_log_complete": True,
+        "per_model_real_cost": models,
+    }
 
 
 def text_cost(input_cost, output_cost):
@@ -82,6 +86,19 @@ class PricingPlanTests(unittest.TestCase):
         decisions = {item["model"]: item for item in result["decisions"]}
         self.assertEqual(decisions["brand-new-text"]["action"], "apply")
         self.assertEqual(decisions["brand-new-video"]["action"], "apply")
+
+    def test_explicit_configured_inventory_excludes_unrelated_catalog_models(self):
+        source_channel = channel(
+            41,
+            "nodyhub",
+            ["grok-video-3", "unrelated-upstream-catalog-model"],
+        )
+        source_channel["configured_models"] = ["grok-video-3"]
+
+        policy = pricing.build_audit_policy(audit(source_channel), DAY)
+
+        self.assertEqual(policy["discovered_models"], {"grok-video-3"})
+        self.assertEqual(policy["model_sources"], {"grok-video-3": {"nodyhub"}})
 
     def test_text_and_fixed_prices_equal_actual_cost_times_one_point_five(self):
         daily_audit = audit(channel(1, "a", ["text-model", "image-model"]))
@@ -143,6 +160,76 @@ class PricingPlanTests(unittest.TestCase):
         self.assertEqual(result["decisions"][0]["reason"], "no_trusted_actual_cost")
         self.assertEqual(result["options"]["ModelRatio"]["unused-model"], 9.0)
 
+    def test_incomplete_upstream_collection_blocks_every_affected_model(self):
+        daily_audit = audit(
+            channel(1, "complete", ["shared-model"]),
+            channel(2, "captcha", ["shared-model", "captcha-only-model"]),
+        )
+        incomplete = {
+            "collection_status": "incomplete",
+            "actual_log_complete": False,
+            "collection_error": "captcha required",
+            "per_model_real_cost": {},
+        }
+        daily_ledger = ledger(
+            complete=source(**{"shared-model": text_cost(1.0, 4.0)}),
+            captcha=incomplete,
+        )
+
+        result = pricing.build_pricing_plan(
+            daily_ledger, daily_audit, DAY, self.current_options(), max_change_ratio=5.0
+        )
+        decisions = {item["model"]: item for item in result["decisions"]}
+
+        self.assertEqual(decisions["shared-model"]["action"], "skip")
+        self.assertEqual(decisions["shared-model"]["reason"], "upstream_collection_incomplete")
+        self.assertEqual(decisions["shared-model"]["incomplete_sources"], ["captcha"])
+        self.assertEqual(decisions["captcha-only-model"]["reason"], "upstream_collection_incomplete")
+
+    def test_missing_dated_entry_is_incomplete_not_zero_cost(self):
+        result = pricing.build_pricing_plan(
+            ledger(),
+            audit(channel(1, "missing", ["model"])),
+            DAY,
+            self.current_options(),
+            max_change_ratio=5.0,
+        )
+
+        self.assertEqual(result["decisions"][0]["reason"], "upstream_collection_incomplete")
+        self.assertEqual(result["decisions"][0]["incomplete_sources"], ["missing"])
+
+    def test_incomplete_failed_scan_source_still_blocks_shared_model(self):
+        daily_audit = audit(
+            channel(1, "healthy", ["model"]),
+            channel(2, "failed", ["model"], scan_status="error"),
+        )
+        result = pricing.build_pricing_plan(
+            ledger(
+                healthy=source(model=text_cost(1.0, 2.0)),
+                failed={"collection_status": "incomplete", "actual_log_complete": False},
+            ),
+            daily_audit,
+            DAY,
+            self.current_options(),
+            max_change_ratio=5.0,
+        )
+
+        self.assertEqual(result["decisions"][0]["reason"], "upstream_collection_incomplete")
+        self.assertEqual(result["decisions"][0]["incomplete_sources"], ["failed"])
+
+    def test_global_credential_gate_requires_every_account_collection(self):
+        daily_ledger = ledger(
+            good=source(),
+            bad={"collection_status": "incomplete", "actual_log_complete": False},
+        )
+
+        self.assertEqual(
+            pricing.incomplete_credential_sources(
+                daily_ledger, DAY, {"good": {}, "bad": {}}
+            ),
+            ["bad"],
+        )
+
     def test_stale_audit_and_group_ratio_mismatch_fail_closed(self):
         stale = audit(channel(1, "healthy", ["model"]))
         stale["date"] = "2026-07-21"
@@ -189,6 +276,84 @@ class PricingPlanTests(unittest.TestCase):
         )
 
         self.assertEqual(result["decisions"][0]["worst_input_source"], "healthy")
+
+    def test_critical_model_alert_does_not_block_unrelated_channel_models(self):
+        daily_audit = audit(
+            channel(41, "video", ["overpriced-model", "healthy-video"]),
+            alerts=[{
+                "severity": "critical",
+                "channel_id": 41,
+                "model": "overpriced-model",
+                "type": "billing_data_mismatch",
+            }],
+        )
+        daily_ledger = ledger(
+            video=source(
+                **{
+                    "overpriced-model": fixed_cost(100.0),
+                    "healthy-video": fixed_cost(0.8),
+                }
+            )
+        )
+
+        result = pricing.build_pricing_plan(
+            daily_ledger, daily_audit, DAY, self.current_options(), max_change_ratio=5.0
+        )
+        decisions = {item["model"]: item for item in result["decisions"]}
+
+        self.assertEqual(decisions["overpriced-model"]["reason"], "critical_model_alert")
+        self.assertEqual(decisions["healthy-video"]["action"], "apply")
+
+    def test_price_below_cost_alert_is_a_pricing_signal_not_a_blocker(self):
+        daily_audit = audit(
+            channel(41, "video", ["underpriced-model"]),
+            alerts=[{
+                "severity": "critical",
+                "channel_id": 41,
+                "model": "underpriced-model",
+                "type": "price_below_upstream_input",
+            }],
+        )
+
+        result = pricing.build_pricing_plan(
+            ledger(video=source(**{"underpriced-model": text_cost(5.0, 40.0)})),
+            daily_audit,
+            DAY,
+            self.current_options(),
+            max_change_ratio=5.0,
+        )
+
+        decision = result["decisions"][0]
+        self.assertEqual(decision["action"], "apply")
+        self.assertEqual(decision["input_sell_cny_per_m"], 7.5)
+        self.assertEqual(decision["output_sell_cny_per_m"], 60.0)
+
+    def test_low_margin_alert_keeps_highest_trusted_cost(self):
+        daily_audit = audit(
+            channel(1, "lower", ["image-model"]),
+            channel(2, "higher", ["image-model"]),
+            alerts=[{
+                "severity": "critical",
+                "channel_id": 2,
+                "type": "low_margin_risk",
+            }],
+        )
+
+        result = pricing.build_pricing_plan(
+            ledger(
+                lower=source(**{"image-model": fixed_cost(0.1)}),
+                higher=source(**{"image-model": fixed_cost(0.5)}),
+            ),
+            daily_audit,
+            DAY,
+            self.current_options(),
+            max_change_ratio=5.0,
+        )
+
+        decision = result["decisions"][0]
+        self.assertEqual(decision["action"], "apply")
+        self.assertEqual(decision["worst_source"], "higher")
+        self.assertEqual(decision["sell_cny_per_call"], 0.75)
 
     def test_excessive_movement_is_skipped(self):
         options = self.current_options()

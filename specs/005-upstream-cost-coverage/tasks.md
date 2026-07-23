@@ -1,0 +1,27 @@
+# Tasks: Upstream Credential and Cost Coverage Repair
+
+- [x] T001 Create Issue #5, add it to the project, and set `In Progress`
+- [x] T002 Create the issue branch and document the specification
+- [x] T003 Back up and securely import recognized upstream accounts
+- [x] T004 Validate account login, balance, and billing-log access without exposing secrets
+- [x] T005 Version the production fetch/audit integration patches without runtime data
+- [x] T006 Add failing tests for configured-model intersection, mapping, and image probe selection
+- [x] T007 Implement audit inventory and image-channel probe fixes
+- [x] T008 Make automatic pricing consume the explicit configured inventory
+- [x] T009 Run focused tests, syntax checks, diff review, and secret scan
+- [x] T010 Back up and deploy reviewed production scripts
+- [x] T011 Run the 08:20 fetch, 08:30 audit, and 08:40 pricing jobs sequentially
+- [x] T012 Manually verify account coverage, model counts, costs, database options, and public prices
+- [x] T013 Commit, push, open PR #6, and move the Issue to review
+- [x] T014 Add failing tests for dated collection completeness and pricing hard gates
+- [x] T015 Add `/api/v1` usage collection and persist every credential attempt
+- [x] T016 Build yesterday upstream-vs-local reconciliation data
+- [x] T017 Render reconciliation status and detail rows in Channel Monitor
+- [x] T018 Back up and deploy collector, pricing worker, monitor generator, and static UI
+- [x] T019 Run 08:20/08:30/08:40 plus monitor refresh for 2026-07-22
+- [x] T020 Verify collection coverage, reconciliation arithmetic, retained prices, and UI manually
+- [x] T021 Retire packapi and unity2 from credentials, configuration, and collection ledgers
+- [x] T022 Distinguish required upstreams from disabled credentialless unused history
+- [x] T023 Keep pricing-risk alerts visible without excluding trusted actual-cost evidence
+- [x] T024 Replay collection, audit, dry-run, live pricing, and monitor generation for 2026-07-22
+- [x] T025 Verify the committed database options, reconciliation totals, disabled history, and rollback files
