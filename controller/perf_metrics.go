@@ -4,6 +4,7 @@ import (
 	"net/http"
 	"strconv"
 
+	"github.com/QuantumNous/new-api/logger"
 	perfmetrics "github.com/QuantumNous/new-api/pkg/perf_metrics"
 
 	"github.com/gin-gonic/gin"
@@ -19,9 +20,10 @@ func GetPerfMetricsSummary(c *gin.Context) {
 
 	result, err := perfmetrics.QuerySummaryAll(hours)
 	if err != nil {
+		logger.LogError(c.Request.Context(), "failed to query performance metric summary: "+err.Error())
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"success": false,
-			"message": err.Error(),
+			"message": "模型性能数据暂时不可用",
 		})
 		return
 	}
@@ -55,9 +57,10 @@ func GetPerfMetrics(c *gin.Context) {
 		Hours: hours,
 	})
 	if err != nil {
+		logger.LogError(c.Request.Context(), "failed to query performance metrics: "+err.Error())
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"success": false,
-			"message": err.Error(),
+			"message": "模型性能数据暂时不可用",
 		})
 		return
 	}

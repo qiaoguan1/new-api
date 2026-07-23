@@ -6,6 +6,7 @@ upstream account metadata, audit output, ledgers, and logs remain under
 
 Production schedule:
 
+- `0 * * * * generate-monitor-data.py (local dashboard materialization)`
 - 08:20: collect the previous complete UTC day's upstream billing logs.
 - 08:30: audit channel availability, price metadata, and actual-cost coverage.
 - 08:40: calculate and atomically apply eligible model prices.
