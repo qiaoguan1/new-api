@@ -27,6 +27,7 @@ ROOT = pathlib.Path(os.environ.get("CHANNEL_MONITOR_ROOT", "/opt/ai-api-stack/ch
 STACK_ROOT = pathlib.Path(os.environ.get("CHANNEL_MONITOR_STACK_ROOT", "/opt/ai-api-stack"))
 LEDGER_PATH = ROOT / "data" / "upstream-balance-ledger.json"
 AUDIT_PATH = ROOT / "data" / "daily-upstream-audit.json"
+CREDENTIALS_PATH = ROOT / "upstream-credentials.json"
 LOG_PATH = ROOT / "data" / "auto-pricing-log.json"
 BACKUP_DIR = ROOT / "backups" / "pricing"
 
@@ -210,12 +211,16 @@ def build_audit_policy(daily_audit, day):
     discovered_models = set()
     healthy_sources = set()
     model_sources = {}
+    model_expected_sources = {}
     for channel in daily_audit.get("channels") or []:
         if not isinstance(channel, dict) or channel.get("status") != 1:
             continue
         models = _model_names(channel)
         discovered_models.update(models)
         slug = channel.get("upstream_slug")
+        if isinstance(slug, str) and slug:
+            for model in models:
+                model_expected_sources.setdefault(model, set()).add(slug)
         if (
             not isinstance(slug, str)
             or not slug
@@ -232,6 +237,7 @@ def build_audit_policy(daily_audit, day):
         "discovered_models": discovered_models,
         "healthy_sources": healthy_sources,
         "model_sources": model_sources,
+        "model_expected_sources": model_expected_sources,
         "blocked_models": blocked_models,
         "blocked_channels": blocked_channels,
     }
@@ -283,6 +289,27 @@ def _ledger_day(ledger, day):
     if not isinstance(day_rows, dict):
         raise PricingError(f"billing ledger has no complete day {day}")
     return day_rows
+
+
+def _collection_complete(entry):
+    """Only an explicitly successful dated billing-log query is trustworthy."""
+    return (
+        isinstance(entry, dict)
+        and entry.get("collection_status") == "complete"
+        and entry.get("actual_log_complete") is True
+    )
+
+
+def incomplete_credential_sources(ledger, day, credentials):
+    """List configured accounts without a complete dated billing collection."""
+    day_rows = _ledger_day(ledger, day)
+    if not isinstance(credentials, dict):
+        raise PricingError("upstream credentials must be a JSON object")
+    return sorted(
+        slug
+        for slug, value in credentials.items()
+        if isinstance(value, dict) and not _collection_complete(day_rows.get(slug))
+    )
 
 
 def _collect_model_costs(day_rows, model, eligible_sources):
@@ -352,6 +379,15 @@ def build_pricing_plan(ledger, daily_audit, day, current_options, *, max_change_
         decision = _base_decision(model)
         if model in policy["blocked_models"]:
             decision["reason"] = "critical_model_alert"
+            decisions.append(decision)
+            continue
+        expected_sources = policy["model_expected_sources"].get(model, set())
+        incomplete_sources = sorted(
+            slug for slug in expected_sources if not _collection_complete(day_rows.get(slug))
+        )
+        if incomplete_sources:
+            decision["reason"] = "upstream_collection_incomplete"
+            decision["incomplete_sources"] = incomplete_sources
             decisions.append(decision)
             continue
         eligible_sources = policy["model_sources"].get(model, set())
@@ -480,6 +516,7 @@ def _summary(plan, dry_run):
                     "billing_kind",
                     "action",
                     "reason",
+                    "incomplete_sources",
                     "input_sell_cny_per_m",
                     "output_sell_cny_per_m",
                     "sell_cny_per_call",
@@ -500,6 +537,12 @@ def main(argv=None):
     try:
         ledger = read_json(LEDGER_PATH, required=True)
         daily_audit = read_json(AUDIT_PATH, required=True)
+        credentials = read_json(CREDENTIALS_PATH, required=True)
+        incomplete_credentials = incomplete_credential_sources(ledger, day, credentials)
+        if incomplete_credentials:
+            raise PricingError(
+                "upstream collection incomplete: " + ", ".join(incomplete_credentials)
+            )
         current = {key: get_option(key) for key in OPTION_KEYS + ("GroupRatio",)}
         max_change_ratio = float(
             os.environ.get("CHANNEL_MONITOR_MAX_CHANGE_RATIO", DEFAULT_MAX_CHANGE_RATIO)

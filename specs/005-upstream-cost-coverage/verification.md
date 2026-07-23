@@ -78,3 +78,53 @@
 - Production patch preflight: 12/12 scan replacements and 1/1 fetch replacement matched.
 - `git diff --check`: passed.
 - Repository credential scan: no supplied username, password, API key, or server credential found.
+
+## 2026-07-23 Full Reconciliation Follow-up
+
+### Deployment and rollback
+
+- Production rollback backup:
+  `/root/maintenance-backups/20260723-104606-issue5-full-reconciliation`
+- Paisio credential rollback backup:
+  `/root/maintenance-backups/20260723-105453-paisio-credential`
+- Credential file remained `0600 root:root`; credentials and bearer tokens were not printed,
+  persisted in Git, or added to monitor JSON.
+
+### Previous UTC day collection (`2026-07-22`)
+
+- Complete credential collections: 11 of 13.
+- Classic NewAPI complete: 0809, codeplan, icreat, jojocode, maolao, nodyhub, paisio,
+  and runapi.
+- `/api/v1` usage complete: aihua, apikeyfun, and token-bridge.
+- Trusted complete-zero results: 0809, aihua, apikeyfun, icreat, paisio, runapi, and
+  token-bridge.
+- Incomplete (null cost, never zero): packapi requires Tencent CAPTCHA; unity2 requires
+  Turnstile.
+- Complete upstream deduction sum: `47.762002` CNY.
+
+### Same-day local reconciliation
+
+- Direct UTC-date database total: `78.270516` CNY, 327 log rows/calls.
+- Monitor total: `78.270516` CNY, 327 calls.
+- Mapped calls: 323; explicitly disclosed unassigned `channel_id=0` error logs: 4 calls,
+  `0.000000` CNY.
+- Monitor inventory: 16 upstream definitions, 11 complete, 5 incomplete, 3 without account
+  credentials. Overall difference and margin are null while reconciliation is incomplete.
+- Notable complete comparisons: codeplan `0.526287` upstream vs `0.154500` local;
+  jojocode `8.146904` vs `31.085576`; maolao `3.735917` vs `23.854776`; nodyhub
+  `35.352894` vs `23.175664`; paisio `0` vs `0` with 49 local failed calls.
+
+### Pricing safety and UI
+
+- Dry-run and live 08:40 executions both failed closed with
+  `upstream collection incomplete: packapi, unity2`.
+- Both pricing log records have no `database_output` and no backup path, confirming no option
+  transaction started.
+- Group ratio remains uniformly `0.15`; `gpt-5.6-sol`, `gpt-5.6-terra`, `gpt-5.6-luna`,
+  `gpt-5.5`, `gpt-image-2`, and the previously applied fixed-price models retained their values.
+- 30 focused unit tests pass. Python compile checks, generated JavaScript syntax check, and
+  browser-rendered reconciliation checks pass.
+- The production URL is protected by HTTP Basic Auth and neither available browser session had
+  valid credentials. The exact production static assets and monitor JSON were therefore rendered
+  through a local read-only fixture for DOM verification; the production files are mounted directly
+  by Nginx and require no rebuild or restart.

@@ -40,7 +40,11 @@ def ledger(**sources):
 
 
 def source(**models):
-    return {"per_model_real_cost": models}
+    return {
+        "collection_status": "complete",
+        "actual_log_complete": True,
+        "per_model_real_cost": models,
+    }
 
 
 def text_cost(input_cost, output_cost):
@@ -155,6 +159,76 @@ class PricingPlanTests(unittest.TestCase):
         self.assertEqual(result["decisions"][0]["action"], "skip")
         self.assertEqual(result["decisions"][0]["reason"], "no_trusted_actual_cost")
         self.assertEqual(result["options"]["ModelRatio"]["unused-model"], 9.0)
+
+    def test_incomplete_upstream_collection_blocks_every_affected_model(self):
+        daily_audit = audit(
+            channel(1, "complete", ["shared-model"]),
+            channel(2, "captcha", ["shared-model", "captcha-only-model"]),
+        )
+        incomplete = {
+            "collection_status": "incomplete",
+            "actual_log_complete": False,
+            "collection_error": "captcha required",
+            "per_model_real_cost": {},
+        }
+        daily_ledger = ledger(
+            complete=source(**{"shared-model": text_cost(1.0, 4.0)}),
+            captcha=incomplete,
+        )
+
+        result = pricing.build_pricing_plan(
+            daily_ledger, daily_audit, DAY, self.current_options(), max_change_ratio=5.0
+        )
+        decisions = {item["model"]: item for item in result["decisions"]}
+
+        self.assertEqual(decisions["shared-model"]["action"], "skip")
+        self.assertEqual(decisions["shared-model"]["reason"], "upstream_collection_incomplete")
+        self.assertEqual(decisions["shared-model"]["incomplete_sources"], ["captcha"])
+        self.assertEqual(decisions["captcha-only-model"]["reason"], "upstream_collection_incomplete")
+
+    def test_missing_dated_entry_is_incomplete_not_zero_cost(self):
+        result = pricing.build_pricing_plan(
+            ledger(),
+            audit(channel(1, "missing", ["model"])),
+            DAY,
+            self.current_options(),
+            max_change_ratio=5.0,
+        )
+
+        self.assertEqual(result["decisions"][0]["reason"], "upstream_collection_incomplete")
+        self.assertEqual(result["decisions"][0]["incomplete_sources"], ["missing"])
+
+    def test_incomplete_failed_scan_source_still_blocks_shared_model(self):
+        daily_audit = audit(
+            channel(1, "healthy", ["model"]),
+            channel(2, "failed", ["model"], scan_status="error"),
+        )
+        result = pricing.build_pricing_plan(
+            ledger(
+                healthy=source(model=text_cost(1.0, 2.0)),
+                failed={"collection_status": "incomplete", "actual_log_complete": False},
+            ),
+            daily_audit,
+            DAY,
+            self.current_options(),
+            max_change_ratio=5.0,
+        )
+
+        self.assertEqual(result["decisions"][0]["reason"], "upstream_collection_incomplete")
+        self.assertEqual(result["decisions"][0]["incomplete_sources"], ["failed"])
+
+    def test_global_credential_gate_requires_every_account_collection(self):
+        daily_ledger = ledger(
+            good=source(),
+            bad={"collection_status": "incomplete", "actual_log_complete": False},
+        )
+
+        self.assertEqual(
+            pricing.incomplete_credential_sources(
+                daily_ledger, DAY, {"good": {}, "bad": {}}
+            ),
+            ["bad"],
+        )
 
     def test_stale_audit_and_group_ratio_mismatch_fail_closed(self):
         stale = audit(channel(1, "healthy", ["model"]))

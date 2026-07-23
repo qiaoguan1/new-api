@@ -13,3 +13,10 @@
 - [x] T011 Run the 08:20 fetch, 08:30 audit, and 08:40 pricing jobs sequentially
 - [x] T012 Manually verify account coverage, model counts, costs, database options, and public prices
 - [x] T013 Commit, push, open PR #6, and move the Issue to review
+- [x] T014 Add failing tests for dated collection completeness and pricing hard gates
+- [x] T015 Add `/api/v1` usage collection and persist every credential attempt
+- [x] T016 Build yesterday upstream-vs-local reconciliation data
+- [x] T017 Render reconciliation status and detail rows in Channel Monitor
+- [x] T018 Back up and deploy collector, pricing worker, monitor generator, and static UI
+- [x] T019 Run 08:20/08:30/08:40 plus monitor refresh for 2026-07-22
+- [x] T020 Verify collection coverage, reconciliation arithmetic, retained prices, and UI manually
