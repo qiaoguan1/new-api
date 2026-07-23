@@ -388,6 +388,14 @@ func videoFetchByIDRespBodyBuilder(c *gin.Context) (respBody []byte, taskResp *d
 	if isOpenAIVideoAPI {
 		adaptor := GetTaskAdaptor(originTask.Platform)
 		if adaptor == nil {
+			if converted, handled, convertErr := convertStoredAdvancedCustomVideo(originTask); handled {
+				if convertErr != nil {
+					taskResp = service.TaskErrorWrapper(convertErr, "convert_to_openai_video_failed", http.StatusInternalServerError)
+					return
+				}
+				respBody = converted
+				return
+			}
 			taskResp = service.TaskErrorWrapperLocal(fmt.Errorf("invalid channel id: %d", originTask.ChannelId), "invalid_channel_id", http.StatusBadRequest)
 			return
 		}
@@ -413,6 +421,17 @@ func videoFetchByIDRespBodyBuilder(c *gin.Context) (respBody []byte, taskResp *d
 		taskResp = service.TaskErrorWrapper(err, "marshal_response_failed", http.StatusInternalServerError)
 	}
 	return
+}
+
+// Advanced Custom is platform 58 in the deployed schema. The pinned source
+// baseline predates its exported constant and task adaptor, but its tasks keep
+// the normalized status, progress, model, and result URL in the shared Task.
+func convertStoredAdvancedCustomVideo(originTask *model.Task) ([]byte, bool, error) {
+	if originTask == nil || originTask.Platform != constant.TaskPlatform("58") {
+		return nil, false, nil
+	}
+	converted, err := common.Marshal(originTask.ToOpenAIVideo())
+	return converted, true, err
 }
 
 // tryRealtimeFetch 尝试从上游实时拉取 Gemini/Vertex 任务状态。
