@@ -8,4 +8,4 @@
 - [x] T006 Run comprehensive and security review
 - [x] T007 Back up, deploy, and rerun yesterday's workflow
 - [x] T008 Manually verify reconciliation, gpt-5.6, image pricing, Paisio, exclusions, and payment
-- [ ] T009 Commit, push, PR, and project updates
+- [x] T009 Commit, push, PR, and project updates
