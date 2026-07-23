@@ -99,7 +99,15 @@ def select_metadata_probe_model(
         ):
             continue
         enable_groups = parse_models(row.get("enable_groups"))
-        if enable_groups and upstream_group and upstream_group not in enable_groups:
+        # `/api/user/models` is already filtered for the authenticated account.
+        # Its visibility is more authoritative than an upstream's internal
+        # pricing-group labels, which may use a separate naming scheme.
+        if (
+            account_catalog is None
+            and enable_groups
+            and upstream_group
+            and upstream_group not in enable_groups
+        ):
             continue
         return upstream_model
     return ""

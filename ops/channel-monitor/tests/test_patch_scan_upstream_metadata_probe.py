@@ -30,7 +30,7 @@ class MetadataProbePatcherTests(unittest.TestCase):
 
     def test_metadata_probe_normalizes_base_url_with_existing_v1_path(self):
         self.assertIn(
-            'models_path = "/models" if base_path.endswith("/v1") else "/v1/models"',
+            '("/models" if base_path.endswith("/v1") else "/v1/models")',
             PATCHER.METADATA_PROBE_NEW,
         )
 
@@ -39,6 +39,15 @@ class MetadataProbePatcherTests(unittest.TestCase):
             "probe = metadata_probe_channel(channel, ledger_entry)", PATCHER.LOOP_NEW
         )
         self.assertNotIn("probe_channel(channel)", PATCHER.LOOP_NEW)
+
+    def test_topaz_uses_free_authenticated_status_catalog(self):
+        self.assertIn('"/video/status"', PATCHER.METADATA_PROBE_NEW)
+        self.assertIn('{"X-API-Key": key}', PATCHER.METADATA_PROBE_NEW)
+
+    def test_authenticated_account_models_override_internal_pricing_groups(self):
+        self.assertIn(
+            "upstream_model in account_models", PATCHER.PRICING_GROUP_NEW
+        )
 
 
 if __name__ == "__main__":

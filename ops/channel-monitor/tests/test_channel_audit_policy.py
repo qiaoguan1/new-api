@@ -91,7 +91,7 @@ class ChannelAuditPolicyTests(unittest.TestCase):
             advertised_models={"unsupported", "video-pro-720p", "gpt-5.6-sol"},
             pricing_rows=pricing_rows,
             upstream_group="default",
-            account_models={"unsupported", "video-pro-720p", "gpt-5.6-sol"},
+            account_models={"video-pro-720p", "gpt-5.6-sol"},
         )
 
         self.assertEqual(selected, "video-pro-720p")
@@ -123,6 +123,20 @@ class ChannelAuditPolicyTests(unittest.TestCase):
         )
 
         self.assertEqual(selected, "video-pro-720p")
+
+    def test_account_visibility_overrides_unrelated_internal_group_labels(self):
+        selected = POLICY.select_metadata_probe_model(
+            {"models": "gpt-5.6-sol"},
+            advertised_models={"gpt-5.6-sol"},
+            pricing_rows=[{
+                "model_name": "gpt-5.6-sol",
+                "enable_groups": ["CodexPro"],
+            }],
+            upstream_group="default",
+            account_models={"gpt-5.6-sol"},
+        )
+
+        self.assertEqual(selected, "gpt-5.6-sol")
 
     def test_metadata_probe_fails_closed_without_intersection(self):
         selected = POLICY.select_metadata_probe_model(
