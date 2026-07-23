@@ -10,4 +10,4 @@
 - [x] T008 Back up and deploy scripts, cron, application source/image, and rerun the previous Beijing business day
 - [x] T009 Verify upstream ledger, local audit, monitor artifacts, UI, and dry-run pricing all use one date
 - [x] T010 Run ten production verification rounds
-- [ ] T011 Commit, push, create the stacked PR, and move the project item to In Review
+- [x] T011 Commit, push, create the stacked PR, and move the project item to In Review
