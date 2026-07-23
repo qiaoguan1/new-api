@@ -128,3 +128,51 @@
   valid credentials. The exact production static assets and monitor JSON were therefore rendered
   through a local read-only fixture for DOM verification; the production files are mounted directly
   by Nginx and require no rebuild or restart.
+
+## 2026-07-23 Retired-Upstream and Pricing-Signal Follow-up
+
+### Retirement and recovery
+
+- Removed `packapi` and `unity2` from the root-owned credential file, upstream definitions, and
+  every dated ledger entry. Credentials now contain 11 retained accounts and definitions contain
+  14 visible upstreams.
+- Preserved database channels 15, 21, 22, and 29 for history; all four remain disabled (`status=2`).
+- Recovery backup: `/root/maintenance-backups/20260723-190947-retire-packapi-unity2`.
+  The credential copy is `0600 root:root`.
+
+### Replay and reconciliation (`2026-07-22`)
+
+- Collection replay: 11 complete, 0 incomplete. Actual upstream deduction: `47.762002` CNY.
+- Audit replay: 10 enabled channels, 8 available, 2 failed. Availability failures remain blockers.
+- Reconciliation: required 11/11 complete, optional 3, overall complete.
+- Local NewAPI billing: `78.270516` CNY across 327 calls; 323 mapped plus four unassigned
+  zero-cost errors. Difference: `30.508514` CNY; gross margin: `0.3898`.
+- Any future unassigned log with positive billed quota now makes reconciliation incomplete.
+
+### Corrected price transaction
+
+- Manual review found that `low_margin_risk` and `price_below_upstream_*` alerts were excluding the
+  actual-cost evidence needed to correct those risks. Those named pricing signals no longer block;
+  availability, billing-integrity, global, and unknown critical alerts still fail closed.
+- Corrected dry-run: 798 discovered, 7 applicable, 791 retained.
+- Corrected live transaction: `BEGIN`, `DO`, `COMMIT`.
+- Pricing rollback:
+  `/opt/ai-api-stack/channel-monitor/backups/pricing/pricing-options-2026-07-22-20260723T112107Z.json`.
+
+| Model | Highest trusted actual cost | Applied base value | Customer price at 0.15 | Check |
+|---|---:|---:|---:|---:|
+| gpt-4o-mini input/output | 0.15 / 0.60 CNY/M | 1.50 / 6.00 CNY/M | 0.225 / 0.90 CNY/M | 1.5x |
+| gpt-5.5 input/output | 5.00 / 40.00 CNY/M | 50.00 / 400.00 CNY/M | 7.50 / 60.00 CNY/M | 1.5x |
+| gpt-5.6-sol input/output | 1.03 / 6.18 CNY/M | 10.30 / 61.80 CNY/M | 1.545 / 9.27 CNY/M | 1.5x |
+| gpt-image-2 | 0.525757 CNY/call | ModelPrice 5.25757 | 0.7886355 CNY/call | 1.5x |
+| grok-video-3 | 1.00 CNY/call | ModelPrice 10 | 1.50 CNY/call | 1.5x |
+| omni-flash | 2.80 CNY/call | ModelPrice 28 | 4.20 CNY/call | 1.5x |
+| wan2.6-t2v | 5.00 CNY/call | ModelPrice 50 | 7.50 CNY/call | 1.5x |
+
+### Final checks
+
+- 38 focused Python tests pass; Python compilation, deployed JavaScript syntax, and
+  `git diff --check` pass.
+- Production DB values, uniform group ratio `0.15`, ledger completeness, monitor arithmetic,
+  retired-slug absence, and disabled historical channel rows were independently re-read and asserted.
+- The local workstation did not have a Go executable, and this follow-up changed no Go files.

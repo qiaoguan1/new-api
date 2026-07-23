@@ -39,6 +39,11 @@ DEFAULT_MAX_CHANGE_RATIO = 5.0
 DB_USER = os.environ.get("CHANNEL_MONITOR_DB_USER", "newapi")
 DB_NAME = os.environ.get("CHANNEL_MONITOR_DB_NAME", "new-api")
 OPTION_KEYS = ("ModelRatio", "CompletionRatio", "ModelPrice")
+NON_BLOCKING_PRICING_ALERTS = {
+    "low_margin_risk",
+    "price_below_upstream_input",
+    "price_below_upstream_output",
+}
 
 
 class PricingError(RuntimeError):
@@ -198,6 +203,8 @@ def build_audit_policy(daily_audit, day):
     blocked_models = set()
     for alert in daily_audit.get("alerts") or []:
         if not isinstance(alert, dict) or alert.get("severity") != "critical":
+            continue
+        if alert.get("type") in NON_BLOCKING_PRICING_ALERTS:
             continue
         channel_id = alert.get("channel_id")
         model = alert.get("model")

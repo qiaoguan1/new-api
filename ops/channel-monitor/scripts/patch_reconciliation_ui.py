@@ -75,9 +75,9 @@ function renderReconciliation(business) {
   dateBox.textContent = `核对 UTC 日期：${reconciliation.date || business?.date || "-"}`;
   summaryBox.innerHTML = `
     <span class="${complete ? "recon-ok" : "recon-alert"}">${complete ? "全量对账完成" : "对账未完成，自动改价已安全阻断"}</span>
-    <span>完整 ${fmtInt(totals.complete_upstreams)} / ${fmtInt(totals.expected_upstreams)} 家</span>
-    <span>未完成 ${fmtInt(totals.incomplete_upstreams)} 家</span>
-    <span>缺凭证 ${fmtInt(totals.credentialless_upstreams)} 家</span>
+    <span>必需完整 ${fmtInt(totals.complete_required_upstreams)} / ${fmtInt(totals.required_upstreams)} 家</span>
+    <span>必需未完成 ${fmtInt(totals.incomplete_required_upstreams)} 家</span>
+    <span>非必需 ${fmtInt(totals.optional_upstreams)} 家</span>
     <span>本站 ${fmtCny(totals.local_billed_cny, 6)}</span>
     <span>本站调用 ${fmtInt(totals.local_calls)}（未归属 ${fmtInt(totals.unassigned_local_calls)}）</span>
     <span>已获取上游 ${fmtCny(totals.upstream_actual_cost_cny, 6)}</span>

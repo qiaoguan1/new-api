@@ -284,7 +284,7 @@ class PricingPlanTests(unittest.TestCase):
                 "severity": "critical",
                 "channel_id": 41,
                 "model": "overpriced-model",
-                "type": "price_below_upstream_input",
+                "type": "billing_data_mismatch",
             }],
         )
         daily_ledger = ledger(
@@ -303,6 +303,57 @@ class PricingPlanTests(unittest.TestCase):
 
         self.assertEqual(decisions["overpriced-model"]["reason"], "critical_model_alert")
         self.assertEqual(decisions["healthy-video"]["action"], "apply")
+
+    def test_price_below_cost_alert_is_a_pricing_signal_not_a_blocker(self):
+        daily_audit = audit(
+            channel(41, "video", ["underpriced-model"]),
+            alerts=[{
+                "severity": "critical",
+                "channel_id": 41,
+                "model": "underpriced-model",
+                "type": "price_below_upstream_input",
+            }],
+        )
+
+        result = pricing.build_pricing_plan(
+            ledger(video=source(**{"underpriced-model": text_cost(5.0, 40.0)})),
+            daily_audit,
+            DAY,
+            self.current_options(),
+            max_change_ratio=5.0,
+        )
+
+        decision = result["decisions"][0]
+        self.assertEqual(decision["action"], "apply")
+        self.assertEqual(decision["input_sell_cny_per_m"], 7.5)
+        self.assertEqual(decision["output_sell_cny_per_m"], 60.0)
+
+    def test_low_margin_alert_keeps_highest_trusted_cost(self):
+        daily_audit = audit(
+            channel(1, "lower", ["image-model"]),
+            channel(2, "higher", ["image-model"]),
+            alerts=[{
+                "severity": "critical",
+                "channel_id": 2,
+                "type": "low_margin_risk",
+            }],
+        )
+
+        result = pricing.build_pricing_plan(
+            ledger(
+                lower=source(**{"image-model": fixed_cost(0.1)}),
+                higher=source(**{"image-model": fixed_cost(0.5)}),
+            ),
+            daily_audit,
+            DAY,
+            self.current_options(),
+            max_change_ratio=5.0,
+        )
+
+        decision = result["decisions"][0]
+        self.assertEqual(decision["action"], "apply")
+        self.assertEqual(decision["worst_source"], "higher")
+        self.assertEqual(decision["sell_cny_per_call"], 0.75)
 
     def test_excessive_movement_is_skipped(self):
         options = self.current_options()

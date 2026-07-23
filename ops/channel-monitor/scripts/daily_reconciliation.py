@@ -101,6 +101,14 @@ def build_reconciliation(
 
         local = local_by_slug.get(slug) or {}
         local_amount = _round(local.get("local_billed_cny"))
+        local_calls = int(local.get("calls") or 0)
+        enabled_channels = enabled_by_slug.get(slug, 0)
+        required_for_reconciliation = bool(
+            has_credentials
+            or enabled_channels > 0
+            or local_calls > 0
+            or local_amount > 0
+        )
         actual = _round(entry.get("day_log_cost_cny")) if complete else None
         delta = round(local_amount - actual, 6) if actual is not None else None
         row = {
@@ -109,16 +117,17 @@ def build_reconciliation(
             "collection_status": status,
             "actual_log_complete": complete,
             "has_credentials": has_credentials,
+            "required_for_reconciliation": required_for_reconciliation,
             "billing_api": (entry or {}).get("billing_api"),
             "collection_error": (entry or {}).get("collection_error")
             or (entry or {}).get("last_attempt_error"),
             "last_attempt_status": (entry or {}).get("last_attempt_status"),
             "fetched_at": (entry or {}).get("fetched_at"),
-            "enabled_channels": enabled_by_slug.get(slug, 0),
+            "enabled_channels": enabled_channels,
             "channel_count": channel_count_by_slug.get(slug, 0),
             "upstream_log_rows": (entry or {}).get("day_log_rows") if complete else None,
             "upstream_actual_cost_cny": actual,
-            "local_calls": int(local.get("calls") or 0),
+            "local_calls": local_calls,
             "local_success_calls": int(local.get("success_calls") or 0),
             "local_error_calls": int(local.get("error_calls") or 0),
             "local_billed_cny": local_amount,
@@ -131,9 +140,16 @@ def build_reconciliation(
 
     complete_rows = [row for row in rows if row["actual_log_complete"]]
     incomplete_rows = [row for row in rows if not row["actual_log_complete"]]
+    required_rows = [row for row in rows if row["required_for_reconciliation"]]
+    complete_required_rows = [row for row in required_rows if row["actual_log_complete"]]
+    incomplete_required_rows = [row for row in required_rows if not row["actual_log_complete"]]
+    optional_rows = [row for row in rows if not row["required_for_reconciliation"]]
     local_total = _round(all_local_billed)
-    actual_total = _round(sum(row["upstream_actual_cost_cny"] for row in complete_rows))
-    all_complete = not incomplete_rows
+    actual_total = _round(
+        sum(row["upstream_actual_cost_cny"] for row in complete_required_rows)
+    )
+    unassigned_billable_usage = unassigned_local_billed > 0
+    all_complete = not incomplete_required_rows and not unassigned_billable_usage
     difference = round(local_total - actual_total, 6) if all_complete else None
     return {
         "date": day,
@@ -143,6 +159,10 @@ def build_reconciliation(
             "expected_upstreams": len(rows),
             "complete_upstreams": len(complete_rows),
             "incomplete_upstreams": len(incomplete_rows),
+            "required_upstreams": len(required_rows),
+            "complete_required_upstreams": len(complete_required_rows),
+            "incomplete_required_upstreams": len(incomplete_required_rows),
+            "optional_upstreams": len(optional_rows),
             "credentialless_upstreams": sum(1 for row in rows if not row["has_credentials"]),
             "local_billed_cny": local_total,
             "upstream_actual_cost_cny": actual_total,
@@ -152,5 +172,6 @@ def build_reconciliation(
             "mapped_local_calls": sum(row["local_calls"] for row in rows),
             "unassigned_local_calls": unassigned_local_calls,
             "unassigned_local_billed_cny": _round(unassigned_local_billed),
+            "unassigned_billable_usage": unassigned_billable_usage,
         },
     }

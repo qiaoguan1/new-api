@@ -20,3 +20,8 @@
 - [x] T018 Back up and deploy collector, pricing worker, monitor generator, and static UI
 - [x] T019 Run 08:20/08:30/08:40 plus monitor refresh for 2026-07-22
 - [x] T020 Verify collection coverage, reconciliation arithmetic, retained prices, and UI manually
+- [x] T021 Retire packapi and unity2 from credentials, configuration, and collection ledgers
+- [x] T022 Distinguish required upstreams from disabled credentialless unused history
+- [x] T023 Keep pricing-risk alerts visible without excluding trusted actual-cost evidence
+- [x] T024 Replay collection, audit, dry-run, live pricing, and monitor generation for 2026-07-22
+- [x] T025 Verify the committed database options, reconciliation totals, disabled history, and rollback files
