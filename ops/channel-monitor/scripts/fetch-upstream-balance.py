@@ -30,6 +30,16 @@ PAGE_SIZE = 100
 MAX_PAGES = 100
 QUOTA_PER_USD = 500000.0
 UA = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/126 Safari/537.36"
+PRICING_MODEL_FIELDS = (
+    "model_name",
+    "model_ratio",
+    "completion_ratio",
+    "cache_ratio",
+    "create_cache_ratio",
+    "billing_mode",
+    "billing_expr",
+    "enable_groups",
+)
 
 
 def read_json(path, default):
@@ -115,6 +125,53 @@ def standard_self(session, origin):
     if response.status_code != 200 or not body.get("success"):
         raise RuntimeError(f"classic self failed: {clean_error(body.get('message'))}")
     return body.get("data") or {}
+
+
+def standard_pricing_metadata(session, origin):
+    """Fetch and sanitize account-authenticated, read-only pricing metadata."""
+    response = session.get(origin + "/api/pricing", timeout=TIMEOUT)
+    body = json_response(response, "classic pricing")
+    rows = body.get("data")
+    if response.status_code != 200 or not body.get("success") or not isinstance(rows, list):
+        raise RuntimeError(
+            f"classic pricing failed (http {response.status_code}): "
+            f"{clean_error(body.get('message'))}"
+        )
+    models = []
+    for row in rows:
+        if not isinstance(row, dict) or not str(row.get("model_name") or "").strip():
+            continue
+        models.append({key: row.get(key) for key in PRICING_MODEL_FIELDS if key in row})
+    response = session.get(origin + "/api/user/models", timeout=TIMEOUT)
+    body_models = json_response(response, "classic account models")
+    raw_account_models = body_models.get("data")
+    if (
+        response.status_code != 200
+        or not body_models.get("success")
+        or not isinstance(raw_account_models, list)
+    ):
+        raise RuntimeError(
+            f"classic account models failed (http {response.status_code}): "
+            f"{clean_error(body_models.get('message'))}"
+        )
+    account_models = sorted(
+        {
+            str(item.get("id") or item.get("model") or "").strip()
+            if isinstance(item, dict)
+            else str(item).strip()
+            for item in raw_account_models
+        }
+        - {""}
+    )
+    group_ratio = body.get("group_ratio")
+    return {
+        "status": "complete",
+        "pricing_version": str(body.get("pricing_version") or ""),
+        "group_ratio": group_ratio if isinstance(group_ratio, dict) else {},
+        "models": models,
+        "account_models": account_models,
+        "fetched_at": int(time.time()),
+    }
 
 
 def standard_logs(session, origin, day):
@@ -383,7 +440,19 @@ def previous_balance(ledger, day, slug):
     return None
 
 
-def complete_entry(adapter, rate, group, balance, used, cost, rows, per_model, real_cost, prior):
+def complete_entry(
+    adapter,
+    rate,
+    group,
+    balance,
+    used,
+    cost,
+    rows,
+    per_model,
+    real_cost,
+    prior,
+    pricing_metadata=None,
+):
     delta = None
     if prior is not None and balance is not None:
         change = round(prior - balance, 6)
@@ -402,6 +471,7 @@ def complete_entry(adapter, rate, group, balance, used, cost, rows, per_model, r
         "day_log_rows": rows,
         "per_model_cost_usd": per_model,
         "per_model_real_cost": real_cost,
+        "pricing_metadata": pricing_metadata,
         "prev_balance_usd": prior,
         "day_balance_delta_usd": delta,
         "fetched_at": int(time.time()),
@@ -430,6 +500,16 @@ def collect_one(slug, credential, website, ledger, day):
         group = standard_login(session, origin, username, password)
         self_data = standard_self(session, origin)
         rows, quota, per_model_quota, details = standard_logs(session, origin, day)
+        try:
+            pricing_metadata = standard_pricing_metadata(session, origin)
+        except Exception as exc:
+            pricing_metadata = {
+                "status": "unavailable",
+                "error": clean_error(exc, (username, password)),
+                "models": [],
+                "account_models": [],
+                "fetched_at": int(time.time()),
+            }
         return complete_entry(
             "newapi_classic",
             rate,
@@ -441,6 +521,7 @@ def collect_one(slug, credential, website, ledger, day):
             {model: q2usd(value) for model, value in per_model_quota.items()},
             classic_model_real_costs(details, rate),
             prior,
+            pricing_metadata=pricing_metadata,
         )
     except Exception as exc:
         errors.append(clean_error(exc, (username, password)))

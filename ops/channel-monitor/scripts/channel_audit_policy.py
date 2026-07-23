@@ -73,6 +73,38 @@ def select_probe_model(channel):
     return pairs[0][1]
 
 
+def select_metadata_probe_model(
+    channel, advertised_models, pricing_rows, upstream_group="", account_models=None
+):
+    """Choose a configured model proven by all read-only metadata sources."""
+    advertised = {
+        str(model).strip() for model in advertised_models or [] if str(model).strip()
+    }
+    catalog = {
+        str(row.get("model_name") or "").strip(): row
+        for row in pricing_rows or []
+        if isinstance(row, dict) and str(row.get("model_name") or "").strip()
+    }
+    account_catalog = None
+    if account_models is not None:
+        account_catalog = {
+            str(model).strip() for model in account_models if str(model).strip()
+        }
+    for _, upstream_model in configured_model_pairs(channel):
+        row = catalog.get(upstream_model)
+        if (
+            upstream_model not in advertised
+            or not row
+            or (account_catalog is not None and upstream_model not in account_catalog)
+        ):
+            continue
+        enable_groups = parse_models(row.get("enable_groups"))
+        if enable_groups and upstream_group and upstream_group not in enable_groups:
+            continue
+        return upstream_model
+    return ""
+
+
 def probe_endpoint(model, default_endpoint="/v1/chat/completions"):
     if is_image_model(model):
         return "/v1/images/generations"

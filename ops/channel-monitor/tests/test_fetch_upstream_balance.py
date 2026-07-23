@@ -1,6 +1,7 @@
 import importlib.util
 import pathlib
 import unittest
+from unittest import mock
 
 
 SCRIPT_PATH = pathlib.Path(__file__).resolve().parents[1] / "scripts" / "fetch-upstream-balance.py"
@@ -11,6 +12,95 @@ SPEC.loader.exec_module(collector)
 
 
 class UsageV1AggregationTests(unittest.TestCase):
+    def test_authenticated_pricing_metadata_is_sanitized(self):
+        session = mock.Mock()
+        pricing_response = mock.Mock(status_code=200)
+        pricing_response.json.return_value = {
+            "success": True,
+            "pricing_version": "v1",
+            "group_ratio": {"default": 1},
+            "data": [{
+                "model_name": "video-pro-720p",
+                "model_ratio": 2.5,
+                "completion_ratio": 1,
+                "enable_groups": ["default"],
+                "billing_mode": "ratio",
+                "billing_expr": "",
+                "secret_internal_field": "must-not-persist",
+            }],
+        }
+        account_models_response = mock.Mock(status_code=200)
+        account_models_response.json.return_value = {
+            "success": True,
+            "data": ["video-pro-720p", {"id": "gpt-5.6-sol"}],
+        }
+        session.get.side_effect = [pricing_response, account_models_response]
+
+        metadata = collector.standard_pricing_metadata(session, "https://example.test")
+
+        self.assertEqual(metadata["status"], "complete")
+        self.assertEqual(metadata["models"][0]["model_name"], "video-pro-720p")
+        self.assertEqual(metadata["account_models"], ["gpt-5.6-sol", "video-pro-720p"])
+        self.assertNotIn("secret_internal_field", metadata["models"][0])
+
+    def test_account_model_metadata_failure_is_fail_closed(self):
+        pricing_response = mock.Mock(status_code=200)
+        pricing_response.json.return_value = {"success": True, "data": []}
+        models_response = mock.Mock(status_code=401)
+        models_response.json.return_value = {"success": False, "message": "unauthorized"}
+        session = mock.Mock()
+        session.get.side_effect = [pricing_response, models_response]
+
+        with self.assertRaisesRegex(RuntimeError, "account models failed"):
+            collector.standard_pricing_metadata(session, "https://example.test")
+
+    def test_complete_entry_preserves_pricing_metadata(self):
+        metadata = {"status": "complete", "models": [{"model_name": "gpt-5.6-sol"}]}
+        entry = collector.complete_entry(
+            "newapi_classic", 1.0, "default", 5.0, 1.0, 0.0, 0, {}, {}, None,
+            pricing_metadata=metadata,
+        )
+
+        self.assertEqual(entry["pricing_metadata"], metadata)
+
+    def test_metadata_failure_preserves_complete_actual_cost_and_redacts_secret(self):
+        with (
+            mock.patch.object(collector.requests, "Session"),
+            mock.patch.object(collector, "standard_login", return_value="default"),
+            mock.patch.object(
+                collector,
+                "standard_self",
+                return_value={"quota": 5_000_000, "used_quota": 1_000_000},
+            ),
+            mock.patch.object(
+                collector,
+                "standard_logs",
+                return_value=(1, 500_000, {"gpt-5.6-sol": 500_000}, {}),
+            ),
+            mock.patch.object(
+                collector,
+                "standard_pricing_metadata",
+                side_effect=RuntimeError("upstream echoed super-secret"),
+            ),
+        ):
+            entry = collector.collect_one(
+                "paisio",
+                {
+                    "username": "account-name",
+                    "password": "super-secret",
+                    "website_url": "https://example.test",
+                    "rate": 1,
+                },
+                "",
+                {"days": {}},
+                "2026-07-22",
+            )
+
+        self.assertEqual(entry["collection_status"], "complete")
+        self.assertEqual(entry["day_log_cost_cny"], 1.0)
+        self.assertEqual(entry["pricing_metadata"]["status"], "unavailable")
+        self.assertNotIn("super-secret", entry["pricing_metadata"]["error"])
+
     def test_uses_account_total_cost_not_internal_actual_cost(self):
         total, per_model, real = collector.aggregate_v1_rows(
             [
