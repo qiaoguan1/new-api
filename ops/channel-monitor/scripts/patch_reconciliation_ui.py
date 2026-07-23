@@ -72,7 +72,7 @@ function renderReconciliation(business) {
   }
   const totals = reconciliation.totals || {};
   const complete = reconciliation.complete === true;
-  dateBox.textContent = `核对 UTC 日期：${reconciliation.date || business?.date || "-"}`;
+  dateBox.textContent = `核对北京时间业务日：${reconciliation.date || business?.date || "-"}`;
   summaryBox.innerHTML = `
     <span class="${complete ? "recon-ok" : "recon-alert"}">${complete ? "全量对账完成" : "对账未完成，自动改价已安全阻断"}</span>
     <span>完整 ${fmtInt(totals.complete_upstreams)} / ${fmtInt(totals.expected_upstreams)} 家</span>

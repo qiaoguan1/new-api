@@ -2,7 +2,7 @@
 """Apply daily NewAPI prices from trusted model-level upstream billing costs.
 
 The worker has no model allowlist. It discovers models from the matching daily
-channel audit and the previous complete UTC day's upstream billing ledger.
+channel audit and the previous complete Beijing day's upstream billing ledger.
 Only the intersection of a healthy enabled channel and a positive model-level
 actual-cost sample can change a price.
 
@@ -14,13 +14,15 @@ Pricing contract:
 """
 
 import argparse
-import datetime
 import json
 import math
 import os
 import pathlib
 import subprocess
 import sys
+import time
+
+from monitor_time import beijing_now, resolve_beijing_business_day
 
 
 ROOT = pathlib.Path(os.environ.get("CHANNEL_MONITOR_ROOT", "/opt/ai-api-stack/channel-monitor"))
@@ -66,15 +68,9 @@ def write_json(path, value):
     os.replace(temporary, path)
 
 
-def target_utc_day():
-    """Return the previous complete UTC day, with an operator override for replay."""
-    override = os.environ.get("CHANNEL_MONITOR_DAY", "").strip()
-    if override:
-        datetime.datetime.strptime(override, "%Y-%m-%d")
-        return override
-    return (datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=1)).strftime(
-        "%Y-%m-%d"
-    )
+def target_beijing_day():
+    """Return the previous complete Beijing day, with an override for replay."""
+    return resolve_beijing_business_day(os.environ.get("CHANNEL_MONITOR_DAY", ""))
 
 
 def _psql_command(sql):
@@ -478,7 +474,7 @@ def build_pricing_plan(ledger, daily_audit, day, current_options, *, max_change_
 
 def backup_pricing_options(day, options):
     """Create a mode-0600 pricing-only backup before a live transaction."""
-    timestamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    timestamp = beijing_now().strftime("%Y%m%dT%H%M%S%z")
     path = BACKUP_DIR / f"pricing-options-{day}-{timestamp}.json"
     write_json(path, {"date": day, "created_at": timestamp, "options": options})
     try:
@@ -532,8 +528,8 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--dry-run", action="store_true", help="calculate without database writes")
     args = parser.parse_args(argv)
-    day = target_utc_day()
-    generated_at = int(datetime.datetime.now(datetime.timezone.utc).timestamp())
+    day = target_beijing_day()
+    generated_at = int(time.time())
     try:
         ledger = read_json(LEDGER_PATH, required=True)
         daily_audit = read_json(AUDIT_PATH, required=True)
