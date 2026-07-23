@@ -6,4 +6,4 @@
 - [x] T004 Implement alert classification and structured recovery decisions.
 - [x] T005 Run focused/full tests and publish comprehensive review evidence.
 - [x] T006 Back up, deploy, dry-run, execute, and verify `gpt-5.6-sol`.
-- [ ] T007 Complete ten validation rounds, commit, push, and open the PR.
+- [x] T007 Complete ten validation rounds, commit, push, and open the PR.
