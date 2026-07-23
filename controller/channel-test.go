@@ -94,6 +94,14 @@ func testChannel(channel *model.Channel, testModel string, endpointType string, 
 
 	endpointType = normalizeChannelTestEndpoint(channel, testModel, endpointType)
 
+	// Topaz status/model discovery is free and validates the key without creating a paid video job.
+	if channel.Type == constant.ChannelTypeTopaz {
+		if _, err := fetchChannelUpstreamModelIDs(channel); err != nil {
+			return testResult{localErr: err}
+		}
+		return testResult{}
+	}
+
 	// video model (seedance) uses async RelayTask, skip sync relay test
 	if channel.Type == constant.ChannelTypeDoubaoVideo &&
 		strings.Contains(strings.ToLower(testModel), "seedance") {
