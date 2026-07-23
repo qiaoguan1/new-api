@@ -250,6 +250,7 @@ export function ChannelMonitor() {
           <div className='rounded-md border border-blue-200 bg-blue-50 p-3 text-sm text-blue-800 dark:border-blue-900 dark:bg-blue-950/40 dark:text-blue-200'>
             新增渠道需要两步：先在“添加渠道”中配置 NewAPI
             路由，再到“上游采集配置”填写账单账号与充值换算率。两步完成后，该渠道才会纳入每日实际扣费对账与自动改价。
+            渠道名称统一使用“上游名 · 用途”，例如“Paisio · 视频”。
           </div>
 
           <div>
