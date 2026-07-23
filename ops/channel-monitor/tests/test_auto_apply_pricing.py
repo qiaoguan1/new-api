@@ -83,6 +83,19 @@ class PricingPlanTests(unittest.TestCase):
         self.assertEqual(decisions["brand-new-text"]["action"], "apply")
         self.assertEqual(decisions["brand-new-video"]["action"], "apply")
 
+    def test_explicit_configured_inventory_excludes_unrelated_catalog_models(self):
+        source_channel = channel(
+            41,
+            "nodyhub",
+            ["grok-video-3", "unrelated-upstream-catalog-model"],
+        )
+        source_channel["configured_models"] = ["grok-video-3"]
+
+        policy = pricing.build_audit_policy(audit(source_channel), DAY)
+
+        self.assertEqual(policy["discovered_models"], {"grok-video-3"})
+        self.assertEqual(policy["model_sources"], {"grok-video-3": {"nodyhub"}})
+
     def test_text_and_fixed_prices_equal_actual_cost_times_one_point_five(self):
         daily_audit = audit(channel(1, "a", ["text-model", "image-model"]))
         daily_ledger = ledger(
@@ -189,6 +202,33 @@ class PricingPlanTests(unittest.TestCase):
         )
 
         self.assertEqual(result["decisions"][0]["worst_input_source"], "healthy")
+
+    def test_critical_model_alert_does_not_block_unrelated_channel_models(self):
+        daily_audit = audit(
+            channel(41, "video", ["overpriced-model", "healthy-video"]),
+            alerts=[{
+                "severity": "critical",
+                "channel_id": 41,
+                "model": "overpriced-model",
+                "type": "price_below_upstream_input",
+            }],
+        )
+        daily_ledger = ledger(
+            video=source(
+                **{
+                    "overpriced-model": fixed_cost(100.0),
+                    "healthy-video": fixed_cost(0.8),
+                }
+            )
+        )
+
+        result = pricing.build_pricing_plan(
+            daily_ledger, daily_audit, DAY, self.current_options(), max_change_ratio=5.0
+        )
+        decisions = {item["model"]: item for item in result["decisions"]}
+
+        self.assertEqual(decisions["overpriced-model"]["reason"], "critical_model_alert")
+        self.assertEqual(decisions["healthy-video"]["action"], "apply")
 
     def test_excessive_movement_is_skipped(self):
         options = self.current_options()

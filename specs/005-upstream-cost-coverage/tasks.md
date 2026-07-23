@@ -1,0 +1,15 @@
+# Tasks: Upstream Credential and Cost Coverage Repair
+
+- [x] T001 Create Issue #5, add it to the project, and set `In Progress`
+- [x] T002 Create the issue branch and document the specification
+- [x] T003 Back up and securely import recognized upstream accounts
+- [x] T004 Validate account login, balance, and billing-log access without exposing secrets
+- [x] T005 Version the production fetch/audit integration patches without runtime data
+- [x] T006 Add failing tests for configured-model intersection, mapping, and image probe selection
+- [x] T007 Implement audit inventory and image-channel probe fixes
+- [x] T008 Make automatic pricing consume the explicit configured inventory
+- [x] T009 Run focused tests, syntax checks, diff review, and secret scan
+- [x] T010 Back up and deploy reviewed production scripts
+- [x] T011 Run the 08:20 fetch, 08:30 audit, and 08:40 pricing jobs sequentially
+- [x] T012 Manually verify account coverage, model counts, costs, database options, and public prices
+- [ ] T013 Commit, push, open/update the PR, and move the Issue to review

@@ -167,6 +167,13 @@ def _positive_number(value):
 
 
 def _model_names(channel):
+    configured = channel.get("configured_models")
+    if isinstance(configured, list):
+        return {
+            name.strip()
+            for name in configured
+            if isinstance(name, str) and name.strip()
+        }
     models = channel.get("models") or {}
     if not isinstance(models, dict):
         return set()
@@ -195,10 +202,10 @@ def build_audit_policy(daily_audit, day):
         model = alert.get("model")
         if channel_id is None and not model:
             raise PricingError(f"global critical audit alert: {alert.get('type', 'unknown')}")
-        if channel_id is not None:
-            blocked_channels.add(channel_id)
         if isinstance(model, str) and model:
             blocked_models.add(model)
+        elif channel_id is not None:
+            blocked_channels.add(channel_id)
 
     discovered_models = set()
     healthy_sources = set()
