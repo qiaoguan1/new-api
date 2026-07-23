@@ -3,6 +3,7 @@ import { createFileRoute, redirect } from '@tanstack/react-router'
 import { useAuthStore } from '@/stores/auth-store'
 import { ROLE } from '@/lib/roles'
 import { Channels } from '@/features/channels'
+import { channelActionToInitialDialog } from '@/features/channels/lib/channel-entry'
 
 const channelsSearchSchema = z.object({
   page: z.number().optional().catch(1),
@@ -12,6 +13,7 @@ const channelsSearchSchema = z.object({
   type: z.array(z.string()).optional().catch([]),
   group: z.array(z.string()).optional().catch([]),
   model: z.string().optional().catch(''),
+  action: z.enum(['create']).optional().catch(undefined),
 })
 
 export const Route = createFileRoute('/_authenticated/channels/')({
@@ -25,5 +27,10 @@ export const Route = createFileRoute('/_authenticated/channels/')({
     }
   },
   validateSearch: channelsSearchSchema,
-  component: Channels,
+  component: ChannelsRoute,
 })
+
+function ChannelsRoute() {
+  const { action } = Route.useSearch()
+  return <Channels initialDialog={channelActionToInitialDialog(action)} />
+}
