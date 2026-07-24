@@ -64,3 +64,24 @@ All 10 rounds passed the same independent checks:
 - core container health correct;
 - status endpoint 200, internal monitor anonymous access 401, public model
   metrics 200 with only the allowed five fields.
+
+## 08:40 Cron Follow-up
+
+- On 2026-07-24 the 08:20 collection and 08:30 audit ran, but the 08:40 cron
+  entry ended in the two literal characters `\r`, so its shell redirection did
+  not reach the pricing worker.
+- Backups were created before both diagnostic passes:
+  `/opt/ai-api-stack/backups/issue19-crontab-crlf-20260724-150943` and
+  `/opt/ai-api-stack/backups/issue19-crontab-literal-cr-20260724-151317`.
+- A tracked, tested crontab sanitizer now handles CRLF, bare CR, and a literal
+  trailing `\r`, rejects NUL/empty inputs, and writes exactly one terminal LF.
+- The installed crontab contains neither a CR byte nor a literal `\r` suffix;
+  the 08:40 line ends exactly at `2>&1`.
+- The command extracted from the installed cron entry was executed unchanged at
+  15:13 Beijing time. It produced a new successful live run for 2026-07-23:
+  8 applicable models, 801 unchanged, zero errors, and a new pricing backup at
+  `/opt/ai-api-stack/channel-monitor/backups/pricing/pricing-options-2026-07-23-20260724T151318+0800.json`.
+- Full channel-monitor suite after this follow-up: 90/90 passed.
+- Ten follow-up production rounds all confirmed: clean cron bytes, one exact
+  08:40 entry, latest live result 8 applied / 801 unchanged, zero critical
+  alerts, deployed sanitizer hash match, and healthy NewAPI.

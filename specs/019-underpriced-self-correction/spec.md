@@ -34,6 +34,8 @@ worker from calculating that increase.
 8. The daily audit must compare the site sell price with complete model-level
    actual billing cost. An upstream catalog/list price must not be labeled as
    actual cost or create a critical underpricing alert.
+9. The production crontab must contain Unix LF line endings and no literal
+   `\r` suffix so the Beijing 08:40 pricing command reaches the worker.
 
 ## Acceptance Scenarios
 

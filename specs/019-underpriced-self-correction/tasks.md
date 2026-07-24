@@ -7,3 +7,5 @@
 - [x] T005 Run focused/full tests and publish comprehensive review evidence.
 - [x] T006 Back up, deploy, dry-run, execute, and verify `gpt-5.6-sol`.
 - [x] T007 Complete ten validation rounds, commit, push, and open the PR.
+- [x] T008 Normalize the broken 08:40 cron entry, replay it unchanged, and pass
+  ten follow-up production validation rounds.
