@@ -38,6 +38,7 @@ import (
 	"github.com/QuantumNous/new-api/relay/channel/task/kling"
 	tasksora "github.com/QuantumNous/new-api/relay/channel/task/sora"
 	"github.com/QuantumNous/new-api/relay/channel/task/suno"
+	"github.com/QuantumNous/new-api/relay/channel/task/topaz"
 	taskvertex "github.com/QuantumNous/new-api/relay/channel/task/vertex"
 	taskVidu "github.com/QuantumNous/new-api/relay/channel/task/vidu"
 	"github.com/QuantumNous/new-api/relay/channel/tencent"
@@ -159,6 +160,8 @@ func GetTaskAdaptor(platform constant.TaskPlatform) channel.TaskAdaptor {
 			return &taskGemini.TaskAdaptor{}
 		case constant.ChannelTypeMiniMax:
 			return &hailuo.TaskAdaptor{}
+		case constant.ChannelTypeTopaz:
+			return &topaz.TaskAdaptor{}
 		}
 	}
 	return nil
