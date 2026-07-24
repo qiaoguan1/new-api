@@ -1,5 +1,7 @@
 # Verification
 
+**Pull request**: [#27](https://github.com/qiaoguan1/new-api/pull/27)
+
 ## Production deployment
 
 - Installed worker:
