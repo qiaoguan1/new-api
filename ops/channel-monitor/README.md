@@ -12,6 +12,18 @@ Production schedule:
 - 08:30: audit channel availability, price metadata, and actual-cost coverage.
 - 08:40: calculate and atomically apply eligible model prices.
 
+Before installing a crontab copied through Windows tooling, normalize it with:
+
+```text
+crontab -l > /tmp/root.crontab.current &&
+python3 channel-monitor/scripts/sanitize_crontab.py \
+  < /tmp/root.crontab.current > /tmp/root.crontab.clean &&
+crontab /tmp/root.crontab.clean
+```
+
+This removes CRLF/bare carriage returns and an accidental literal `\r` suffix
+that can prevent the final cron command from reaching the pricing worker.
+
 The fetch worker supports classic NewAPI billing logs and the newer `/api/v1`
 auth/usage API. Every credential gets a dated `complete` or `incomplete` ledger
 entry. A zero cost is trusted only after all log pages were fetched successfully.

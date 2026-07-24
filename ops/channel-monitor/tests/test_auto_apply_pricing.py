@@ -280,32 +280,151 @@ class PricingPlanTests(unittest.TestCase):
 
         self.assertEqual(result["decisions"][0]["worst_input_source"], "healthy")
 
-    def test_critical_model_alert_does_not_block_unrelated_channel_models(self):
+    def test_underpriced_model_self_corrects_from_worst_trusted_actual_costs(self):
+        options = self.current_options()
+        options["ModelRatio"]["underpriced-model"] = 5.15
+        options["CompletionRatio"]["underpriced-model"] = 6.0
         daily_audit = audit(
-            channel(41, "video", ["overpriced-model", "healthy-video"]),
+            channel(41, "a", ["underpriced-model", "healthy-model"]),
+            channel(42, "b", ["underpriced-model"]),
             alerts=[{
                 "severity": "critical",
                 "channel_id": 41,
-                "model": "overpriced-model",
+                "model": "underpriced-model",
                 "type": "price_below_upstream_input",
             }],
         )
         daily_ledger = ledger(
-            video=source(
+            a=source(
                 **{
-                    "overpriced-model": fixed_cost(100.0),
-                    "healthy-video": fixed_cost(0.8),
+                    "underpriced-model": text_cost(1.0, 8.0),
+                    "healthy-model": text_cost(0.5, 2.0),
                 }
-            )
+            ),
+            b=source(**{"underpriced-model": text_cost(1.03, 6.18)}),
         )
 
         result = pricing.build_pricing_plan(
-            daily_ledger, daily_audit, DAY, self.current_options(), max_change_ratio=5.0
+            daily_ledger, daily_audit, DAY, options, max_change_ratio=5.0
         )
         decisions = {item["model"]: item for item in result["decisions"]}
 
-        self.assertEqual(decisions["overpriced-model"]["reason"], "critical_model_alert")
-        self.assertEqual(decisions["healthy-video"]["action"], "apply")
+        recovered = decisions["underpriced-model"]
+        self.assertEqual(recovered["action"], "apply")
+        self.assertEqual(recovered["reason"], "underpriced_self_correction")
+        self.assertEqual(recovered["underpricing_alert_types"], ["price_below_upstream_input"])
+        self.assertEqual(recovered["worst_input_cost_cny_per_m"], 1.03)
+        self.assertEqual(recovered["worst_input_source"], "b")
+        self.assertEqual(recovered["worst_output_cost_cny_per_m"], 8.0)
+        self.assertEqual(recovered["worst_output_source"], "a")
+        self.assertEqual(recovered["old_model_ratio"], 5.15)
+        self.assertEqual(recovered["old_completion_ratio"], 6.0)
+        self.assertAlmostEqual(recovered["new_model_ratio"], 5.15)
+        self.assertAlmostEqual(recovered["new_completion_ratio"], 8.0 / 1.03)
+        self.assertAlmostEqual(recovered["input_sell_cny_per_m"], 1.545)
+        self.assertAlmostEqual(recovered["output_sell_cny_per_m"], 12.0)
+        self.assertEqual(decisions["healthy-model"]["action"], "apply")
+
+    def test_other_critical_alert_still_blocks_underpriced_model(self):
+        daily_audit = audit(
+            channel(41, "healthy", ["model"]),
+            alerts=[
+                {
+                    "severity": "critical",
+                    "channel_id": 41,
+                    "model": "model",
+                    "type": "price_below_upstream_input",
+                },
+                {
+                    "severity": "critical",
+                    "channel_id": 41,
+                    "model": "model",
+                    "type": "billing_kind_conflict",
+                },
+            ],
+        )
+
+        result = pricing.build_pricing_plan(
+            ledger(healthy=source(model=text_cost(1.0, 8.0))),
+            daily_audit,
+            DAY,
+            self.current_options(),
+            max_change_ratio=5.0,
+        )
+
+        self.assertEqual(result["decisions"][0]["action"], "skip")
+        self.assertEqual(result["decisions"][0]["reason"], "critical_model_alert")
+
+    def test_non_string_critical_alert_type_fails_closed_for_model(self):
+        result = pricing.build_pricing_plan(
+            ledger(healthy=source(model=text_cost(1.0, 8.0))),
+            audit(
+                channel(41, "healthy", ["model"]),
+                alerts=[{
+                    "severity": "critical",
+                    "channel_id": 41,
+                    "model": "model",
+                    "type": ["price_below_upstream_input"],
+                }],
+            ),
+            DAY,
+            self.current_options(),
+            max_change_ratio=5.0,
+        )
+
+        self.assertEqual(result["decisions"][0]["action"], "skip")
+        self.assertEqual(result["decisions"][0]["reason"], "critical_model_alert")
+
+    def test_underpriced_recovery_still_obeys_incomplete_collection_guard(self):
+        daily_audit = audit(
+            channel(41, "complete", ["model"]),
+            channel(42, "missing", ["model"]),
+            alerts=[{
+                "severity": "critical",
+                "channel_id": 41,
+                "model": "model",
+                "type": "price_below_upstream_input",
+            }],
+        )
+
+        result = pricing.build_pricing_plan(
+            ledger(complete=source(model=text_cost(1.0, 8.0))),
+            daily_audit,
+            DAY,
+            self.current_options(),
+            max_change_ratio=5.0,
+        )
+
+        self.assertEqual(result["decisions"][0]["action"], "skip")
+        self.assertEqual(result["decisions"][0]["reason"], "upstream_collection_incomplete")
+        self.assertEqual(result["decisions"][0]["incomplete_sources"], ["missing"])
+
+    def test_run_summary_preserves_underpricing_recovery_evidence(self):
+        plan = pricing.build_pricing_plan(
+            ledger(healthy=source(model=text_cost(1.0, 8.0))),
+            audit(
+                channel(41, "healthy", ["model"]),
+                alerts=[{
+                    "severity": "critical",
+                    "channel_id": 41,
+                    "model": "model",
+                    "type": "price_below_upstream_input",
+                }],
+            ),
+            DAY,
+            self.current_options(),
+            max_change_ratio=5.0,
+        )
+
+        decision = pricing._summary(plan, True)["decisions"][0]
+        self.assertEqual(decision["reason"], "underpriced_self_correction")
+        self.assertEqual(decision["underpricing_alert_types"], ["price_below_upstream_input"])
+        self.assertEqual(decision["worst_input_source"], "healthy")
+        self.assertEqual(decision["worst_output_source"], "healthy")
+        self.assertEqual(decision["new_model_ratio"], 5.0)
+        self.assertEqual(decision["new_completion_ratio"], 8.0)
+        self.assertEqual(decision["input_sell_cny_per_m"], 1.5)
+        self.assertEqual(decision["output_sell_cny_per_m"], 12.0)
 
     def test_excessive_movement_is_skipped(self):
         options = self.current_options()
