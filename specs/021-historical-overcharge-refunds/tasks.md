@@ -9,4 +9,4 @@
 - [x] T006 Back up production and manually reconcile the frozen dry-run.
 - [x] T007 Execute once and verify every affected user and aggregate invariant.
 - [x] T008 Prove a rerun produces zero and complete ten validation rounds.
-- [ ] T009 Commit, push, move Issue #21 to review, and open the pull request.
+- [x] T009 Commit, push, move Issue #21 to review, and open the pull request.
