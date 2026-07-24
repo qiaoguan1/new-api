@@ -30,6 +30,9 @@
 - NewAPI returns HTTP 200 and no container is unhealthy.
 - Ten final rounds passed manifest, `pg_restore`, permissions, cron uniqueness,
   NewAPI health, and container health checks.
+- GitHub reported no status checks for Pull Request #27; the repository has no
+  recorded Actions runs. The clean merge state and the local/server/production
+  evidence above are the available verification gates.
 
 ## Residual boundary
 
