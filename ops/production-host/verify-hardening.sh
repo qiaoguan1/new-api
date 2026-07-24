@@ -52,6 +52,18 @@ else
   failures=$((failures + 1))
 fi
 
+nginx_worker_gid="$(docker exec ai-api-stack-nginx-1 id -g nginx)"
+auth_metadata="$(docker exec ai-api-stack-nginx-1 \
+  stat -c '%u:%g:%a' /etc/nginx/auth/channel-monitor.htpasswd)"
+check_equal nginx_auth_permissions "$auth_metadata" "0:${nginx_worker_gid}:640"
+if docker exec -u nginx ai-api-stack-nginx-1 \
+  test -r /etc/nginx/auth/channel-monitor.htpasswd; then
+  printf 'PASS Nginx worker can read the Basic Auth file\n'
+else
+  printf 'FAIL Nginx worker cannot read the Basic Auth file\n' >&2
+  failures=$((failures + 1))
+fi
+
 if ufw status numbered | grep -Eq '8791/tcp[[:space:]]+ALLOW IN[[:space:]]+172\.18\.0\.0/16'; then
   printf 'PASS docker admin rule: 172.18.0.0/16 -> 8791/tcp\n'
 else

@@ -21,3 +21,8 @@ be tested from a machine outside the server. `rollback-hardening.sh` requires th
 exact backup directory created by the staging script and intentionally keeps UFW
 active. Set `DISABLE_UFW_ON_ROLLBACK=1` only for an explicit full firewall
 rollback after confirming another control protects TCP 8791.
+
+The verifier also requires the Channel Monitor Basic Auth file to remain
+root-owned, mode `0640`, and group-readable by the Nginx worker. Mode `0600`
+causes authenticated requests to fail with HTTP 500 even though anonymous
+requests still return HTTP 401.
