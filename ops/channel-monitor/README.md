@@ -47,3 +47,23 @@ Run a production preview without database writes:
 ```text
 python3 /opt/ai-api-stack/channel-monitor/scripts/auto-apply-pricing.py --dry-run
 ```
+
+## Historical overcharge compensation
+
+`historical-overcharge-refund.py` is a guarded one-off compensation tool. It
+uses only dated per-model actual-cost ledger evidence, recalculates successful
+requests at cost multiplied by 1.5, and emits a checksum-protected dry-run plan.
+An incomplete expected upstream blocks the entire modern ledger day.
+
+```text
+python3 /opt/ai-api-stack/channel-monitor/scripts/historical-overcharge-refund.py
+```
+
+Before live use, review the per-request and per-user plan, run
+`--validate-transaction` to execute the complete transaction with a forced
+rollback, and retain its plan SHA-256. Live use requires a maintenance window:
+stop public nginx ingress, wait at least two configured batch-update intervals,
+then pass `--apply --maintenance-confirmed --plan ... --confirm-plan-sha ...`.
+The tool creates a mode-0600 balance/source backup, applies user/refund audit
+rows atomically, and invalidates only affected quota caches. Reusing the same
+frozen plan must report zero new refunds.
