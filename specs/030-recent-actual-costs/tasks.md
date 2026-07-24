@@ -6,4 +6,4 @@
 - [x] T004 Implement the selector and production patcher.
 - [x] T005 Run isolated production-data dry-run and review new decisions.
 - [x] T006 Back up, deploy, apply safe decisions, and verify ten rounds.
-- [ ] T007 Complete review, Pull Request, merge gates, and project updates.
+- [x] T007 Complete review, Pull Request, merge gates, and project updates.
