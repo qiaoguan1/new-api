@@ -5,4 +5,4 @@
 - [x] T003 Implement and test the safe page replacement.
 - [x] T004 Back up, patch, build, and deploy production.
 - [x] T005 Run browser verification and ten regression rounds.
-- [ ] T006 Review, merge, close, and update project status.
+- [x] T006 Review, merge, close, and update project status.
