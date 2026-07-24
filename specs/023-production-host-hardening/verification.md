@@ -35,6 +35,9 @@
 - Final production validation: 10/10 rounds passed SSH, UFW, Fail2ban, listener,
   Nginx bridge reachability, patch integrity, NewAPI health, container health,
   Basic Auth boundary, and public 8791 denial.
+- GitHub reported no status checks for Pull Request #25; the repository has no
+  recorded Actions runs. The branch is mergeable and clean, so the scoped local
+  and production gates above are the available verification authority.
 
 ## Notable implementation corrections
 

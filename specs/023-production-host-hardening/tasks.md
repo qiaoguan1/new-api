@@ -8,4 +8,5 @@
 - [x] T006 Verify key login, enable the controls, and test public denial.
 - [x] T007 Run production application and container regression checks.
 - [x] T008 Complete security/code review and post evidence to Issue #23.
-- [ ] T009 Commit, push, create the pull request, and verify CI.
+- [x] T009 Commit, push, create Pull Request #25, and record the repository's
+  no-check CI result with local verification evidence.
