@@ -75,6 +75,79 @@ class ChannelAuditPolicyTests(unittest.TestCase):
         }
         self.assertEqual(POLICY.select_probe_model(channel), "gpt-image-2")
 
+    def test_metadata_probe_intersects_configured_advertised_priced_and_group(self):
+        channel = {
+            "models": "unsupported,video-pro-720p,gpt-5.6-sol",
+            "model_mapping": "{}",
+        }
+        pricing_rows = [
+            {"model_name": "unsupported", "enable_groups": ["other"]},
+            {"model_name": "video-pro-720p", "enable_groups": ["default"]},
+            {"model_name": "gpt-5.6-sol", "enable_groups": ["default"]},
+        ]
+
+        selected = POLICY.select_metadata_probe_model(
+            channel,
+            advertised_models={"unsupported", "video-pro-720p", "gpt-5.6-sol"},
+            pricing_rows=pricing_rows,
+            upstream_group="default",
+            account_models={"video-pro-720p", "gpt-5.6-sol"},
+        )
+
+        self.assertEqual(selected, "video-pro-720p")
+
+    def test_metadata_probe_requires_account_model_visibility(self):
+        selected = POLICY.select_metadata_probe_model(
+            {"models": "video-pro-720p"},
+            advertised_models={"video-pro-720p"},
+            pricing_rows=[{
+                "model_name": "video-pro-720p",
+                "enable_groups": ["default"],
+            }],
+            upstream_group="default",
+            account_models={"some-other-model"},
+        )
+
+        self.assertEqual(selected, "")
+
+    def test_metadata_probe_accepts_comma_separated_enable_groups(self):
+        selected = POLICY.select_metadata_probe_model(
+            {"models": "video-pro-720p"},
+            advertised_models={"video-pro-720p"},
+            pricing_rows=[{
+                "model_name": "video-pro-720p",
+                "enable_groups": "default,vip",
+            }],
+            upstream_group="default",
+            account_models={"video-pro-720p"},
+        )
+
+        self.assertEqual(selected, "video-pro-720p")
+
+    def test_account_visibility_overrides_unrelated_internal_group_labels(self):
+        selected = POLICY.select_metadata_probe_model(
+            {"models": "gpt-5.6-sol"},
+            advertised_models={"gpt-5.6-sol"},
+            pricing_rows=[{
+                "model_name": "gpt-5.6-sol",
+                "enable_groups": ["CodexPro"],
+            }],
+            upstream_group="default",
+            account_models={"gpt-5.6-sol"},
+        )
+
+        self.assertEqual(selected, "gpt-5.6-sol")
+
+    def test_metadata_probe_fails_closed_without_intersection(self):
+        selected = POLICY.select_metadata_probe_model(
+            {"models": "video-pro-720p"},
+            advertised_models={"video-pro-720p"},
+            pricing_rows=[],
+            upstream_group="default",
+        )
+
+        self.assertEqual(selected, "")
+
 
 
 if __name__ == "__main__":
