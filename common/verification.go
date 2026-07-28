@@ -1,6 +1,10 @@
 package common
 
 import (
+	cryptorand "crypto/rand"
+	"errors"
+	"fmt"
+	"io"
 	"strings"
 	"sync"
 	"time"
@@ -30,6 +34,33 @@ func GenerateVerificationCode(length int) string {
 		return code
 	}
 	return code[:length]
+}
+
+// GenerateNumericVerificationCode creates a fixed-width decimal code suitable
+// for user-facing one-time verification inputs. Rejection sampling avoids the
+// modulo bias that would otherwise make some digits more likely than others.
+func GenerateNumericVerificationCode(length int) (string, error) {
+	return generateNumericVerificationCode(cryptorand.Reader, length)
+}
+
+func generateNumericVerificationCode(reader io.Reader, length int) (string, error) {
+	if length <= 0 {
+		return "", errors.New("verification code length must be positive")
+	}
+
+	code := make([]byte, length)
+	candidate := make([]byte, 1)
+	for index := 0; index < length; {
+		if _, err := io.ReadFull(reader, candidate); err != nil {
+			return "", fmt.Errorf("generate numeric verification code: %w", err)
+		}
+		if candidate[0] >= 250 {
+			continue
+		}
+		code[index] = '0' + candidate[0]%10
+		index++
+	}
+	return string(code), nil
 }
 
 func RegisterVerificationCodeWithKey(key string, code string, purpose string) {
