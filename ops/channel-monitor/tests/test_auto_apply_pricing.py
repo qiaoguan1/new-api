@@ -205,6 +205,30 @@ class PricingPlanTests(unittest.TestCase):
         self.assertEqual(result["decisions"][0]["reason"], "no_trusted_actual_cost")
         self.assertEqual(result["options"]["ModelRatio"]["unused-model"], 9.0)
 
+    def test_recent_actual_cost_is_used_only_for_current_configured_inventory(self):
+        previous_day = "2026-07-21"
+        daily_ledger = {
+            "days": {
+                DAY: {"healthy": source()},
+                previous_day: {
+                    "healthy": source(model=text_cost(1.0, 4.0)),
+                },
+            }
+        }
+
+        result = pricing.build_pricing_plan(
+            daily_ledger,
+            audit(channel(1, "healthy", ["model"])),
+            DAY,
+            self.current_options(),
+            max_change_ratio=5.0,
+        )
+
+        decision = result["decisions"][0]
+        self.assertEqual(decision["action"], "apply")
+        self.assertEqual(decision["cost_basis"], "recent_actual")
+        self.assertEqual(decision["worst_input_sample_date"], previous_day)
+
     def test_incomplete_upstream_collection_blocks_every_affected_model(self):
         daily_audit = audit(
             channel(1, "complete", ["shared-model"]),
