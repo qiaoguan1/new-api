@@ -12,6 +12,7 @@
    private cost/profit evidence.
 6. Test fail-closed inputs, the Paisio refund case, Rolldek catalog evidence,
    route isolation, pricing arithmetic, and public privacy.
-7. Review, merge, back up production, deploy without exposing credentials, run
+7. Add a backward-compatible public video usage envelope and persist any
+   provider-reported token counts in the task billing snapshot.
+8. Review, merge, back up production, deploy without exposing credentials, run
    dry-run and live option verification, then repeat ten deterministic checks.
-

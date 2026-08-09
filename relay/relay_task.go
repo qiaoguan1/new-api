@@ -2,6 +2,7 @@ package relay
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -397,7 +398,11 @@ func videoFetchByIDRespBodyBuilder(c *gin.Context) (respBody []byte, taskResp *d
 				taskResp = service.TaskErrorWrapper(err, "convert_to_openai_video_failed", http.StatusInternalServerError)
 				return
 			}
-			respBody = openAIVideoData
+			respBody, err = attachOpenAIVideoUsage(originTask, openAIVideoData)
+			if err != nil {
+				taskResp = service.TaskErrorWrapper(err, "attach_video_usage_failed", http.StatusInternalServerError)
+				return
+			}
 			return
 		}
 		taskResp = service.TaskErrorWrapperLocal(fmt.Errorf("not_implemented:%s", originTask.Platform), "not_implemented", http.StatusNotImplemented)
@@ -560,5 +565,19 @@ func TaskModel2Dto(task *model.Task) *dto.TaskDto {
 		Properties: task.Properties,
 		Username:   task.Username,
 		Data:       task.Data,
+		Usage:      task.VideoUsage(),
 	}
+}
+
+func attachOpenAIVideoUsage(task *model.Task, payload []byte) ([]byte, error) {
+	var video map[string]json.RawMessage
+	if err := common.Unmarshal(payload, &video); err != nil {
+		return nil, err
+	}
+	usage, err := common.Marshal(task.VideoUsage())
+	if err != nil {
+		return nil, err
+	}
+	video["usage"] = usage
+	return common.Marshal(video)
 }

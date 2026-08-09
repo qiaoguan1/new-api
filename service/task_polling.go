@@ -469,6 +469,7 @@ func updateVideoSingleTask(ctx context.Context, adaptor TaskPollingAdaptor, ch *
 	if taskResult.Progress != "" {
 		task.Progress = taskResult.Progress
 	}
+	captureTaskUsage(task, taskResult)
 
 	isDone := task.Status == model.TaskStatusSuccess || task.Status == model.TaskStatusFailure
 	if isDone && snap.Status != task.Status {
@@ -499,6 +500,25 @@ func updateVideoSingleTask(ctx context.Context, adaptor TaskPollingAdaptor, ch *
 	}
 
 	return nil
+}
+
+func captureTaskUsage(task *model.Task, taskResult *relaycommon.TaskInfo) {
+	if task == nil || taskResult == nil || task.PrivateData.BillingContext == nil {
+		return
+	}
+	billing := task.PrivateData.BillingContext
+	if taskResult.CompletionTokens > 0 {
+		billing.CompletionTokens = taskResult.CompletionTokens
+	}
+	if taskResult.TotalTokens > 0 {
+		billing.TotalTokens = taskResult.TotalTokens
+	}
+	switch task.Status {
+	case model.TaskStatusSuccess:
+		billing.BillingStatus = "settled"
+	case model.TaskStatusFailure:
+		billing.BillingStatus = "refund_pending"
+	}
 }
 
 func redactVideoResponseBody(body []byte) []byte {

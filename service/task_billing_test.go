@@ -203,6 +203,8 @@ func TestRefundTaskQuota_Wallet(t *testing.T) {
 	task := makeTask(userID, channelID, preConsumed, tokenID, BillingSourceWallet, 0)
 
 	RefundTaskQuota(ctx, task, "task failed: upstream error")
+	require.Equal(t, "refunded", task.PrivateData.BillingContext.BillingStatus)
+	require.Equal(t, preConsumed, task.PrivateData.BillingContext.RefundedQuota)
 
 	// User quota should increase by preConsumed
 	assert.Equal(t, initQuota+preConsumed, getUserQuota(t, userID))

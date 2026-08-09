@@ -150,8 +150,15 @@ func taskModelName(task *model.Task) string {
 // RefundTaskQuota 统一的任务失败退款逻辑。
 // 当异步任务失败时，将预扣的 quota 退还给用户（支持钱包和订阅），并退还令牌额度。
 func RefundTaskQuota(ctx context.Context, task *model.Task, reason string) {
+	if billing := task.PrivateData.BillingContext; billing != nil {
+		billing.BillingStatus = "refund_pending"
+		if err := task.UpdatePrivateData(); err != nil {
+			logger.LogWarn(ctx, fmt.Sprintf("persist refund-pending state failed for task %s: %s", task.TaskID, err.Error()))
+		}
+	}
 	quota := task.Quota
 	if quota == 0 {
+		markTaskBillingRefunded(ctx, task, 0)
 		return
 	}
 
@@ -179,6 +186,21 @@ func RefundTaskQuota(ctx context.Context, task *model.Task, reason string) {
 		Group:     task.Group,
 		Other:     other,
 	})
+	markTaskBillingRefunded(ctx, task, quota)
+}
+
+func markTaskBillingRefunded(ctx context.Context, task *model.Task, refundedQuota int) {
+	if task == nil || task.PrivateData.BillingContext == nil {
+		return
+	}
+	billing := task.PrivateData.BillingContext
+	billing.BillingStatus = "refunded"
+	billing.RefundedQuota = refundedQuota
+	if err := task.UpdatePrivateData(); err != nil {
+		billing.BillingStatus = "refund_pending"
+		billing.RefundedQuota = 0
+		logger.LogWarn(ctx, fmt.Sprintf("persist refunded state failed for task %s: %s", task.TaskID, err.Error()))
+	}
 }
 
 // RecalculateTaskQuota 通用的异步差额结算。

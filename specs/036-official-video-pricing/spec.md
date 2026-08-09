@@ -61,6 +61,12 @@ writing production prices.
 11. A missing official price blocks route publication and official price writes.
     Missing upstream cost only marks profit comparison unavailable; it does not
     block an otherwise healthy officially priced route.
+12. Downstream video task queries expose a provider-neutral `usage` object. It
+    includes provider-reported output/total tokens when available, the final CNY
+    charge after success, the reserved amount while pending, the refunded amount
+    after failure, and an explicit billing status. It never exposes upstream
+    routing, provider costs, margins, or credentials. Existing response fields
+    remain backward compatible.
 
 ## Non-goals
 
