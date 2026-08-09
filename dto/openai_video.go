@@ -28,6 +28,20 @@ type OpenAIVideo struct {
 	RemixedFromVideoID string            `json:"remixed_from_video_id,omitempty"`
 	Error              *OpenAIVideoError `json:"error,omitempty"`
 	Metadata           map[string]any    `json:"metadata,omitempty"`
+	Usage              *VideoUsage       `json:"usage,omitempty"`
+}
+
+// VideoUsage is the provider-neutral public billing result for a video task.
+// Token fields are omitted when the upstream does not report them.
+type VideoUsage struct {
+	OutputTokens        int     `json:"output_tokens,omitempty"`
+	TotalTokens         int     `json:"total_tokens,omitempty"`
+	ChargedAmount       float64 `json:"charged_amount"`
+	ReservedAmount      float64 `json:"reserved_amount,omitempty"`
+	PendingRefundAmount float64 `json:"pending_refund_amount,omitempty"`
+	RefundedAmount      float64 `json:"refunded_amount,omitempty"`
+	Currency            string  `json:"currency"`
+	BillingStatus       string  `json:"billing_status"`
 }
 
 func (m *OpenAIVideo) SetProgressStr(progress string) {

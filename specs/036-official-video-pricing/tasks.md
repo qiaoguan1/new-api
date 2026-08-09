@@ -9,6 +9,7 @@
 - [x] T007 Correct upstream video evidence parsing and exact raw-model attribution.
 - [x] T008 Replace cost publication gates with official-price gates and profit data.
 - [x] T009 Run the full relevant test suite and comprehensive/security review.
-- [ ] T010 Create and merge the reviewed PR with green CI.
-- [ ] T011 Back up and deploy production scripts/configuration.
-- [ ] T012 Verify exact downstream pricing, internal profit data, schedules, and rollback.
+- [x] T010 Add the backward-compatible downstream token/charge usage response and tests.
+- [ ] T011 Create and merge the reviewed follow-up PR with green CI.
+- [ ] T012 Back up and deploy production scripts, configuration, and relay code.
+- [ ] T013 Verify exact downstream pricing, usage output, internal profit data, schedules, and rollback.

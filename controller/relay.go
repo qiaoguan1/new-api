@@ -588,6 +588,9 @@ func RelayTask(c *gin.Context) {
 			OtherRatios:     relayInfo.PriceData.OtherRatios,
 			OriginModelName: relayInfo.OriginModelName,
 			PerCallBilling:  common.StringsContains(constant.TaskPricePatches, relayInfo.OriginModelName) || relayInfo.PriceData.UsePrice,
+			QuotaPerUnit:    common.QuotaPerUnit,
+			BillingCurrency: "CNY",
+			BillingStatus:   "reserved",
 		}
 		task.Quota = result.Quota
 		task.Data = result.TaskData

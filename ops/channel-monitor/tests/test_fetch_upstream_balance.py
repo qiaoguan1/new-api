@@ -15,6 +15,27 @@ SPEC.loader.exec_module(collector)
 
 
 class UsageV1AggregationTests(unittest.TestCase):
+    def test_classic_login_accepts_nested_user_and_bearer_token(self):
+        response = mock.Mock(status_code=200)
+        response.json.return_value = {
+            "success": True,
+            "data": {
+                "access_token": "temporary-token",
+                "user": {"id": 9, "group": "default"},
+            },
+        }
+        session = mock.Mock()
+        session.post.return_value = response
+        session.headers = {}
+
+        group = collector.standard_login(
+            session, "https://example.test", "user", "password"
+        )
+
+        self.assertEqual(group, "default")
+        self.assertEqual(session.headers["New-Api-User"], "9")
+        self.assertEqual(session.headers["Authorization"], "Bearer temporary-token")
+
     def test_authenticated_pricing_metadata_is_sanitized(self):
         session = mock.Mock()
         pricing_response = mock.Mock(status_code=200)
