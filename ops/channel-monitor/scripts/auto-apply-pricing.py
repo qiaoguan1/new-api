@@ -22,7 +22,12 @@ import subprocess
 import sys
 import time
 
+SCRIPT_DIR = pathlib.Path(__file__).resolve().parent
+MODULE_ROOT = SCRIPT_DIR.parent
+sys.path.insert(0, str(MODULE_ROOT))
+
 from monitor_time import beijing_now, resolve_beijing_business_day
+from video_catalog_policy import normalize_model_name, validate_policy
 
 
 ROOT = pathlib.Path(os.environ.get("CHANNEL_MONITOR_ROOT", "/opt/ai-api-stack/channel-monitor"))
@@ -32,6 +37,7 @@ AUDIT_PATH = ROOT / "data" / "daily-upstream-audit.json"
 CREDENTIALS_PATH = ROOT / "upstream-credentials.json"
 LOG_PATH = ROOT / "data" / "auto-pricing-log.json"
 BACKUP_DIR = ROOT / "backups" / "pricing"
+VIDEO_POLICY_PATH = ROOT / "config" / "video-model-policy.json"
 
 EXPECTED_GROUP_RATIO = 0.15
 BASE_MULTIPLIER = 10.0
@@ -48,6 +54,18 @@ RECOVERABLE_UNDERPRICING_ALERT_TYPES = frozenset(
 DB_USER = os.environ.get("CHANNEL_MONITOR_DB_USER", "newapi")
 DB_NAME = os.environ.get("CHANNEL_MONITOR_DB_NAME", "new-api")
 OPTION_KEYS = ("ModelRatio", "CompletionRatio", "ModelPrice")
+VIDEO_MODEL_MARKERS = (
+    "video",
+    "seedance",
+    "sora",
+    "veo",
+    "kling",
+    "hailuo",
+    "minimax-video",
+    "grok-video",
+    "vidu",
+    "wan-video",
+)
 
 
 class PricingError(RuntimeError):
@@ -139,10 +157,10 @@ def _sql_string(value):
     return value.replace("'", "''")
 
 
-def atomic_update_options(options):
+def atomic_update_options(options, expected_options):
     """Update all pricing option objects in one checked PostgreSQL transaction."""
-    if set(options) != set(OPTION_KEYS):
-        raise PricingError("atomic update requires ModelRatio, CompletionRatio, and ModelPrice")
+    if set(options) != set(OPTION_KEYS) or set(expected_options) != set(OPTION_KEYS):
+        raise PricingError("atomic update and expected values require all pricing options")
     statements = [
         "BEGIN;",
         "SELECT pg_advisory_xact_lock(hashtext('channel-monitor-auto-pricing'));",
@@ -152,8 +170,12 @@ def atomic_update_options(options):
     ]
     for key in OPTION_KEYS:
         payload = json.dumps(options[key], ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+        expected = json.dumps(
+            expected_options[key], ensure_ascii=False, separators=(",", ":"), sort_keys=True
+        )
         statements.append(
-            f"UPDATE options SET value='{_sql_string(payload)}' WHERE key='{key}';"
+            f"UPDATE options SET value='{_sql_string(payload)}' "
+            f"WHERE key='{key}' AND value::jsonb='{_sql_string(expected)}'::jsonb;"
         )
         statements.append("GET DIAGNOSTICS affected_rows = ROW_COUNT;")
         statements.append(
@@ -359,7 +381,40 @@ def _base_decision(model):
     return {"model": model, "action": "skip", "reason": "no_trusted_actual_cost"}
 
 
-def build_pricing_plan(ledger, daily_audit, day, current_options, *, max_change_ratio):
+def is_video_model(model):
+    """Keep every recognized video SKU out of generic upstream-cost pricing."""
+    value = str(model or "").strip().lower()
+    return value.startswith(("sd2-", "sd3-", "sd4-")) or any(
+        marker in value for marker in VIDEO_MODEL_MARKERS
+    )
+
+
+def protected_video_models(daily_audit, raw_policy):
+    """Classify reviewed protocol aliases from policy, not naming heuristics."""
+    try:
+        policy = validate_policy(raw_policy)
+    except (TypeError, ValueError) as exc:
+        raise PricingError(f"invalid video model policy: {exc}") from exc
+    protected = set()
+    for channel in daily_audit.get("channels") or [] if isinstance(daily_audit, dict) else []:
+        if not isinstance(channel, dict):
+            continue
+        source = channel.get("upstream_slug")
+        for model in _model_names(channel):
+            if normalize_model_name(source, model, policy).get("status") == "matched":
+                protected.add(model)
+    return protected
+
+
+def build_pricing_plan(
+    ledger,
+    daily_audit,
+    day,
+    current_options,
+    *,
+    max_change_ratio,
+    protected_videos=(),
+):
     """Build a pure, side-effect-free pricing plan for every discovered model."""
     for key in OPTION_KEYS + ("GroupRatio",):
         if not isinstance(current_options.get(key), dict):
@@ -392,6 +447,10 @@ def build_pricing_plan(ledger, daily_audit, day, current_options, *, max_change_
         underpricing_alert_types = sorted(policy["underpricing_alerts"].get(model, set()))
         if underpricing_alert_types:
             decision["underpricing_alert_types"] = underpricing_alert_types
+        if model in protected_videos or is_video_model(model):
+            decision["reason"] = "video_official_pricing_only"
+            decisions.append(decision)
+            continue
         if model in policy["blocked_models"]:
             decision["reason"] = "critical_model_alert"
             decisions.append(decision)
@@ -576,6 +635,7 @@ def main(argv=None):
     try:
         ledger = read_json(LEDGER_PATH, required=True)
         daily_audit = read_json(AUDIT_PATH, required=True)
+        video_policy = read_json(VIDEO_POLICY_PATH, required=True)
         credentials = read_json(CREDENTIALS_PATH, required=True)
         incomplete_credentials = incomplete_credential_sources(ledger, day, credentials)
         if incomplete_credentials:
@@ -592,6 +652,7 @@ def main(argv=None):
             day,
             current,
             max_change_ratio=max_change_ratio,
+            protected_videos=protected_video_models(daily_audit, video_policy),
         )
         run = {
             "date": plan["date"],
@@ -609,7 +670,9 @@ def main(argv=None):
                 day, {key: current[key] for key in OPTION_KEYS}
             )
             run["backup_path"] = str(backup_path)
-            run["database_output"] = atomic_update_options(plan["options"])
+            run["database_output"] = atomic_update_options(
+                plan["options"], {key: current[key] for key in OPTION_KEYS}
+            )
         append_run_log(run)
         print(json.dumps(_summary(plan, args.dry_run), ensure_ascii=False, sort_keys=True))
         return 0

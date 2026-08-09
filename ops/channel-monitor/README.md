@@ -10,6 +10,7 @@ Production schedule:
 - `0 * * * * generate-monitor-data.py (local dashboard materialization)`
 - 08:20: collect the previous complete Beijing day's upstream billing logs.
 - 08:30: audit channel availability, price metadata, and actual-cost coverage.
+- 08:35: apply video prices from the reviewed official catalog at exactly 1.5x.
 - 08:40: calculate and atomically apply eligible model prices.
 
 Before installing a crontab copied through Windows tooling, normalize it with:
@@ -27,8 +28,14 @@ that can prevent the final cron command from reaching the pricing worker.
 The fetch worker supports classic NewAPI billing logs and the newer `/api/v1`
 auth/usage API. Every credential gets a dated `complete` or `incomplete` ledger
 entry. A zero cost is trusted only after all log pages were fetched successfully.
-The pricing worker refuses all database writes while any configured credential
+The generic pricing worker refuses all database writes while any configured credential
 lacks a complete collection for that Beijing business date.
+
+Video pricing is intentionally separate. `apply-official-video-pricing.py`
+uses only the versioned official catalog and reviewed raw-model mappings for
+downstream charging. Generic automatic pricing always skips recognized video
+models. Upstream video deductions and authenticated catalog prices are retained
+only as exact-route internal cost/profit evidence; they never set a sale price.
 
 `generate-monitor-data.py` loads `daily_reconciliation.py` to compare the same
 Beijing day's upstream account deductions with local `logs.quota`, including
@@ -67,3 +74,67 @@ then pass `--apply --maintenance-confirmed --plan ... --confirm-plan-sha ...`.
 The tool creates a mode-0600 balance/source backup, applies user/refund audit
 rows atomically, and invalidates only affected quota caches. Reusing the same
 frozen plan must report zero new refunds.
+
+Production deployment must first create a root-only rollback directory with
+the original generator, generated data, and hashes. Run the patcher once,
+compile both Python files, regenerate data, and independently validate the
+active-only totals before keeping the change.
+
+## Upstream video catalog normalization
+
+Issue #34 governs mutable upstream Seedance 2.0 names before they reach the
+fixed `xtai-relay-v1` catalog. It does not change the desktop application.
+
+Runtime files:
+
+- `config/video-model-policy.json`: versioned stable catalog, reviewed aliases,
+  and the explicit publish allowlist. Operators can update this file without a
+  NewAPI rebuild, but must increment `revision` and keep a review reason.
+- `video_catalog_policy.py`: validates rules, performs fail-closed matching,
+  and calculates the strict publish intersection.
+- `upstream_video_catalog.py`: loads enabled NewAPI routes in memory, fetches
+  `/v1/models` over HTTPS without redirects, sanitizes failures, and preserves
+  the last complete per-channel snapshot.
+- `scripts/sync-upstream-video-catalog.py`: dry-run/apply entry point.
+
+Validate a rule change without reading the database or contacting upstreams:
+
+```bash
+python3 channel-monitor/scripts/sync-upstream-video-catalog.py --validate-only
+```
+
+Review current upstream names without writing runtime data:
+
+```bash
+python3 channel-monitor/scripts/sync-upstream-video-catalog.py --print-report
+```
+
+Atomically refresh the catalog snapshot, mapping report, and candidate
+manifests (this still does not edit channels or prices):
+
+```bash
+flock -n /run/lock/upstream-video-catalog.lock \
+  python3 channel-monitor/scripts/sync-upstream-video-catalog.py --apply-snapshot
+```
+
+The fixed catalog is `seedance-2.0`, `seedance-2.0-fast`, and
+`seedance-2.0-mini`; resolution is stored separately. A new upstream name is
+handled as follows:
+
+1. Exact reviewed source rule.
+2. Exact reviewed global rule.
+3. Reviewed bounded regex rule.
+4. Conservative unique family/variant/resolution parser.
+5. Otherwise it remains in `video-model-mapping-report.json` for review.
+
+AI-produced suggestions must be added with `review_state: pending`. They cannot
+publish until an operator verifies the upstream meaning, changes the state to
+`approved`, records a reason, increments the rule version/policy revision, and
+runs validation. `packapi` and `unity2` are intentionally excluded.
+
+Candidate output is gated by approved mapping, current enabled model config,
+daily health audit, official-price coverage, and the publish allowlist. Missing
+upstream cost evidence does not block an officially priced healthy route. The
+public candidate file contains only stable model IDs, resolutions,
+availability, markup, and protocol/catalog/pricing revisions. Upstream names,
+channel IDs, costs, profits, credentials, and review notes remain internal.

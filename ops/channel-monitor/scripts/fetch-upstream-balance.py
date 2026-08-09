@@ -43,6 +43,8 @@ PRICING_MODEL_FIELDS = (
     "create_cache_ratio",
     "billing_mode",
     "billing_expr",
+    "model_price",
+    "quota_type",
     "enable_groups",
 )
 
@@ -73,6 +75,11 @@ def safe_float(value, default=None):
         return number if math.isfinite(number) else default
     except (TypeError, ValueError):
         return default
+
+
+def _positive_sample_price(value):
+    number = safe_float(value)
+    return number is not None and number > 0
 
 
 def q2usd(quota):
@@ -237,6 +244,13 @@ def standard_logs(session, origin, day):
                     "group_ratio": safe_float(other.get("group_ratio"), 0.0),
                     "expr_b64": other.get("expr_b64") or "",
                     "matched_tier": other.get("matched_tier") or "",
+                    "billing_type": other.get("billing_type") or "",
+                    "billing_source": other.get("billing_source") or "",
+                    "duration": safe_float(other.get("duration"), 0.0),
+                    "model_price": safe_float(other.get("model_price"), 0.0),
+                    "price_per_call": safe_float(other.get("price_per_call"), 0.0),
+                    "price_per_sec": safe_float(other.get("price_per_sec"), 0.0),
+                    "quota": quota,
                 }
             )
         if reached_older_day or len(items) < PAGE_SIZE:
@@ -270,7 +284,108 @@ def classic_model_real_costs(details, rate):
         quota = safe_float(detail.get("sum_quota"), 0.0) or 0.0
         prompt = int(detail.get("prompt_tokens") or 0)
         amount = quota / QUOTA_PER_USD * rate
-        is_fixed = any(word in model.lower() for word in ("image", "seedream", "dall", "flux", "video"))
+        samples = detail.get("pricing_samples") or []
+        per_second_samples = [
+            sample
+            for sample in samples
+            if _positive_sample_price(sample.get("price_per_sec"))
+            and sample.get("billing_type")
+            in ("per_sec", "generation_failed_refund", "completed")
+        ]
+        if per_second_samples and len(per_second_samples) == len(samples):
+            rates = {round(float(sample["price_per_sec"]) * rate, 12) for sample in samples}
+            if len(rates) == 1:
+                cost_per_second = rates.pop()
+                net_seconds = 0.0
+                successful_calls = 0
+                successful_seconds = 0.0
+                valid = True
+                for sample in samples:
+                    duration = safe_float(sample.get("duration"), 0.0) or 0.0
+                    sample_quota = safe_float(sample.get("quota"), 0.0) or 0.0
+                    billing_type = sample.get("billing_type")
+                    if duration <= 0:
+                        valid = False
+                        break
+                    if billing_type == "per_sec" and sample_quota > 0:
+                        net_seconds += duration
+                    elif billing_type == "generation_failed_refund" and sample_quota < 0:
+                        net_seconds -= duration
+                    elif billing_type == "completed" and sample_quota == 0:
+                        successful_calls += 1
+                        successful_seconds += duration
+                    else:
+                        valid = False
+                        break
+                expected = net_seconds * cost_per_second
+                if valid and successful_calls and math.isclose(
+                    amount, expected, rel_tol=0.0, abs_tol=0.000001
+                ) and math.isclose(
+                    net_seconds, successful_seconds, rel_tol=0.0, abs_tol=0.000001
+                ):
+                    result[model] = {
+                        "kind": "video",
+                        "billing_unit": "second",
+                        "successful_calls": successful_calls,
+                        "successful_output_seconds": round(successful_seconds, 6),
+                        "net_cost_cny": round(amount, 6),
+                        "cost_cny_per_second": round(cost_per_second, 6),
+                        "pricing_source": "actual_deduction_log",
+                    }
+                    continue
+        per_call_samples = [
+            sample
+            for sample in samples
+            if _positive_sample_price(sample.get("price_per_call"))
+            and sample.get("billing_type")
+            in ("per_call", "generation_failed_refund", "completed")
+        ]
+        if per_call_samples and len(per_call_samples) == len(samples):
+            rates = {round(float(sample["price_per_call"]) * rate, 12) for sample in samples}
+            if len(rates) == 1:
+                cost_per_call = rates.pop()
+                net_calls = 0
+                successful_calls = 0
+                valid = True
+                for sample in samples:
+                    sample_quota = safe_float(sample.get("quota"), 0.0) or 0.0
+                    billing_type = sample.get("billing_type")
+                    if billing_type == "per_call" and sample_quota > 0:
+                        net_calls += 1
+                    elif billing_type == "generation_failed_refund" and sample_quota < 0:
+                        net_calls -= 1
+                    elif billing_type == "completed" and sample_quota == 0:
+                        successful_calls += 1
+                    else:
+                        valid = False
+                        break
+                expected = net_calls * cost_per_call
+                if valid and successful_calls and net_calls == successful_calls and math.isclose(
+                    amount, expected, rel_tol=0.0, abs_tol=0.000001
+                ):
+                    result[model] = {
+                        "kind": "video",
+                        "billing_unit": "call",
+                        "successful_calls": successful_calls,
+                        "net_cost_cny": round(amount, 6),
+                        "cost_cny_per_call": round(cost_per_call, 6),
+                        "pricing_source": "actual_deduction_log",
+                    }
+                    continue
+        lower_model = model.lower()
+        is_video = any(
+            word in lower_model
+            for word in ("video", "seedance", "sd2-", "sd3-", "sd4-", "sora", "veo-")
+        )
+        if is_video and not prompt:
+            result[model] = {
+                "kind": "unclassified_video",
+                "calls": calls,
+                "net_cost_cny": round(amount, 6),
+                "pricing_source": "unit_unverified",
+            }
+            continue
+        is_fixed = any(word in lower_model for word in ("image", "seedream", "dall", "flux"))
         if is_fixed or not prompt:
             if calls:
                 result[model] = {
