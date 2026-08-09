@@ -29,6 +29,8 @@ class UsageV1AggregationTests(unittest.TestCase):
                 "enable_groups": ["default"],
                 "billing_mode": "ratio",
                 "billing_expr": "",
+                "model_price": 2.5,
+                "quota_type": 1,
                 "secret_internal_field": "must-not-persist",
             }],
         }
@@ -43,6 +45,8 @@ class UsageV1AggregationTests(unittest.TestCase):
 
         self.assertEqual(metadata["status"], "complete")
         self.assertEqual(metadata["models"][0]["model_name"], "video-pro-720p")
+        self.assertEqual(metadata["models"][0]["model_price"], 2.5)
+        self.assertEqual(metadata["models"][0]["quota_type"], 1)
         self.assertEqual(metadata["account_models"], ["gpt-5.6-sol", "video-pro-720p"])
         self.assertNotIn("secret_internal_field", metadata["models"][0])
 
@@ -168,6 +172,101 @@ class UsageV1AggregationTests(unittest.TestCase):
                 {"days": {}},
                 "2026-07-22",
             )
+
+    def test_per_second_video_refunds_are_not_averaged_over_log_rows(self):
+        samples = []
+        for duration, count in ((4, 20), (5, 7), (12, 4)):
+            samples.extend(
+                {
+                    "billing_type": "per_sec",
+                    "duration": duration,
+                    "price_per_sec": 0.29,
+                    "price_per_call": 0,
+                    "quota": duration * 0.29 * collector.QUOTA_PER_USD,
+                }
+                for _ in range(count)
+            )
+        for duration, count in ((4, 16), (5, 3), (12, 4)):
+            samples.extend(
+                {
+                    "billing_type": "generation_failed_refund",
+                    "duration": duration,
+                    "price_per_sec": 0.29,
+                    "price_per_call": 0,
+                    "quota": -duration * 0.29 * collector.QUOTA_PER_USD,
+                }
+                for _ in range(count)
+            )
+        samples.extend(
+            {
+                "billing_type": "completed",
+                "duration": duration,
+                "price_per_sec": 0.29,
+                "price_per_call": 0,
+                "quota": 0,
+            }
+            for duration in (4, 4, 4, 4, 5, 5, 5, 5)
+        )
+        detail = {
+            "calls": len(samples),
+            "sum_quota": 5_220_000,
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "pricing_samples": samples,
+        }
+
+        result = collector.classic_model_real_costs({"sd2-720p": detail}, rate=1)
+
+        self.assertEqual(result["sd2-720p"]["kind"], "video")
+        self.assertEqual(result["sd2-720p"]["billing_unit"], "second")
+        self.assertEqual(result["sd2-720p"]["cost_cny_per_second"], 0.29)
+        self.assertEqual(result["sd2-720p"]["successful_calls"], 8)
+        self.assertEqual(result["sd2-720p"]["successful_output_seconds"], 36)
+        self.assertEqual(result["sd2-720p"]["net_cost_cny"], 10.44)
+        self.assertNotIn("cost_cny_per_call", result["sd2-720p"])
+
+    def test_per_call_video_refunds_are_reconstructed_by_successful_tasks(self):
+        samples = []
+        samples.extend(
+            {
+                "billing_type": "per_call",
+                "price_per_call": 2.5,
+                "quota": 1_250_000,
+            }
+            for _ in range(3)
+        )
+        samples.append(
+            {
+                "billing_type": "generation_failed_refund",
+                "price_per_call": 2.5,
+                "quota": -1_250_000,
+            }
+        )
+        samples.extend(
+            {
+                "billing_type": "completed",
+                "price_per_call": 2.5,
+                "quota": 0,
+            }
+            for _ in range(2)
+        )
+        details = {
+            "seedance-2.0-720p": {
+                "calls": len(samples),
+                "sum_quota": 2_500_000,
+                "prompt_tokens": 0,
+                "completion_tokens": 0,
+                "pricing_samples": samples,
+            }
+        }
+
+        cost = collector.classic_model_real_costs(details, 1)["seedance-2.0-720p"]
+
+        self.assertEqual(cost["kind"], "video")
+        self.assertEqual(cost["billing_unit"], "call")
+        self.assertEqual(cost["successful_calls"], 2)
+        self.assertEqual(cost["net_cost_cny"], 5.0)
+        self.assertEqual(cost["cost_cny_per_call"], 2.5)
 
 
 if __name__ == "__main__":

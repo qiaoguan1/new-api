@@ -73,6 +73,13 @@ def policy_fixture():
     }
 
 
+def official_fixture():
+    with (MODULE_ROOT / "config" / "official-video-pricing.json").open(
+        "r", encoding="utf-8"
+    ) as handle:
+        return json.load(handle)
+
+
 class VideoCatalogPolicyTests(unittest.TestCase):
     def test_repository_policy_is_valid(self):
         policy_path = MODULE_ROOT / "config" / "video-model-policy.json"
@@ -213,39 +220,67 @@ class VideoCatalogPolicyTests(unittest.TestCase):
                 "healthy": True,
             },
         ]
-        prices = [
+        costs = [
             {
                 "source": "paisio",
                 "raw_model": "seedance2.0-selfsur-720p",
                 "trusted": True,
                 "version": "actual-2026-08-08",
-                "cost": 1.25,
+                "billing_unit": "second",
+                "unit_cost_cny": 0.29,
             },
             {
                 "source": "rolldek",
                 "raw_model": "seedance-2.0-720p",
                 "trusted": True,
                 "version": "actual-2026-08-08",
-                "cost": 1.10,
+                "billing_unit": "call",
+                "unit_cost_cny": 1.10,
             },
             {
                 "source": "rolldek",
                 "raw_model": "seedance-2.0-fast-720p",
                 "trusted": True,
                 "version": "actual-2026-08-08",
-                "cost": 0.80,
+                "billing_unit": "call",
+                "unit_cost_cny": 0.80,
             },
         ]
 
-        manifests = build_manifests(mappings, routes, prices, policy)
+        manifests = build_manifests(
+            mappings, routes, costs, policy, official_fixture()
+        )
         self.assertEqual(len(manifests["internal"]["routes"]), 1)
+        self.assertEqual(
+            manifests["internal"]["routes"][0]["upstream_cost"]["unit_cost_cny"],
+            0.29,
+        )
+        self.assertEqual(
+            manifests["internal"]["routes"][0]["profit_comparison"][
+                "profit_cny_per_second"
+            ],
+            1.2004,
+        )
         self.assertEqual(
             manifests["public"],
             {
                 "protocol": "xtai-relay-v1",
                 "catalog_revision": "2026-08-09.1",
+                "pricing_revision": "2026-08-09.1",
                 "models": [
-                    {"id": "seedance-2.0", "resolutions": ["720p"], "available": True}
+                    {
+                        "id": "seedance-2.0",
+                        "resolutions": ["720p"],
+                        "available": True,
+                        "pricing_revision": "2026-08-09.1",
+                        "markup": 1.5,
+                        "pricing": {
+                            "720p": {
+                                "billing_unit": "output_second",
+                                "sale_cny_per_second_16_9": 1.4904,
+                            }
+                        },
+                    }
                 ],
             },
         )
@@ -254,7 +289,7 @@ class VideoCatalogPolicyTests(unittest.TestCase):
         self.assertNotIn("selfsur", public_text)
         self.assertNotIn("cost", public_text)
 
-    def test_missing_or_untrusted_price_never_publishes(self):
+    def test_missing_upstream_cost_does_not_block_officially_priced_route(self):
         policy = validate_policy(policy_fixture())
         mapping = {
             **normalize_model_name("rolldek", "seedance-2.0-720p", policy),
@@ -267,24 +302,14 @@ class VideoCatalogPolicyTests(unittest.TestCase):
             "enabled": True,
             "healthy": True,
         }
-        for prices in (
-            [],
-            [
-                {
-                    "source": "rolldek",
-                    "raw_model": "seedance-2.0-720p",
-                    "trusted": False,
-                    "version": "catalog",
-                    "cost": 1,
-                }
-            ],
-        ):
-            with self.subTest(prices=prices):
-                manifests = build_manifests([mapping], [route], prices, policy)
-                self.assertEqual(manifests["internal"]["routes"], [])
-                self.assertEqual(manifests["public"]["models"], [])
+        manifests = build_manifests(
+            [mapping], [route], [], policy, official_fixture()
+        )
+        self.assertEqual(len(manifests["internal"]["routes"]), 1)
+        self.assertNotIn("upstream_cost", manifests["internal"]["routes"][0])
+        self.assertEqual(manifests["public"]["models"][0]["id"], "seedance-2.0")
 
-    def test_stable_sku_price_evidence_can_gate_a_differently_named_route(self):
+    def test_cost_from_different_raw_model_is_never_borrowed(self):
         policy = validate_policy(policy_fixture())
         mapping = {
             **normalize_model_name("paisio", "seedance2.0-selfsur-720p", policy),
@@ -309,12 +334,15 @@ class VideoCatalogPolicyTests(unittest.TestCase):
                     "raw_model": "sd2-720p",
                     "trusted": True,
                     "version": "actual:2026-08-08",
-                    "cost": 0.168387,
+                    "billing_unit": "second",
+                    "unit_cost_cny": 0.29,
                 }
             ],
             policy,
+            official_fixture(),
         )
         self.assertEqual(len(manifests["internal"]["routes"]), 1)
+        self.assertNotIn("upstream_cost", manifests["internal"]["routes"][0])
         self.assertEqual(manifests["public"]["models"][0]["id"], "seedance-2.0")
 
 

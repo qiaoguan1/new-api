@@ -11,7 +11,13 @@ import copy
 import math
 import re
 from collections import defaultdict
+from decimal import Decimal
 from typing import Any, Iterable
+
+from official_video_pricing import (
+    official_cost_per_second,
+    validate_official_video_pricing,
+)
 
 
 FIXED_CATALOG = {
@@ -396,11 +402,13 @@ def _positive_number(value: Any) -> bool:
 def build_manifests(
     mappings: Iterable[dict[str, Any]],
     routes: Iterable[dict[str, Any]],
-    prices: Iterable[dict[str, Any]],
+    upstream_costs: Iterable[dict[str, Any]],
     policy: dict[str, Any],
+    official_pricing: dict[str, Any],
 ) -> dict[str, Any]:
-    """Build internal and privacy-safe public manifests from strict gates."""
+    """Build manifests with official sales prices and exact-route internal costs."""
     checked = _ensure_policy(policy)
+    official = validate_official_video_pricing(official_pricing)
     route_index = {
         (
             route.get("channel_id"),
@@ -410,23 +418,19 @@ def build_manifests(
         for route in routes
         if isinstance(route, dict)
     }
-    trusted_prices: dict[tuple[str, str], dict[str, Any]] = {}
-    trusted_sku_prices: dict[tuple[str, str, str], dict[str, Any]] = {}
-    for price in prices:
-        if not isinstance(price, dict):
+    exact_costs: dict[tuple[str, str], dict[str, Any]] = {}
+    for cost in upstream_costs:
+        if not isinstance(cost, dict):
             continue
-        key = (_text(price.get("source")), _text(price.get("raw_model")))
+        key = (_text(cost.get("source")), _text(cost.get("raw_model")))
         if (
             all(key)
-            and price.get("trusted") is True
-            and _text(price.get("version"))
-            and _positive_number(price.get("cost"))
+            and cost.get("trusted") is True
+            and _text(cost.get("version"))
+            and cost.get("billing_unit") in {"call", "second"}
+            and _positive_number(cost.get("unit_cost_cny"))
         ):
-            trusted_prices[key] = price
-            stable_model = _text(price.get("stable_model"))
-            resolution = _text(price.get("resolution"))
-            if stable_model and resolution:
-                trusted_sku_prices[(key[0], stable_model, resolution)] = price
+            exact_costs[key] = cost
 
     internal_routes: list[dict[str, Any]] = []
     seen_routes: set[tuple[str, str, Any, str, str]] = set()
@@ -441,33 +445,68 @@ def build_manifests(
         stable_key = (stable_model, resolution)
         route_key = (channel_id, source, raw_model)
         route = route_index.get(route_key) or route_index.get((None, source, raw_model))
-        price = trusted_prices.get((source, raw_model)) or trusted_sku_prices.get(
-            (source, stable_model, resolution)
-        )
+        official_row = official["models"].get(stable_model)
         if (
             stable_key not in checked["_publish_keys"]
             or route is None
             or route.get("enabled") is not True
             or route.get("healthy") is not True
-            or price is None
+            or not isinstance(official_row, dict)
+            or resolution not in official_row.get("resolutions", [])
         ):
             continue
         unique_key = (stable_model, resolution, channel_id, source, raw_model)
         if unique_key in seen_routes:
             continue
         seen_routes.add(unique_key)
-        internal_routes.append(
-            {
-                "stable_model": stable_model,
-                "resolution": resolution,
-                "channel_id": channel_id,
-                "source": source,
-                "raw_model": raw_model,
-                "mapping_rule": mapping.get("rule_id") or mapping.get("match_type"),
-                "price_version": price["version"],
-                "trusted_cost": price["cost"],
+        official_cost = official_cost_per_second(official, stable_model, resolution)
+        sale = official_cost * Decimal(str(official["markup"]))
+        row = {
+            "stable_model": stable_model,
+            "resolution": resolution,
+            "channel_id": channel_id,
+            "source": source,
+            "raw_model": raw_model,
+            "mapping_rule": mapping.get("rule_id") or mapping.get("match_type"),
+            "official_pricing": {
+                "revision": official["revision"],
+                "billing_unit": "output_second",
+                "official_cost_cny_per_second_16_9": round(float(official_cost), 6),
+                "sale_cny_per_second_16_9": round(float(sale), 6),
+                "markup": official["markup"],
+            },
+        }
+        upstream_cost = exact_costs.get((source, raw_model))
+        if upstream_cost is not None:
+            unit_cost = float(upstream_cost["unit_cost_cny"])
+            row["upstream_cost"] = {
+                "version": upstream_cost["version"],
+                "evidence_type": upstream_cost.get("evidence_type"),
+                "billing_unit": upstream_cost["billing_unit"],
+                "unit_cost_cny": unit_cost,
             }
-        )
+            if upstream_cost["billing_unit"] == "second":
+                profit = float(sale) - unit_cost
+                row["profit_comparison"] = {
+                    "basis": "output_second",
+                    "profit_cny_per_second": round(profit, 6),
+                    "margin_ratio": round(profit / float(sale), 6),
+                }
+            else:
+                minimum = int(official["token_formula"]["min_output_seconds"])
+                maximum = int(official["token_formula"]["max_output_seconds"])
+                row["profit_comparison"] = {
+                    "basis": "upstream_call_vs_output_duration",
+                    "minimum_duration_seconds": minimum,
+                    "minimum_duration_profit_cny": round(
+                        float(sale) * minimum - unit_cost, 6
+                    ),
+                    "maximum_duration_seconds": maximum,
+                    "maximum_duration_profit_cny": round(
+                        float(sale) * maximum - unit_cost, 6
+                    ),
+                }
+        internal_routes.append(row)
 
     internal_routes.sort(
         key=lambda row: (
@@ -489,6 +528,24 @@ def build_manifests(
                 key=lambda value: (int(value.removesuffix("p")), value),
             ),
             "available": True,
+            "pricing_revision": official["revision"],
+            "markup": official["markup"],
+            "pricing": {
+                resolution: {
+                    "billing_unit": "output_second",
+                    "sale_cny_per_second_16_9": round(
+                        float(
+                            official_cost_per_second(official, model, resolution)
+                            * Decimal(str(official["markup"]))
+                        ),
+                        6,
+                    ),
+                }
+                for resolution in sorted(
+                    resolutions,
+                    key=lambda value: (int(value.removesuffix("p")), value),
+                )
+            },
         }
         for model, resolutions in sorted(public_resolutions.items())
     ]
@@ -500,6 +557,7 @@ def build_manifests(
         "public": {
             "protocol": "xtai-relay-v1",
             "catalog_revision": checked["revision"],
+            "pricing_revision": official["revision"],
             "models": public_models,
         },
     }

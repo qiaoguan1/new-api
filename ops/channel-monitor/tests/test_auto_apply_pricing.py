@@ -1,4 +1,5 @@
 import importlib.util
+import json
 import math
 import pathlib
 import subprocess
@@ -71,13 +72,13 @@ class PricingPlanTests(unittest.TestCase):
             "GroupRatio": {"text": 0.15, "image": 0.15, "video": 0.15},
         }
 
-    def test_discovers_unknown_text_and_fixed_models_without_allowlist(self):
-        daily_audit = audit(channel(1, "healthy", ["brand-new-text", "brand-new-video"]))
+    def test_discovers_unknown_text_and_image_models_without_allowlist(self):
+        daily_audit = audit(channel(1, "healthy", ["brand-new-text", "brand-new-image"]))
         daily_ledger = ledger(
             healthy=source(
                 **{
                     "brand-new-text": text_cost(2.0, 8.0),
-                    "brand-new-video": fixed_cost(0.8),
+                    "brand-new-image": fixed_cost(0.8),
                 }
             )
         )
@@ -88,7 +89,48 @@ class PricingPlanTests(unittest.TestCase):
 
         decisions = {item["model"]: item for item in result["decisions"]}
         self.assertEqual(decisions["brand-new-text"]["action"], "apply")
-        self.assertEqual(decisions["brand-new-video"]["action"], "apply")
+        self.assertEqual(decisions["brand-new-image"]["action"], "apply")
+
+    def test_video_model_is_never_priced_from_upstream_cost(self):
+        daily_audit = audit(channel(42, "paisio", ["sd2-720p"]))
+        options = self.current_options()
+        options["ModelPrice"]["sd2-720p"] = 4.56
+
+        result = pricing.build_pricing_plan(
+            ledger(paisio=source(**{"sd2-720p": fixed_cost(0.168387)})),
+            daily_audit,
+            DAY,
+            options,
+            max_change_ratio=5.0,
+        )
+
+        decision = result["decisions"][0]
+        self.assertEqual(decision["action"], "skip")
+        self.assertEqual(decision["reason"], "video_official_pricing_only")
+        self.assertEqual(result["options"]["ModelPrice"]["sd2-720p"], 4.56)
+
+    def test_reviewed_legacy_video_alias_is_protected_by_policy(self):
+        policy_path = SCRIPT_PATH.parents[1] / "config" / "video-model-policy.json"
+        with policy_path.open("r", encoding="utf-8") as handle:
+            policy = json.load(handle)
+        daily_audit = audit(channel(42, "paisio", ["value-sd-premium-720p"]))
+        protected = pricing.protected_video_models(daily_audit, policy)
+
+        result = pricing.build_pricing_plan(
+            ledger(
+                paisio=source(
+                    **{"value-sd-premium-720p": fixed_cost(0.1)}
+                )
+            ),
+            daily_audit,
+            DAY,
+            self.current_options(),
+            max_change_ratio=5.0,
+            protected_videos=protected,
+        )
+
+        self.assertEqual(protected, {"value-sd-premium-720p"})
+        self.assertEqual(result["decisions"][0]["reason"], "video_official_pricing_only")
 
     def test_explicit_configured_inventory_excludes_unrelated_catalog_models(self):
         source_channel = channel(
@@ -447,32 +489,36 @@ class PricingPlanTests(unittest.TestCase):
 class DatabaseUpdateTests(unittest.TestCase):
     def test_atomic_update_rejects_command_failure(self):
         completed = subprocess.CompletedProcess(["psql"], 1, stdout="", stderr="failed")
+        options = {"ModelRatio": {}, "CompletionRatio": {}, "ModelPrice": {}}
         with mock.patch.object(pricing.subprocess, "run", return_value=completed):
             with self.assertRaises(pricing.PricingError):
-                pricing.atomic_update_options({"ModelRatio": {}, "CompletionRatio": {}, "ModelPrice": {}})
+                pricing.atomic_update_options(options, options)
 
     def test_atomic_update_requires_three_affected_rows_and_commit(self):
         completed = subprocess.CompletedProcess(
             ["psql"], 0, stdout="BEGIN\npg_advisory_xact_lock\nDO\nCOMMIT\n", stderr=""
         )
         with mock.patch.object(pricing.subprocess, "run", return_value=completed) as run:
+            expected = {"ModelRatio": {"old": 1}, "CompletionRatio": {}, "ModelPrice": {}}
             output = pricing.atomic_update_options(
-                {"ModelRatio": {"a": 1}, "CompletionRatio": {"a": 2}, "ModelPrice": {}}
+                {"ModelRatio": {"a": 1}, "CompletionRatio": {"a": 2}, "ModelPrice": {}},
+                expected,
             )
         self.assertIn("COMMIT", output)
         sql = run.call_args.args[0][-1]
         self.assertIn("pg_advisory_xact_lock", sql)
         self.assertEqual(sql.count("GET DIAGNOSTICS affected_rows = ROW_COUNT"), 3)
         self.assertEqual(sql.count("RAISE EXCEPTION"), 3)
+        self.assertEqual(sql.count("value::jsonb="), 3)
+        self.assertIn('"old":1', sql)
 
         incomplete = subprocess.CompletedProcess(
             ["psql"], 0, stdout="BEGIN\nCOMMIT\n", stderr=""
         )
         with mock.patch.object(pricing.subprocess, "run", return_value=incomplete):
             with self.assertRaises(pricing.PricingError):
-                pricing.atomic_update_options(
-                    {"ModelRatio": {}, "CompletionRatio": {}, "ModelPrice": {}}
-                )
+                options = {"ModelRatio": {}, "CompletionRatio": {}, "ModelPrice": {}}
+                pricing.atomic_update_options(options, options)
 
 
 if __name__ == "__main__":

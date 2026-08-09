@@ -102,7 +102,7 @@ def parse_args(argv=None):
     return parser.parse_args(argv)
 
 
-def _summary(merged, report, routes, prices, manifests, *, applied):
+def _summary(merged, report, routes, costs, manifests, *, applied):
     observations = merged["run"]["observations"]
     return {
         "ok": True,
@@ -116,7 +116,7 @@ def _summary(merged, report, routes, prices, manifests, *, applied):
         "matched_routes": len(report["matched"]),
         "review_required": len(report["review_required"]),
         "enabled_healthy_routes": len(routes),
-        "trusted_price_skus": len(prices),
+        "upstream_cost_rows": len(costs),
         "publishable_routes": len(manifests["internal"]["routes"]),
         "public_models": manifests["public"]["models"],
     }
@@ -128,6 +128,9 @@ def run(args) -> dict:
         root / "config" / "video-model-policy.json"
     )
     policy = validate_policy(read_json(policy_path, required=True))
+    official_pricing = read_json(
+        root / "config" / "official-video-pricing.json", required=True
+    )
     if args.validate_only:
         return {
             "ok": True,
@@ -177,12 +180,14 @@ def run(args) -> dict:
     daily_audit = read_json(data_dir / "daily-upstream-audit.json", required=True)
     ledger = read_json(data_dir / "upstream-balance-ledger.json", required=True)
     routes = build_route_gates(report, daily_audit, expected_day=target_day)
-    prices = build_trusted_price_evidence(
+    costs = build_trusted_price_evidence(
         ledger,
         policy,
         target_day=target_day,
     )
-    manifests = build_manifests(report["matched"], routes, prices, policy)
+    manifests = build_manifests(
+        report["matched"], routes, costs, policy, official_pricing
+    )
     if args.apply_snapshot:
         write_json_atomic(snapshot_path, merged["snapshot"])
         write_json_atomic(data_dir / "video-catalog-last-run.json", merged["run"])
@@ -194,7 +199,7 @@ def run(args) -> dict:
         merged,
         report,
         routes,
-        prices,
+        costs,
         manifests,
         applied=args.apply_snapshot,
     )
@@ -202,7 +207,7 @@ def run(args) -> dict:
         result["matched"] = report["matched"]
         result["review_queue"] = report["review_required"]
         result["route_candidates"] = routes
-        result["trusted_prices"] = prices
+        result["upstream_costs"] = costs
         result["candidate_manifest"] = manifests["internal"]
         result["failures"] = [
             {

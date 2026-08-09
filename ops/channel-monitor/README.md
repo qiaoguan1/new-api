@@ -10,6 +10,7 @@ Production schedule:
 - `0 * * * * generate-monitor-data.py (local dashboard materialization)`
 - 08:20: collect the previous complete Beijing day's upstream billing logs.
 - 08:30: audit channel availability, price metadata, and actual-cost coverage.
+- 08:35: apply video prices from the reviewed official catalog at exactly 1.5x.
 - 08:40: calculate and atomically apply eligible model prices.
 
 Before installing a crontab copied through Windows tooling, normalize it with:
@@ -27,8 +28,14 @@ that can prevent the final cron command from reaching the pricing worker.
 The fetch worker supports classic NewAPI billing logs and the newer `/api/v1`
 auth/usage API. Every credential gets a dated `complete` or `incomplete` ledger
 entry. A zero cost is trusted only after all log pages were fetched successfully.
-The pricing worker refuses all database writes while any configured credential
+The generic pricing worker refuses all database writes while any configured credential
 lacks a complete collection for that Beijing business date.
+
+Video pricing is intentionally separate. `apply-official-video-pricing.py`
+uses only the versioned official catalog and reviewed raw-model mappings for
+downstream charging. Generic automatic pricing always skips recognized video
+models. Upstream video deductions and authenticated catalog prices are retained
+only as exact-route internal cost/profit evidence; they never set a sale price.
 
 `generate-monitor-data.py` loads `daily_reconciliation.py` to compare the same
 Beijing day's upstream account deductions with local `logs.quota`, including
@@ -126,7 +133,8 @@ publish until an operator verifies the upstream meaning, changes the state to
 runs validation. `packapi` and `unity2` are intentionally excluded.
 
 Candidate output is gated by approved mapping, current enabled model config,
-daily health audit, complete positive actual-cost evidence, and the publish
-allowlist. The public candidate file contains only stable model IDs,
-resolutions, availability, and protocol/catalog revisions. Upstream names,
-channel IDs, costs, credentials, and review notes remain internal.
+daily health audit, official-price coverage, and the publish allowlist. Missing
+upstream cost evidence does not block an officially priced healthy route. The
+public candidate file contains only stable model IDs, resolutions,
+availability, markup, and protocol/catalog/pricing revisions. Upstream names,
+channel IDs, costs, profits, credentials, and review notes remain internal.

@@ -370,7 +370,7 @@ class UpstreamVideoCatalogTests(unittest.TestCase):
             ],
         )
 
-    def test_actual_cost_alias_is_normalized_to_stable_sku(self):
+    def test_upstream_cost_evidence_keeps_exact_raw_models_and_units(self):
         ledger = {
             "days": {
                 "2026-08-07": {
@@ -379,7 +379,11 @@ class UpstreamVideoCatalogTests(unittest.TestCase):
                         "collection_status": "complete",
                         "last_attempt_status": "complete",
                         "per_model_real_cost": {
-                            "sd2-720p": {"kind": "fixed", "calls": 34, "cost_cny_per_call": 0.51}
+                            "sd2-720p": {
+                                "kind": "video",
+                                "billing_unit": "second",
+                                "cost_cny_per_second": 0.31,
+                            }
                         },
                     }
                 },
@@ -390,13 +394,13 @@ class UpstreamVideoCatalogTests(unittest.TestCase):
                         "last_attempt_status": "complete",
                         "per_model_real_cost": {
                             "sd2-720p": {
-                                "kind": "fixed",
-                                "calls": 62,
-                                "cost_cny_per_call": 0.168387,
+                                "kind": "video",
+                                "billing_unit": "second",
+                                "cost_cny_per_second": 0.29,
                             },
                             "sd2-pro-720p": {
-                                "kind": "fixed",
-                                "calls": 1,
+                                "kind": "video",
+                                "billing_unit": "call",
                                 "cost_cny_per_call": 0.20,
                             },
                         },
@@ -406,6 +410,16 @@ class UpstreamVideoCatalogTests(unittest.TestCase):
                         "collection_status": "complete",
                         "last_attempt_status": "complete",
                         "per_model_real_cost": {},
+                        "pricing_metadata": {
+                            "status": "complete",
+                            "models": [
+                                {
+                                    "model_name": "seedance-2.0-720p",
+                                    "billing_mode": "per_call",
+                                    "model_price": 2.5,
+                                }
+                            ],
+                        },
                     },
                 },
             }
@@ -415,13 +429,20 @@ class UpstreamVideoCatalogTests(unittest.TestCase):
             repository_policy(),
             target_day="2026-08-08",
         )
-        self.assertEqual(len(prices), 1)
-        self.assertEqual(prices[0]["source"], "paisio")
-        self.assertEqual(prices[0]["stable_model"], "seedance-2.0")
-        self.assertEqual(prices[0]["resolution"], "720p")
-        self.assertEqual(prices[0]["cost"], 0.20)
-        self.assertEqual(prices[0]["version"], "actual:2026-08-08")
-        self.assertTrue(prices[0]["trusted"])
+        by_route = {(row["source"], row["raw_model"]): row for row in prices}
+        self.assertEqual(len(by_route), 3)
+        sd2 = by_route[("paisio", "sd2-720p")]
+        self.assertEqual(sd2["billing_unit"], "second")
+        self.assertEqual(sd2["unit_cost_cny"], 0.29)
+        self.assertEqual(sd2["version"], "actual:2026-08-08")
+        self.assertEqual(sd2["evidence_type"], "actual_deduction")
+        self.assertEqual(
+            by_route[("paisio", "sd2-pro-720p")]["unit_cost_cny"], 0.20
+        )
+        rolldek = by_route[("rolldek", "seedance-2.0-720p")]
+        self.assertEqual(rolldek["billing_unit"], "call")
+        self.assertEqual(rolldek["unit_cost_cny"], 2.5)
+        self.assertEqual(rolldek["evidence_type"], "authenticated_catalog")
 
 
 if __name__ == "__main__":

@@ -28,6 +28,15 @@ def _text(value: Any) -> str:
     return value.strip() if isinstance(value, str) else ""
 
 
+def _positive_number(value: Any) -> bool:
+    return (
+        isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and math.isfinite(value)
+        and value > 0
+    )
+
+
 def extract_openai_model_names(payload: Any) -> list[str]:
     """Extract bounded unique IDs from an OpenAI-compatible model list."""
     if not isinstance(payload, dict) or not isinstance(payload.get("data"), list):
@@ -440,7 +449,7 @@ def build_trusted_price_evidence(
     target_day: str,
     lookback_days: int = 7,
 ) -> list[dict[str, Any]]:
-    """Normalize complete actual deductions to source plus stable SKU evidence."""
+    """Collect exact-route upstream costs for internal profit comparison only."""
     try:
         target = date.fromisoformat(target_day)
     except (TypeError, ValueError) as exc:
@@ -451,13 +460,13 @@ def build_trusted_price_evidence(
     if not isinstance(days, dict):
         raise CatalogCollectionError("upstream balance ledger lacks days")
 
-    selected: dict[tuple[str, str, str], dict[str, Any]] = {}
+    selected: dict[tuple[str, str], dict[str, Any]] = {}
     for offset in range(lookback_days):
         day = (target - timedelta(days=offset)).isoformat()
         accounts = days.get(day)
         if not isinstance(accounts, dict):
             continue
-        same_day: dict[tuple[str, str, str], dict[str, Any]] = {}
+        same_day: dict[tuple[str, str], dict[str, Any]] = {}
         for source, account in accounts.items():
             if not isinstance(source, str) or not _complete_actual_cost_row(account):
                 continue
@@ -467,24 +476,20 @@ def build_trusted_price_evidence(
             for raw_model, detail in costs.items():
                 if not isinstance(raw_model, str) or not isinstance(detail, dict):
                     continue
-                if detail.get("kind") != "fixed":
+                if detail.get("kind") != "video":
                     continue
-                calls = detail.get("calls")
-                cost = detail.get("cost_cny_per_call")
-                if (
-                    not isinstance(calls, int)
-                    or isinstance(calls, bool)
-                    or calls <= 0
-                    or not isinstance(cost, (int, float))
-                    or isinstance(cost, bool)
-                    or not math.isfinite(cost)
-                    or cost <= 0
-                ):
+                unit = detail.get("billing_unit")
+                cost_key = {
+                    "second": "cost_cny_per_second",
+                    "call": "cost_cny_per_call",
+                }.get(unit)
+                cost = detail.get(cost_key) if cost_key else None
+                if not _positive_number(cost):
                     continue
                 decision = normalize_model_name(source, raw_model, policy)
                 if decision["status"] != "matched":
                     continue
-                key = (source, decision["stable_model"], decision["resolution"])
+                key = (source, raw_model)
                 candidate = {
                     "source": source,
                     "stable_model": decision["stable_model"],
@@ -492,17 +497,52 @@ def build_trusted_price_evidence(
                     "raw_model": raw_model,
                     "trusted": True,
                     "version": f"actual:{day}",
-                    "basis": "current_day_actual" if offset == 0 else "recent_actual",
+                    "evidence_type": "actual_deduction",
                     "sample_day": day,
-                    "calls": calls,
-                    "cost": float(cost),
+                    "billing_unit": unit,
+                    "unit_cost_cny": float(cost),
                 }
                 previous = same_day.get(key)
-                if previous is None or candidate["cost"] > previous["cost"]:
+                if previous is None or candidate["unit_cost_cny"] > previous["unit_cost_cny"]:
                     same_day[key] = candidate
         for key, candidate in same_day.items():
             selected.setdefault(key, candidate)
+
+    target_accounts = days.get(target_day)
+    if isinstance(target_accounts, dict):
+        for source, account in target_accounts.items():
+            if not isinstance(source, str) or not isinstance(account, dict):
+                continue
+            metadata = account.get("pricing_metadata") or {}
+            if metadata.get("status") != "complete":
+                continue
+            for row in metadata.get("models") or []:
+                if not isinstance(row, dict) or row.get("billing_mode") != "per_call":
+                    continue
+                raw_model = _text(row.get("model_name"))
+                cost = row.get("model_price")
+                if not raw_model or not _positive_number(cost):
+                    continue
+                decision = normalize_model_name(source, raw_model, policy)
+                if decision["status"] != "matched":
+                    continue
+                key = (source, raw_model)
+                selected.setdefault(
+                    key,
+                    {
+                        "source": source,
+                        "stable_model": decision["stable_model"],
+                        "resolution": decision["resolution"],
+                        "raw_model": raw_model,
+                        "trusted": True,
+                        "version": f"catalog:{target_day}",
+                        "evidence_type": "authenticated_catalog",
+                        "sample_day": target_day,
+                        "billing_unit": "call",
+                        "unit_cost_cny": float(cost),
+                    },
+                )
     return sorted(
         selected.values(),
-        key=lambda row: (row["source"], row["stable_model"], row["resolution"]),
+        key=lambda row: (row["source"], row["raw_model"]),
     )
