@@ -27,6 +27,7 @@ MODULE_ROOT = SCRIPT_DIR.parent
 sys.path.insert(0, str(MODULE_ROOT))
 
 from monitor_time import beijing_now, resolve_beijing_business_day
+from recent_actual_cost import collect_recent_model_costs
 from video_catalog_policy import normalize_model_name, validate_policy
 
 
@@ -44,6 +45,7 @@ BASE_MULTIPLIER = 10.0
 MARKUP = BASE_MULTIPLIER * EXPECTED_GROUP_RATIO
 MIN_MARKUP = 1.2
 DEFAULT_MAX_CHANGE_RATIO = 5.0
+ACTUAL_COST_LOOKBACK_DAYS = 7
 RECOVERABLE_UNDERPRICING_ALERT_TYPES = frozenset(
     {
         "price_below_upstream_input",
@@ -430,12 +432,9 @@ def build_pricing_plan(
     policy = build_audit_policy(daily_audit, day)
     day_rows = _ledger_day(ledger, day)
 
+    # Current healthy channel configuration defines inventory. Old billing
+    # history may price configured models but never resurrect retired models.
     discovered = set(policy["discovered_models"])
-    for slug in policy["healthy_sources"]:
-        entry = day_rows.get(slug) or {}
-        costs = entry.get("per_model_real_cost") or {}
-        if isinstance(costs, dict):
-            discovered.update(name for name in costs if isinstance(name, str) and name)
 
     new_model_ratio = dict(current_options["ModelRatio"])
     new_completion_ratio = dict(current_options["CompletionRatio"])
@@ -470,15 +469,26 @@ def build_pricing_plan(
             decisions.append(decision)
             continue
 
-        costs = _collect_model_costs(day_rows, model, eligible_sources)
+        costs = collect_recent_model_costs(
+            ledger,
+            day,
+            model,
+            eligible_sources,
+            lookback_days=ACTUAL_COST_LOOKBACK_DAYS,
+        )
         if len(costs["kinds"]) > 1:
             decision["reason"] = "ambiguous_billing_kind"
             decisions.append(decision)
             continue
 
         if costs["kinds"] == {"text"} and costs["text_input"] and costs["text_output"]:
-            worst_input, input_source = costs["text_input"][0]
-            worst_output, output_source = costs["text_output"][0]
+            worst_input, input_source, input_sample_date = costs["text_input"][0]
+            worst_output, output_source, output_sample_date = costs["text_output"][0]
+            cost_basis = (
+                "current_day_actual"
+                if input_sample_date == day and output_sample_date == day
+                else "recent_actual"
+            )
             new_ratio = worst_input * BASE_MULTIPLIER / 2.0
             new_completion = worst_output / worst_input
             input_sell = worst_input * MARKUP
@@ -508,8 +518,12 @@ def build_pricing_plan(
                         "old_completion_ratio": current_options["CompletionRatio"].get(model),
                         "worst_input_cost_cny_per_m": worst_input,
                         "worst_input_source": input_source,
+                        "worst_input_sample_date": input_sample_date,
                         "worst_output_cost_cny_per_m": worst_output,
                         "worst_output_source": output_source,
+                        "worst_output_sample_date": output_sample_date,
+                        "cost_basis": cost_basis,
+                        "actual_cost_lookback_days": ACTUAL_COST_LOOKBACK_DAYS,
                         "new_model_ratio": round(new_ratio, 12),
                         "new_completion_ratio": round(new_completion, 12),
                         "input_sell_cny_per_m": round(input_sell, 12),
@@ -517,7 +531,8 @@ def build_pricing_plan(
                     }
                 )
         elif costs["kinds"] == {"fixed"} and costs["fixed"]:
-            worst_cost, source = costs["fixed"][0]
+            worst_cost, source, sample_date = costs["fixed"][0]
+            cost_basis = "current_day_actual" if sample_date == day else "recent_actual"
             new_price = worst_cost * BASE_MULTIPLIER
             sell = worst_cost * MARKUP
             if sell < worst_cost * MIN_MARKUP:
@@ -542,6 +557,9 @@ def build_pricing_plan(
                         "old_model_price": current_options["ModelPrice"].get(model),
                         "worst_cost_cny_per_call": worst_cost,
                         "worst_source": source,
+                        "worst_cost_sample_date": sample_date,
+                        "cost_basis": cost_basis,
+                        "actual_cost_lookback_days": ACTUAL_COST_LOOKBACK_DAYS,
                         "new_model_price": round(new_price, 12),
                         "sell_cny_per_call": round(sell, 12),
                     }
@@ -608,10 +626,15 @@ def _summary(plan, dry_run):
                     "old_model_price",
                     "worst_input_cost_cny_per_m",
                     "worst_input_source",
+                    "worst_input_sample_date",
                     "worst_output_cost_cny_per_m",
                     "worst_output_source",
+                    "worst_output_sample_date",
                     "worst_cost_cny_per_call",
                     "worst_source",
+                    "worst_cost_sample_date",
+                    "cost_basis",
+                    "actual_cost_lookback_days",
                     "new_model_ratio",
                     "new_completion_ratio",
                     "new_model_price",

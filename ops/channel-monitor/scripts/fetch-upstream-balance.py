@@ -119,11 +119,16 @@ def standard_login(session, origin, username, password):
             f"classic login failed (http {response.status_code}): {clean_error(body.get('message'))}"
         )
     data = body.get("data") or {}
-    user_id = data.get("id")
+    # Support both legacy direct-user login responses and newer token+nested-user responses.
+    user = data.get("user") if isinstance(data.get("user"), dict) else data
+    access_token = data.get("access_token")
+    if access_token:
+        session.headers.update({"Authorization": f"Bearer {access_token}"})
+    user_id = user.get("id")
     if user_id is None:
         raise RuntimeError("classic login succeeded without user id")
     session.headers.update({"New-Api-User": str(user_id)})
-    return data.get("group") or ""
+    return user.get("group") or ""
 
 
 def standard_self(session, origin):
