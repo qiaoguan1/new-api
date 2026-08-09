@@ -11,4 +11,4 @@
 - [x] T009 Implement internal route and public capability manifests with dry-run.
 - [x] T010 Validate current production catalogs and manually review all candidates.
 - [x] T011 Deploy safely, schedule refresh, and complete ten verification rounds.
-- [ ] T012 Complete comprehensive review, PR, merge gates, and project updates.
+- [x] T012 Complete comprehensive review, PR, merge gates, and project updates.
