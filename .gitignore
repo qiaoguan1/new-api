@@ -33,5 +33,7 @@ data/
 .gocache-temp
 .gopath
 .test
+__pycache__/
+*.py[cod]
 token_estimator_test.go
 skills-lock.json

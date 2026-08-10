@@ -138,3 +138,31 @@ upstream cost evidence does not block an officially priced healthy route. The
 public candidate file contains only stable model IDs, resolutions,
 availability, markup, and protocol/catalog/pricing revisions. Upstream names,
 channel IDs, costs, profits, credentials, and review notes remain internal.
+
+## Video consumption reconciliation
+
+Issue #43 reconciles the durable video gateway with authenticated Toonflow and
+Paisio billing evidence. Run `fetch-upstream-balance.py` first, then run
+`generate-video-consumption-monitor.py`. The latter reads the gateway SQLite
+database in read-only mode and atomically writes:
+
+- `data/video-consumption-private.json`: provider/task reconciliation for the
+  Basic-Auth-protected channel monitor.
+- `data/video-model-health-public.json`: stable model health only; no provider,
+  channel, cost, price, margin, credential, or upstream fields.
+
+Paisio task IDs come from its authenticated `/api/task/self` endpoint and are
+accepted as cost evidence only when their total agrees with the complete
+billing log. Toonflow uses its authenticated web operation log. Because its
+login requires CAPTCHA, unattended cron never logs in or solves a CAPTCHA. An
+operator-authorized Bearer token is stored only in the root-readable file
+`secrets/toonflow-web-token` (override with
+`CHANNEL_MONITOR_TOONFLOW_TOKEN_FILE`). Missing or expired tokens produce an
+incomplete/null result rather than a fabricated zero.
+
+The protected monitor generator is patched with
+`patch_generate_video_consumption.py`; the protected UI is patched with
+`patch_video_consumption_ui.py`. Both patchers are idempotent and fail when the
+reviewed production anchors change. Video provider cost remains comparison
+evidence only. Downstream video quotes continue to use Ark official pricing
+multiplied by 1.5.
