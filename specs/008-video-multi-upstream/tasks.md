@@ -93,11 +93,11 @@
 - [x] T023 Run the full gateway suite and source compilation described in `specs/008-video-multi-upstream/quickstart.md`
 - [x] T024 Perform credential, URL-host, duplicate-submit, and public-data security review for `ops/video-job-gateway/`
 - [x] T025 Post the complete review artifact with zero unaddressed findings to GitHub issue #42
-- [ ] T026 Build and verify a dark production image against a copied SQLite database
-- [ ] T027 Back up production source, catalog, environment, image, and SQLite state before activation
-- [ ] T028 Enable Toonflow and Paisio, deploy the reviewed image, and run bounded real canaries
-- [ ] T029 Run ten read-only verification rounds for distribution, idempotency, health, and public redaction
-- [ ] T030 Record production evidence, rollback paths, and acceptance results in GitHub issue #42
+- [x] T026 Build and verify a dark production image against a copied SQLite database
+- [x] T027 Back up production source, catalog, environment, image, and SQLite state before activation
+- [x] T028 Enable Toonflow and Paisio, deploy the reviewed image, and run bounded real canaries
+- [x] T029 Run ten read-only verification rounds for distribution, idempotency, health, and public redaction
+- [x] T030 Record production evidence, rollback paths, and acceptance results in GitHub issue #42
 
 ---
 
