@@ -19,6 +19,11 @@ EXPECTED_MODELS = {
     "seedance-2.0-fast": {"480p", "720p"},
     "seedance-2.0-mini": {"480p", "720p"},
 }
+CANONICAL_MODEL_PRICE_TARGETS = tuple(
+    (f"{model}-{resolution}", model, resolution)
+    for model, resolutions in EXPECTED_MODELS.items()
+    for resolution in sorted(resolutions)
+)
 EXPECTED_FORMULA = {
     "frame_rate": 24,
     "divisor": 1024,
@@ -273,7 +278,7 @@ def build_official_model_price_plan(
     routes: Iterable[dict[str, Any]],
     current_options: dict[str, Any],
 ) -> dict[str, Any]:
-    """Build per-second NewAPI ModelPrice writes from official prices only."""
+    """Build complete per-second NewAPI ModelPrice writes from official prices only."""
     for key in ("ModelRatio", "CompletionRatio", "ModelPrice", "GroupRatio"):
         if not isinstance(current_options.get(key), dict):
             raise OfficialVideoPricingError(f"{key} must be a JSON object")
@@ -295,10 +300,19 @@ def build_official_model_price_plan(
     }
     decisions = []
     seen: dict[str, tuple[str, str]] = {}
-    for route in sorted(
+    route_targets = sorted(
         (row for row in routes if isinstance(row, dict)),
         key=lambda row: str(row.get("raw_model") or ""),
-    ):
+    )
+    canonical_targets = (
+        {
+            "raw_model": raw_model,
+            "stable_model": stable_model,
+            "resolution": resolution,
+        }
+        for raw_model, stable_model, resolution in CANONICAL_MODEL_PRICE_TARGETS
+    )
+    for route in (*route_targets, *canonical_targets):
         raw_model = _text(route.get("raw_model"))
         stable_model = _text(route.get("stable_model"))
         resolution = _text(route.get("resolution"))
