@@ -273,7 +273,6 @@ class VideoCatalogPolicyTests(unittest.TestCase):
                         "resolutions": ["720p"],
                         "available": True,
                         "pricing_revision": "2026-08-09.1",
-                        "markup": 1.5,
                         "pricing": {
                             "720p": {
                                 "billing_unit": "output_second",
@@ -288,6 +287,8 @@ class VideoCatalogPolicyTests(unittest.TestCase):
         self.assertNotIn("paisio", public_text)
         self.assertNotIn("selfsur", public_text)
         self.assertNotIn("cost", public_text)
+        self.assertNotIn("markup", public_text)
+        self.assertNotIn("margin", public_text)
 
     def test_missing_upstream_cost_does_not_block_officially_priced_route(self):
         policy = validate_policy(policy_fixture())

@@ -11,6 +11,15 @@ import (
 	"gorm.io/gorm"
 )
 
+var ErrTokenQuotaInsufficient = errors.New("token quota is insufficient")
+
+func InvalidateTokenCache(key string) error {
+	if !common.RedisEnabled || key == "" {
+		return nil
+	}
+	return cacheDeleteToken(key)
+}
+
 type Token struct {
 	Id                 int            `json:"id"`
 	UserId             int            `json:"user_id" gorm:"index"`
@@ -419,6 +428,40 @@ func DecreaseTokenQuota(id int, key string, quota int) (err error) {
 		return nil
 	}
 	return decreaseTokenQuota(id, quota)
+}
+
+// DecreaseTokenQuotaIfEnough atomically debits a finite token only when its
+// authoritative balance covers the full amount. Unlimited tokens keep the
+// historical accounting behavior.
+func DecreaseTokenQuotaIfEnough(id int, key string, quota int, unlimited bool) error {
+	if quota < 0 {
+		return errors.New("quota 不能为负数！")
+	}
+	if quota == 0 {
+		return nil
+	}
+	if unlimited {
+		return DecreaseTokenQuota(id, key, quota)
+	}
+	result := DB.Model(&Token{}).
+		Where("id = ? AND remain_quota >= ?", id, quota).
+		Updates(map[string]interface{}{
+			"remain_quota":  gorm.Expr("remain_quota - ?", quota),
+			"used_quota":    gorm.Expr("used_quota + ?", quota),
+			"accessed_time": common.GetTimestamp(),
+		})
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected != 1 {
+		return ErrTokenQuotaInsufficient
+	}
+	if common.RedisEnabled {
+		if err := cacheDeleteToken(key); err != nil {
+			common.SysLog("failed to invalidate token quota cache: " + err.Error())
+		}
+	}
+	return nil
 }
 
 func decreaseTokenQuota(id int, quota int) (err error) {

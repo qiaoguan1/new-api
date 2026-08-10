@@ -29,6 +29,7 @@ type OpenAIVideo struct {
 	Error              *OpenAIVideoError `json:"error,omitempty"`
 	Metadata           map[string]any    `json:"metadata,omitempty"`
 	Usage              *VideoUsage       `json:"usage,omitempty"`
+	ResultDelivery     string            `json:"result_delivery,omitempty"`
 }
 
 // VideoUsage is the provider-neutral public billing result for a video task.
@@ -40,6 +41,7 @@ type VideoUsage struct {
 	ReservedAmount      float64 `json:"reserved_amount,omitempty"`
 	PendingRefundAmount float64 `json:"pending_refund_amount,omitempty"`
 	RefundedAmount      float64 `json:"refunded_amount,omitempty"`
+	SupplementAmount    float64 `json:"supplement_amount,omitempty"`
 	Currency            string  `json:"currency"`
 	BillingStatus       string  `json:"billing_status"`
 }

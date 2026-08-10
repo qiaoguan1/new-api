@@ -23,6 +23,11 @@ Provider catalog/list-price data is comparison evidence only. It is not actual d
 and is not used as the downstream selling price. Actual upstream cost reconciliation is maintained
 by the channel-monitor workflow with source timestamps and billing-unit evidence.
 
+Every accepted request freezes the reviewed Ark official quote multiplied by 1.5. A successful
+result remains `settlement_pending` and is withheld until the authenticated settlement endpoint
+receives an exact task-level provider ledger record. The final charge is that actual net cost
+multiplied by 1.5; deterministic revisions make retries idempotent and support later reversals.
+
 ## Local verification
 
 From the repository root:

@@ -22,7 +22,6 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
-from decimal import Decimal, InvalidOperation
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -30,7 +29,7 @@ from typing import Any, Mapping
 
 from adapters import AdapterError, PaisioAdapter, ProviderConfig, RollDekAdapter, ToonflowAdapter, VideoAdapter
 from catalog import Catalog, CatalogError, Model, Route
-from relay_pricing import PRICE_CONTRACT_VERSION, RelayPricing, RelayPricingError
+from relay_pricing import RelayPricing, RelayPricingError
 from routing import RoutePlanError, build_route_plan
 from store import Store, StoreConflict
 
@@ -49,11 +48,7 @@ class Config:
     data_dir: Path
     catalog_file: Path
     providers: dict[str, ProviderConfig]
-    pricing_url: str = ""
     pricing_file: Path | None = None
-    pricing_group: str = "视频"
-    pricing_timeout_seconds: int = 5
-    pricing_cache_seconds: int = 30
     listen_host: str = "0.0.0.0"
     listen_port: int = 8091
     max_request_bytes: int = 256 * 1024
@@ -121,13 +116,9 @@ class Config:
             data_dir=data_dir,
             catalog_file=catalog_file,
             providers=providers,
-            pricing_url=os.getenv("VIDEO_JOB_GATEWAY_PRICING_URL", "http://new-api:3000/api/pricing").strip(),
             pricing_file=Path(
                 os.getenv("VIDEO_JOB_GATEWAY_PRICING_FILE", str(Path(__file__).with_name("relay-pricing.json")))
             ).resolve(),
-            pricing_group=os.getenv("VIDEO_JOB_GATEWAY_PRICING_GROUP", "视频").strip() or "视频",
-            pricing_timeout_seconds=_env_int("VIDEO_JOB_GATEWAY_PRICING_TIMEOUT_SECONDS", 5, 1, 20),
-            pricing_cache_seconds=_env_int("VIDEO_JOB_GATEWAY_PRICING_CACHE_SECONDS", 30, 5, 300),
             listen_host=os.getenv("VIDEO_JOB_GATEWAY_HOST", "0.0.0.0").strip() or "0.0.0.0",
             listen_port=_env_int("VIDEO_JOB_GATEWAY_PORT", 8091, 1, 65535),
             max_request_bytes=_env_int("VIDEO_JOB_GATEWAY_MAX_REQUEST_BYTES", 256 * 1024, 16 * 1024, 2 * 1024 * 1024),
@@ -195,10 +186,6 @@ class Gateway:
         }
         self.pricing = pricing or RelayPricing(
             config.pricing_file or Path(__file__).with_name("relay-pricing.json"),
-            pricing_url=config.pricing_url,
-            group_name=config.pricing_group,
-            timeout_seconds=config.pricing_timeout_seconds,
-            cache_seconds=config.pricing_cache_seconds,
         )
         self.stop_event = threading.Event()
         self.store.cleanup_expired(
@@ -291,6 +278,13 @@ class Gateway:
         capabilities = snapshot.get("capabilities") if isinstance(snapshot.get("capabilities"), dict) else {}
         video = capabilities.get("video") if isinstance(capabilities.get("video"), dict) else {}
         video["traffic_enabled"] = ready
+        video["billing_contract_version"] = "xtai-video-billing-v2"
+        video["settlement_capabilities"] = [
+            DURABLE_REQUEST_ID_SUBMIT_CONTRACT,
+            "provider-actual-cost-settlement-v1",
+            "authenticated-billing-evidence-v1",
+        ]
+        snapshot["billing_contract_version"] = "xtai-video-billing-v2"
         return snapshot
 
     def price_pairs(self) -> list[tuple[str, str]]:
@@ -753,66 +747,24 @@ class Gateway:
         source_url: str,
         requires_auth: bool,
     ) -> dict[str, Any]:
-        result = {
+        return {
             "type": "url",
             "delivery_mode": "direct_url",
             "source_url": source_url,
             "content_type": "video/mp4",
             "requires_auth": bool(requires_auth),
         }
+
+    def apply_settlement(self, raw: Any) -> tuple[dict[str, Any], bool]:
         try:
-            payload = json.loads(str(job.get("payload_json") or "{}"))
-        except json.JSONDecodeError:
-            payload = {}
-        relay_price = payload.get("_relay_price") if isinstance(payload, dict) and isinstance(payload.get("_relay_price"), dict) else {}
-        if relay_price:
-            try:
-                amount = Decimal(str(relay_price.get("amount_cny_exact") or ""))
-                observed_at = int(time.time())
-            except (InvalidOperation, TypeError, ValueError) as error:
-                raise ValueError("relay job contains invalid frozen price evidence") from error
-            if (
-                relay_price.get("contract_version") != PRICE_CONTRACT_VERSION
-                or not amount.is_finite()
-                or amount <= 0
-                or amount > Decimal("100000")
-            ):
-                raise ValueError("relay job contains invalid frozen price evidence")
-            amount_exact = format(amount, "f")
-            issuer = "xtai-video-relay"
-            gateway_job_id = str(job.get("job_id") or "")
-            gateway_request_id = str(job.get("request_id") or "")
-            material = "\0".join((
-                "xtai-video-actual-cost-v1",
-                issuer,
-                gateway_job_id,
-                gateway_request_id,
-                amount_exact,
-                "CNY",
-                "request",
-                "final",
-                str(observed_at),
-            ))
-            result["billing"] = {
-                "contract_version": "xtai-video-actual-cost-v1",
-                "issuer": issuer,
-                "gateway_job_id": gateway_job_id,
-                "gateway_request_id": gateway_request_id,
-                "currency": "CNY",
-                "amount_cny_exact": amount_exact,
-                "billing_unit": "request",
-                "status": "final",
-                "observed_at": observed_at,
-                "pricing_contract_version": PRICE_CONTRACT_VERSION,
-                "pricing_revision": str(relay_price.get("pricing_revision") or "")[:160],
-                "price_source": str(relay_price.get("price_source") or "")[:80],
-                "evidence_hash": hmac.new(
-                    self.config.token.encode("utf-8"),
-                    material.encode("utf-8"),
-                    hashlib.sha256,
-                ).hexdigest(),
-            }
-        return result
+            return self.store.apply_settlement(raw)
+        except StoreConflict as error:
+            raise GatewayError(
+                HTTPStatus.CONFLICT,
+                "video_settlement_conflict",
+                str(error),
+                category="billing",
+            ) from error
 
     def result_source(self, job_id: str) -> tuple[str, ProviderConfig] | None:
         job = self.store.get(job_id=job_id, internal=True)
@@ -905,7 +857,8 @@ def handler_class(gateway: Gateway) -> type[BaseHTTPRequestHandler]:
             self.serve_get_or_head()
 
         def do_POST(self) -> None:
-            if urllib.parse.urlsplit(self.path).path != "/v1/video-jobs":
+            path = urllib.parse.urlsplit(self.path).path
+            if path not in {"/v1/video-jobs", "/v1/operations/video-settlements"}:
                 self.json_response(HTTPStatus.NOT_FOUND, {"error": _error("not_found", "validation", "接口不存在。", 404, False, False, "validate")})
                 return
             if not self.authorized():
@@ -920,7 +873,10 @@ def handler_class(gateway: Gateway) -> type[BaseHTTPRequestHandler]:
                 return
             try:
                 raw = json.loads(self.rfile.read(length).decode("utf-8"))
-                snapshot, reused = gateway.submit(raw)
+                if path == "/v1/operations/video-settlements":
+                    snapshot, reused = gateway.apply_settlement(raw)
+                else:
+                    snapshot, reused = gateway.submit(raw)
                 self.json_response(HTTPStatus.ACCEPTED, {"ok": True, "reused": reused, "job": snapshot})
             except GatewayError as error:
                 self.json_response(error.status, {"error": error.contract()})

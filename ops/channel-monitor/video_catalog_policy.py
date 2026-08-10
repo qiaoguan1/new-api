@@ -529,7 +529,6 @@ def build_manifests(
             ),
             "available": True,
             "pricing_revision": official["revision"],
-            "markup": official["markup"],
             "pricing": {
                 resolution: {
                     "billing_unit": "output_second",

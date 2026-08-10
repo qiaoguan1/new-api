@@ -54,6 +54,10 @@ func VideoProxy(c *gin.Context) {
 			fmt.Sprintf("Task is not completed yet, current status: %s", task.Status))
 		return
 	}
+	if task.ResultDeliveryStatus() == "pending_settlement" {
+		videoProxyError(c, http.StatusPaymentRequired, "billing_settlement_pending", "Video result is held until billing settlement completes")
+		return
+	}
 
 	channel, err := model.CacheGetChannel(task.ChannelId)
 	if err != nil {

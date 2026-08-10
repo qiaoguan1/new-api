@@ -110,18 +110,26 @@ type TaskPrivateData struct {
 
 // TaskBillingContext 记录任务提交时的计费参数，以便轮询阶段可以重新计算额度。
 type TaskBillingContext struct {
-	QuotaPerUnit     float64            `json:"quota_per_unit,omitempty"`
-	BillingCurrency  string             `json:"billing_currency,omitempty"`
-	BillingStatus    string             `json:"billing_status,omitempty"`
-	CompletionTokens int                `json:"completion_tokens,omitempty"`
-	TotalTokens      int                `json:"total_tokens,omitempty"`
-	RefundedQuota    int                `json:"refunded_quota,omitempty"`
-	ModelPrice       float64            `json:"model_price,omitempty"`       // 模型单价
-	GroupRatio       float64            `json:"group_ratio,omitempty"`       // 分组倍率
-	ModelRatio       float64            `json:"model_ratio,omitempty"`       // 模型倍率
-	OtherRatios      map[string]float64 `json:"other_ratios,omitempty"`      // 附加倍率（时长、分辨率等）
-	OriginModelName  string             `json:"origin_model_name,omitempty"` // 模型名称，必须为OriginModelName
-	PerCallBilling   bool               `json:"per_call_billing,omitempty"`  // 按次计费：跳过轮询阶段的差额结算
+	ContractVersion         string             `json:"contract_version,omitempty"`
+	QuotaPerUnit            float64            `json:"quota_per_unit,omitempty"`
+	BillingCurrency         string             `json:"billing_currency,omitempty"`
+	BillingStatus           string             `json:"billing_status,omitempty"`
+	ReservedQuota           int                `json:"reserved_quota,omitempty"`
+	ChargedQuota            int                `json:"charged_quota,omitempty"`
+	SupplementedQuota       int                `json:"supplemented_quota,omitempty"`
+	SettlementID            string             `json:"settlement_id,omitempty"`
+	SettlementRevision      int                `json:"settlement_revision,omitempty"`
+	SettlementFingerprint   string             `json:"settlement_fingerprint,omitempty"`
+	OfficialPricingRevision string             `json:"official_pricing_revision,omitempty"`
+	CompletionTokens        int                `json:"completion_tokens,omitempty"`
+	TotalTokens             int                `json:"total_tokens,omitempty"`
+	RefundedQuota           int                `json:"refunded_quota,omitempty"`
+	ModelPrice              float64            `json:"model_price,omitempty"`       // 模型单价
+	GroupRatio              float64            `json:"group_ratio,omitempty"`       // 分组倍率
+	ModelRatio              float64            `json:"model_ratio,omitempty"`       // 模型倍率
+	OtherRatios             map[string]float64 `json:"other_ratios,omitempty"`      // 附加倍率（时长、分辨率等）
+	OriginModelName         string             `json:"origin_model_name,omitempty"` // 模型名称，必须为OriginModelName
+	PerCallBilling          bool               `json:"per_call_billing,omitempty"`  // 按次计费：跳过轮询阶段的差额结算
 }
 
 // GetUpstreamTaskID 获取上游真实 task ID（用于与 provider 通信）
@@ -530,9 +538,26 @@ func (t *Task) ToOpenAIVideo() *dto.OpenAIVideo {
 	openAIVideo.SetProgressStr(t.Progress)
 	openAIVideo.CreatedAt = t.CreatedAt
 	openAIVideo.CompletedAt = t.UpdatedAt
-	openAIVideo.SetMetadata("url", t.GetResultURL())
+	openAIVideo.ResultDelivery = t.ResultDeliveryStatus()
+	if openAIVideo.ResultDelivery != "pending_settlement" {
+		openAIVideo.SetMetadata("url", t.GetResultURL())
+	}
 	openAIVideo.Usage = t.VideoUsage()
 	return openAIVideo
+}
+
+func (t *Task) ResultDeliveryStatus() string {
+	billing := t.PrivateData.BillingContext
+	if billing == nil || billing.ContractVersion != "xtai-video-billing-v2" {
+		return "ready"
+	}
+	if t.Status == TaskStatusSuccess && billing.BillingStatus != "settled" && billing.BillingStatus != "settled_with_debt" {
+		return "pending_settlement"
+	}
+	if t.Status == TaskStatusSuccess {
+		return "ready"
+	}
+	return "unavailable"
 }
 
 // VideoUsage returns public billing information without exposing internal
@@ -552,6 +577,11 @@ func (t *Task) VideoUsage() *dto.VideoUsage {
 	outputTokens = billing.CompletionTokens
 	totalTokens = billing.TotalTokens
 	amount := math.Round(float64(t.Quota)/quotaPerUnit*1_000_000) / 1_000_000
+	reservedQuota := billing.ReservedQuota
+	if reservedQuota <= 0 {
+		reservedQuota = t.Quota
+	}
+	reservedAmount := math.Round(float64(reservedQuota)/quotaPerUnit*1_000_000) / 1_000_000
 	usage := &dto.VideoUsage{
 		OutputTokens:  outputTokens,
 		TotalTokens:   totalTokens,
@@ -559,10 +589,12 @@ func (t *Task) VideoUsage() *dto.VideoUsage {
 		BillingStatus: billing.BillingStatus,
 	}
 	switch billing.BillingStatus {
-	case "settled":
+	case "settled", "settled_with_debt":
 		usage.ChargedAmount = amount
-	case "reserved":
-		usage.ReservedAmount = amount
+		usage.SupplementAmount = math.Round(float64(billing.SupplementedQuota)/quotaPerUnit*1_000_000) / 1_000_000
+		usage.RefundedAmount = math.Round(float64(billing.RefundedQuota)/quotaPerUnit*1_000_000) / 1_000_000
+	case "reserved", "settlement_pending", "payment_required", "pending_review":
+		usage.ReservedAmount = reservedAmount
 	case "refund_pending":
 		usage.ChargedAmount = amount
 		usage.PendingRefundAmount = amount

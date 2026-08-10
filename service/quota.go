@@ -391,16 +391,16 @@ func PreConsumeTokenQuota(relayInfo *relaycommon.RelayInfo, quota int) error {
 	//if relayInfo.TokenUnlimited {
 	//	return nil
 	//}
-	token, err := model.GetTokenByKey(relayInfo.TokenKey, false)
+	token, err := model.GetTokenById(relayInfo.TokenId)
 	if err != nil {
 		return err
 	}
-	if !relayInfo.TokenUnlimited && token.RemainQuota < quota {
-		return fmt.Errorf("token quota is not enough, token remain quota: %s, need quota: %s", logger.FormatQuota(token.RemainQuota), logger.FormatQuota(quota))
+	if token.Key != relayInfo.TokenKey {
+		return errors.New("token identity mismatch")
 	}
-	err = model.DecreaseTokenQuota(relayInfo.TokenId, relayInfo.TokenKey, quota)
+	err = model.DecreaseTokenQuotaIfEnough(relayInfo.TokenId, relayInfo.TokenKey, quota, token.UnlimitedQuota)
 	if err != nil {
-		return err
+		return fmt.Errorf("token quota is not enough, token remain quota: %s, need quota: %s: %w", logger.FormatQuota(token.RemainQuota), logger.FormatQuota(quota), err)
 	}
 	return nil
 }

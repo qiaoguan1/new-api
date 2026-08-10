@@ -1,6 +1,7 @@
 package model
 
 import (
+	"context"
 	"fmt"
 	"time"
 
@@ -141,6 +142,35 @@ func cacheIncrUserQuota(userId int, delta int64) error {
 
 func cacheDecrUserQuota(userId int, delta int64) error {
 	return cacheIncrUserQuota(userId, -delta)
+}
+
+// cacheReserveUserQuotaIfPositive atomically reserves quota only while the cached
+// wallet balance is positive. A successful reservation may cross below zero.
+func cacheReserveUserQuotaIfPositive(userId int, delta int64) (reserved bool, missing bool, err error) {
+	if !common.RedisEnabled || common.RDB == nil {
+		return false, false, nil
+	}
+	const script = `
+local current = redis.call("HGET", KEYS[1], "Quota")
+if current == false then
+  return -1
+end
+if tonumber(current) <= 0 then
+  return 0
+end
+redis.call("HINCRBY", KEYS[1], "Quota", -tonumber(ARGV[1]))
+return 1
+`
+	value, err := common.RDB.Eval(
+		context.Background(),
+		script,
+		[]string{getUserCacheKey(userId)},
+		delta,
+	).Int64()
+	if err != nil {
+		return false, false, err
+	}
+	return value == 1, value == -1, nil
 }
 
 // Helper functions to get individual fields if needed
