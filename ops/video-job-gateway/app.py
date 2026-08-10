@@ -90,7 +90,10 @@ class Config:
         provider_defaults = {
             "paisio": ("https://api.paisio.online", "api.paisio.online,cdn.paisio.online"),
             "rolldek": ("https://rolldek.com", "rolldek.com"),
-            "toonflow": ("https://api.toonflow.net/v1", "api.toonflow.net"),
+            "toonflow": (
+                "https://api.toonflow.net/v1",
+                "api.toonflow.net,tos-cn-beijing.volces.com",
+            ),
         }
         for provider_id, (default_url, default_hosts) in provider_defaults.items():
             prefix = f"VIDEO_JOB_{provider_id.upper()}"

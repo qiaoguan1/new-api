@@ -3,6 +3,7 @@ import sys
 import tempfile
 import types
 import unittest
+from unittest import mock
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -10,7 +11,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from adapters import AdapterError, Observation, ProviderConfig
-from app import Gateway
+from app import Gateway, GatewayError, _validate_result_url
 from catalog import Catalog, Model, Route
 from store import Store
 
@@ -35,6 +36,20 @@ class FakeAdapter:
 
 
 class GatewayFallbackTests(unittest.TestCase):
+    def test_toonflow_result_allowlist_accepts_tos_subdomain_only(self):
+        allowed = ("api.toonflow.net", "tos-cn-beijing.volces.com")
+        with mock.patch("app.socket.getaddrinfo", return_value=[(2, 1, 6, "", ("8.8.8.8", 443))]):
+            host = _validate_result_url(
+                "https://ark-acg-cn-beijing.tos-cn-beijing.volces.com/result.mp4",
+                allowed,
+            )
+        self.assertEqual(host, "ark-acg-cn-beijing.tos-cn-beijing.volces.com")
+        with self.assertRaises(GatewayError):
+            _validate_result_url(
+                "https://tos-cn-beijing.volces.com.attacker.example/result.mp4",
+                allowed,
+            )
+
     def make_job(self, store):
         snapshot, _ = store.create(
             request_id="request-fallback",
