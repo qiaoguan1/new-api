@@ -4,7 +4,7 @@
 
 **Created**: 2026-08-10
 
-**Status**: Draft
+**Status**: Complete
 
 **Input**: Prefer Paisio for video submission and use Toonflow only after a safe, definite pre-creation failure.
 
