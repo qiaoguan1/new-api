@@ -13,6 +13,11 @@ from routing import RoutePlanError, build_route_plan
 
 
 class RoutePlanTests(unittest.TestCase):
+    def test_container_image_includes_routing_module(self):
+        dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
+        copy_line = next(line for line in dockerfile.splitlines() if line.startswith("COPY "))
+        self.assertIn("routing.py", copy_line.split())
+
     def route(self, provider: str, *, priority: int = 10, resolution: str = "720p") -> Route:
         return Route(
             provider=provider,
