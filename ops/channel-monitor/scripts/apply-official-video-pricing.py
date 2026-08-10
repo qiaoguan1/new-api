@@ -77,9 +77,24 @@ def build_official_routes(mapping_report, daily_audit, policy, *, expected_day):
             key = (channel_id, source, raw_model)
             mapping = mappings.get(key)
             if mapping is None:
-                raise OfficialVideoPricingError(
-                    f"reviewed video route is missing from mapping report: {channel_id}:{raw_model}"
+                unavailable = (channel.get("unavailable_models") or {}).get(raw_model)
+                unavailable_reason = (
+                    unavailable.get("reason") if isinstance(unavailable, dict) else None
                 )
+                if (
+                    current.get("match_type") in {"source_exact", "global_exact"}
+                    and unavailable_reason == "not_in_upstream_pricing_catalog"
+                ):
+                    # The discovery report intentionally contains only models still
+                    # advertised upstream. Keep explicitly reviewed exact aliases on
+                    # official pricing when an upstream removes them from its catalog;
+                    # heuristic/parser matches still fail closed below.
+                    mapping = current
+                else:
+                    raise OfficialVideoPricingError(
+                        "reviewed video route is missing from mapping report: "
+                        f"{channel_id}:{raw_model}"
+                    )
             identity = (mapping.get("stable_model"), mapping.get("resolution"))
             if identity != (
                 current.get("stable_model"),
