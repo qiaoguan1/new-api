@@ -23,5 +23,5 @@
 
 - [x] T009 Run Python compilation and the full gateway test suite.
 - [x] T010 Complete code/security review with zero unaddressed findings.
-- [ ] T011 Raise and merge the reviewed PR.
-- [ ] T012 Back up, deploy, verify health, and run ten read-only production rounds.
+- [x] T011 Raise and merge the reviewed PR.
+- [x] T012 Back up, deploy, verify health, and run ten read-only production rounds.
