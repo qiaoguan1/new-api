@@ -144,6 +144,32 @@ class RoutePlanTests(unittest.TestCase):
         )
         self.assertEqual([route.provider for route in mini_routes], ["toonflow"])
 
+    def test_checked_in_catalog_always_prefers_paisio_for_shared_capabilities(self):
+        catalog = Catalog.load(ROOT / "catalog.json")
+
+        shared = {
+            "seedance-2.0": ("480p", "720p", "1080p"),
+            "seedance-2.0-fast": ("480p", "720p"),
+        }
+        for model_id, resolutions in shared.items():
+            for resolution in resolutions:
+                _, routes, _, _ = catalog.resolve_routes(
+                    model_id,
+                    resolution,
+                    {"toonflow", "paisio"},
+                )
+                for index in range(100):
+                    plan = build_route_plan(
+                        request_id=f"{model_id}-{resolution}-{index:03d}",
+                        stable_model=model_id,
+                        resolution=resolution,
+                        routes=tuple(reversed(routes)) if index % 2 else routes,
+                    )
+                    self.assertEqual(
+                        [route.provider for route in plan],
+                        ["paisio", "toonflow"],
+                    )
+
 
 if __name__ == "__main__":
     unittest.main()

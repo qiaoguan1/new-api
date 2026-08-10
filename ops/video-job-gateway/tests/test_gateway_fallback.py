@@ -57,13 +57,13 @@ class GatewayFallbackTests(unittest.TestCase):
             protocol_version="xtai-relay-v1",
             catalog_revision="test",
             stable_model="seedance-2.0",
-            provider_id="toonflow",
-            upstream_model="Seedance 2.0",
-            adapter_revision="toonflow-v1",
+            provider_id="paisio",
+            upstream_model="sd2-720p",
+            adapter_revision="paisio-v1",
             payload_json='{"_route":{"resolution":"720p"}}',
             route_plan=[
-                {"provider_id": "toonflow", "upstream_model": "Seedance 2.0", "adapter_revision": "toonflow-v1", "send_resolution": True},
                 {"provider_id": "paisio", "upstream_model": "sd2-720p", "adapter_revision": "paisio-v1", "send_resolution": False},
+                {"provider_id": "toonflow", "upstream_model": "Seedance 2.0", "adapter_revision": "toonflow-v1", "send_resolution": True},
             ],
             selection_reason="test",
         )
@@ -80,14 +80,14 @@ class GatewayFallbackTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as directory:
             store = Store(pathlib.Path(directory))
             job_id = self.make_job(store)
-            first = FakeAdapter("toonflow", Observation(status="failed", error_code="rejected"))
-            second = FakeAdapter("paisio", Observation(status="running", upstream_task_id="paisio-1", upstream_status="queued"))
+            first = FakeAdapter("paisio", Observation(status="failed", error_code="rejected"))
+            second = FakeAdapter("toonflow", Observation(status="running", upstream_task_id="toonflow-1", upstream_status="queued"))
 
-            self.gateway(store, first, second)._submit_with_fallback(job_id)
+            self.gateway(store, second, first)._submit_with_fallback(job_id)
 
             job = store.get(job_id=job_id, internal=True)
             self.assertEqual(job["status"], "running")
-            self.assertEqual(job["provider_id"], "paisio")
+            self.assertEqual(job["provider_id"], "toonflow")
             self.assertEqual(first.calls, 1)
             self.assertEqual(second.calls, 1)
 
@@ -96,17 +96,115 @@ class GatewayFallbackTests(unittest.TestCase):
             store = Store(pathlib.Path(directory))
             job_id = self.make_job(store)
             first = FakeAdapter(
-                "toonflow",
+                "paisio",
                 AdapterError("timeout", "unknown", phase="submit", uncertain=True),
             )
-            second = FakeAdapter("paisio", Observation(status="running", upstream_task_id="paisio-1"))
+            second = FakeAdapter("toonflow", Observation(status="running", upstream_task_id="toonflow-1"))
 
-            self.gateway(store, first, second)._submit_with_fallback(job_id)
+            self.gateway(store, second, first)._submit_with_fallback(job_id)
 
             job = store.get(job_id=job_id, internal=True)
             self.assertEqual(job["status"], "uncertain")
-            self.assertEqual(job["provider_id"], "toonflow")
+            self.assertEqual(job["provider_id"], "paisio")
             self.assertEqual(second.calls, 0)
+
+    def test_failed_observation_with_task_id_never_crosses_provider(self):
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as directory:
+            store = Store(pathlib.Path(directory))
+            job_id = self.make_job(store)
+            first = FakeAdapter(
+                "paisio",
+                Observation(
+                    status="failed",
+                    upstream_task_id="paisio-created-task",
+                    upstream_status="failed",
+                    error_code="provider_failed_after_creation",
+                ),
+            )
+            second = FakeAdapter("toonflow", Observation(status="running", upstream_task_id="toonflow-1"))
+
+            self.gateway(store, second, first)._submit_with_fallback(job_id)
+
+            job = store.get(job_id=job_id, internal=True)
+            self.assertEqual(job["status"], "failed")
+            self.assertEqual(job["provider_id"], "paisio")
+            self.assertEqual(job["upstream_task_id"], "paisio-created-task")
+            self.assertEqual(first.calls, 1)
+            self.assertEqual(second.calls, 0)
+
+    def test_new_shared_job_persists_fixed_priority_reason(self):
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as directory:
+            gateway = Gateway.__new__(Gateway)
+            gateway.store = Store(pathlib.Path(directory))
+            gateway.catalog = Catalog.load(ROOT / "catalog.json")
+            gateway.adapters = {
+                "toonflow": FakeAdapter("toonflow", Observation(status="running")),
+                "paisio": FakeAdapter("paisio", Observation(status="running")),
+            }
+            gateway.config = types.SimpleNamespace(
+                data_dir=pathlib.Path(directory),
+                drain_file_name="DRAIN",
+            )
+            gateway.pricing = types.SimpleNamespace(quote=lambda *_: {"amount": "1.0"})
+            gateway.circuit_snapshot = lambda: {"open": False}
+            gateway.start_submit = lambda _job_id: None
+
+            gateway.submit(
+                {
+                    "protocol_version": "xtai-relay-v1",
+                    "capability": "video.generate",
+                    "request_id": "priority-reason-request",
+                    "model": "seedance-2.0",
+                    "input": {"prompt": "test"},
+                    "parameters": {
+                        "resolution": "720p",
+                        "duration": 5,
+                        "aspect_ratio": "16:9",
+                        "mode": "text",
+                    },
+                }
+            )
+
+            job = gateway.store.get(request_id="priority-reason-request", internal=True)
+            self.assertEqual(job["provider_id"], "paisio")
+            self.assertEqual(job["selection_reason"], "fixed_provider_priority_v1")
+
+    def test_capability_only_job_persists_single_route_reason(self):
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as directory:
+            gateway = Gateway.__new__(Gateway)
+            gateway.store = Store(pathlib.Path(directory))
+            gateway.catalog = Catalog.load(ROOT / "catalog.json")
+            gateway.adapters = {
+                "toonflow": FakeAdapter("toonflow", Observation(status="running")),
+                "paisio": FakeAdapter("paisio", Observation(status="running")),
+            }
+            gateway.config = types.SimpleNamespace(
+                data_dir=pathlib.Path(directory),
+                drain_file_name="DRAIN",
+            )
+            gateway.pricing = types.SimpleNamespace(quote=lambda *_: {"amount": "1.0"})
+            gateway.circuit_snapshot = lambda: {"open": False}
+            gateway.start_submit = lambda _job_id: None
+
+            gateway.submit(
+                {
+                    "protocol_version": "xtai-relay-v1",
+                    "capability": "video.generate",
+                    "request_id": "capability-only-request",
+                    "model": "seedance-2.0-mini",
+                    "input": {"prompt": "test"},
+                    "parameters": {
+                        "resolution": "720p",
+                        "duration": 5,
+                        "aspect_ratio": "16:9",
+                        "mode": "text",
+                    },
+                }
+            )
+
+            job = gateway.store.get(request_id="capability-only-request", internal=True)
+            self.assertEqual(job["provider_id"], "toonflow")
+            self.assertEqual(job["selection_reason"], "capability_only_v1")
 
     def test_legacy_queued_job_keeps_its_persisted_send_resolution_flag(self):
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as directory:

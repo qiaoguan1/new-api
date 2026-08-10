@@ -6,9 +6,11 @@ downstream model names and approved upstream model mappings.
 
 ## Routing contract
 
-- `seedance-2.0` and `seedance-2.0-fast` use Toonflow and Paisio when both are configured.
-- Equal-priority providers are ordered with a deterministic request-ID rendezvous hash. Repeating
-  the same request ID therefore retains the same first route.
+- `seedance-2.0` and `seedance-2.0-fast` use Paisio first and retain Toonflow as the fallback when
+  both are configured, healthy, and compatible with the request.
+- Provider precedence comes from the reviewed catalog priority (`paisio=10`, `toonflow=20`) and is
+  independent of request ID or catalog input order. Repeating the same request ID retains the same
+  persisted plan.
 - `seedance-2.0-mini` remains Toonflow-only until another route has reviewed capability evidence.
 - The complete ordered plan is written to SQLite before any upstream submission.
 - Fallback is allowed only after a definite submission rejection with no upstream task ID.
