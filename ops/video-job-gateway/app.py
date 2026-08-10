@@ -361,6 +361,9 @@ class Gateway:
             configured_providers=replay_providers,
         )
         route = routes[0]
+        selection_reason = (
+            "capability_only_v1" if len(routes) == 1 else "fixed_provider_priority_v1"
+        )
         route_plan = [
             {
                 "provider_id": candidate.provider,
@@ -385,7 +388,7 @@ class Gateway:
                     adapter_revision=route.adapter_revision,
                     payload_json=payload_json,
                     route_plan=route_plan,
-                    selection_reason="deterministic_priority_rendezvous_v1",
+                    selection_reason=selection_reason,
                 )
             except StoreConflict as error:
                 raise GatewayError(HTTPStatus.CONFLICT, "request_id_conflict", str(error)) from error
@@ -405,7 +408,7 @@ class Gateway:
                 adapter_revision=route.adapter_revision,
                 payload_json=payload_json,
                 route_plan=route_plan,
-                selection_reason="deterministic_priority_rendezvous_v1",
+                selection_reason=selection_reason,
             )
         except StoreConflict as error:
             message = str(error)
