@@ -67,6 +67,11 @@ func sweepTimedOutTasks(ctx context.Context) {
 			task.FailReason = reason
 		}
 
+		if billing := task.PrivateData.BillingContext; billing != nil &&
+			billing.ContractVersion == VideoBillingContractVersion {
+			billing.BillingStatus = "refund_pending"
+		}
+
 		won, err := task.UpdateWithStatus(oldStatus)
 		if err != nil {
 			logger.LogError(ctx, fmt.Sprintf("sweepTimedOutTasks CAS update error for task %s: %v", task.TaskID, err))
@@ -110,7 +115,9 @@ func TaskPollingLoop() {
 				upstreamID := task.GetUpstreamTaskID()
 				if upstreamID == "" {
 					// 统计失败的未完成任务
-					nullTaskIds = append(nullTaskIds, task.ID)
+					if !failV2VideoTaskAndRefund(ctx, task, "missing upstream video task id") {
+						nullTaskIds = append(nullTaskIds, task.ID)
+					}
 					continue
 				}
 				taskM[upstreamID] = task
@@ -304,20 +311,25 @@ func updateVideoTasks(ctx context.Context, platform constant.TaskPlatform, chann
 	}
 	cacheGetChannel, err := model.CacheGetChannel(channelId)
 	if err != nil {
-		// Collect DB primary key IDs for bulk update (taskIds are upstream IDs, not task_id column values)
+		reason := fmt.Sprintf("Failed to get channel info, channel ID: %d", channelId)
+		// V2 tasks must refund transactionally; legacy tasks retain the bulk status repair.
 		var failedIDs []int64
 		for _, upstreamID := range taskIds {
 			if t, ok := taskM[upstreamID]; ok {
-				failedIDs = append(failedIDs, t.ID)
+				if !failV2VideoTaskAndRefund(ctx, t, reason) {
+					failedIDs = append(failedIDs, t.ID)
+				}
 			}
 		}
-		errUpdate := model.TaskBulkUpdateByID(failedIDs, map[string]any{
-			"fail_reason": fmt.Sprintf("Failed to get channel info, channel ID: %d", channelId),
-			"status":      "FAILURE",
-			"progress":    "100%",
-		})
-		if errUpdate != nil {
-			common.SysLog(fmt.Sprintf("UpdateVideoTask error: %v", errUpdate))
+		if len(failedIDs) > 0 {
+			errUpdate := model.TaskBulkUpdateByID(failedIDs, map[string]any{
+				"fail_reason": reason,
+				"status":      "FAILURE",
+				"progress":    "100%",
+			})
+			if errUpdate != nil {
+				common.SysLog(fmt.Sprintf("UpdateVideoTask error: %v", errUpdate))
+			}
 		}
 		return fmt.Errorf("CacheGetChannel failed: %w", err)
 	}
@@ -339,6 +351,30 @@ func updateVideoTasks(ctx context.Context, platform constant.TaskPlatform, chann
 		time.Sleep(1 * time.Second)
 	}
 	return nil
+}
+
+func failV2VideoTaskAndRefund(ctx context.Context, task *model.Task, reason string) bool {
+	if task == nil || task.PrivateData.BillingContext == nil ||
+		task.PrivateData.BillingContext.ContractVersion != VideoBillingContractVersion {
+		return false
+	}
+	oldStatus := task.Status
+	task.Status = model.TaskStatusFailure
+	task.Progress = taskcommon.ProgressComplete
+	task.FailReason = reason
+	if task.FinishTime == 0 {
+		task.FinishTime = time.Now().Unix()
+	}
+	task.PrivateData.BillingContext.BillingStatus = "refund_pending"
+	won, err := task.UpdateWithStatus(oldStatus)
+	if err != nil {
+		logger.LogError(ctx, fmt.Sprintf("failed to persist v2 video failure for task %s: %s", task.TaskID, err.Error()))
+		return true
+	}
+	if won {
+		RefundTaskQuota(ctx, task, reason)
+	}
+	return true
 }
 
 func updateVideoSingleTask(ctx context.Context, adaptor TaskPollingAdaptor, ch *model.Channel, taskId string, taskM map[string]*model.Task) error {
@@ -515,7 +551,11 @@ func captureTaskUsage(task *model.Task, taskResult *relaycommon.TaskInfo) {
 	}
 	switch task.Status {
 	case model.TaskStatusSuccess:
-		billing.BillingStatus = "settled"
+		if billing.ContractVersion == VideoBillingContractVersion {
+			billing.BillingStatus = "settlement_pending"
+		} else {
+			billing.BillingStatus = "settled"
+		}
 	case model.TaskStatusFailure:
 		billing.BillingStatus = "refund_pending"
 	}
@@ -561,6 +601,10 @@ func truncateBase64(s string) string {
 //  2. taskResult.TotalTokens > 0 → 按 token 重算
 //  3. 都不满足 → 保持预扣额度不变
 func settleTaskBillingOnComplete(ctx context.Context, adaptor TaskPollingAdaptor, task *model.Task, taskResult *relaycommon.TaskInfo) {
+	if bc := task.PrivateData.BillingContext; bc != nil && bc.ContractVersion == VideoBillingContractVersion {
+		logger.LogInfo(ctx, fmt.Sprintf("task %s awaits exact provider-ledger settlement", task.TaskID))
+		return
+	}
 	// 0. 按次计费的任务不做差额结算
 	if bc := task.PrivateData.BillingContext; bc != nil && bc.PerCallBilling {
 		logger.LogInfo(ctx, fmt.Sprintf("任务 %s 按次计费，跳过差额结算", task.TaskID))

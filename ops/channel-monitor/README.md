@@ -136,8 +136,9 @@ Candidate output is gated by approved mapping, current enabled model config,
 daily health audit, official-price coverage, and the publish allowlist. Missing
 upstream cost evidence does not block an officially priced healthy route. The
 public candidate file contains only stable model IDs, resolutions,
-availability, markup, and protocol/catalog/pricing revisions. Upstream names,
-channel IDs, costs, profits, credentials, and review notes remain internal.
+availability, downstream sale prices, and protocol/catalog/pricing revisions.
+Upstream names, channel IDs, provider costs, markup, margins, profits,
+credentials, and review notes remain internal.
 
 ## Video consumption reconciliation
 
@@ -166,3 +167,26 @@ The protected monitor generator is patched with
 reviewed production anchors change. Video provider cost remains comparison
 evidence only. Downstream video quotes continue to use Ark official pricing
 multiplied by 1.5.
+
+## Video settlement publisher
+
+After `generate-video-consumption-monitor.py` completes, run
+`scripts/publish-video-settlements.py`. It publishes only completed, exact
+provider-task matches. Missing, ambiguous, running, stale, or inferred records
+remain pending and never become a fabricated charge.
+
+The gateway uses `VIDEO_SETTLEMENT_GATEWAY_URL` and the root-readable
+`VIDEO_SETTLEMENT_TOKEN_FILE`. Ordinary NewAPI users are enabled by setting
+`NEWAPI_SETTLEMENT_URL`, `NEWAPI_SETTLEMENT_USER_ID`, and the root-readable
+`NEWAPI_SETTLEMENT_ACCESS_TOKEN_FILE`. The NewAPI account must be root. Run the
+publisher after the daily provider ledger is complete; retries are safe because
+settlement IDs and evidence fingerprints are deterministic.
+
+```text
+fetch-upstream-balance.py
+generate-video-consumption-monitor.py
+publish-video-settlements.py
+```
+
+The hourly monitor may refresh health data, while final settlement should
+follow the complete daily ledger and may be retried safely.

@@ -571,32 +571,47 @@ func RelayTask(c *gin.Context) {
 
 	// ── 成功：结算 + 日志 + 插入任务 ──
 	if taskErr == nil {
-		if settleErr := service.SettleBilling(c, relayInfo, result.Quota); settleErr != nil {
-			common.SysError("settle task billing error: " + settleErr.Error())
-		}
-		service.LogTaskConsumption(c, relayInfo)
-
+		videoBillingV2 := c.GetString(relay.VideoBillingContractContextKey) == service.VideoBillingContractVersion
 		task := model.InitTask(result.Platform, relayInfo)
 		task.PrivateData.UpstreamTaskID = result.UpstreamTaskID
 		task.PrivateData.BillingSource = relayInfo.BillingSource
 		task.PrivateData.SubscriptionId = relayInfo.SubscriptionId
 		task.PrivateData.TokenId = relayInfo.TokenId
 		task.PrivateData.BillingContext = &model.TaskBillingContext{
-			ModelPrice:      relayInfo.PriceData.ModelPrice,
-			GroupRatio:      relayInfo.PriceData.GroupRatioInfo.GroupRatio,
-			ModelRatio:      relayInfo.PriceData.ModelRatio,
-			OtherRatios:     relayInfo.PriceData.OtherRatios,
-			OriginModelName: relayInfo.OriginModelName,
-			PerCallBilling:  common.StringsContains(constant.TaskPricePatches, relayInfo.OriginModelName) || relayInfo.PriceData.UsePrice,
-			QuotaPerUnit:    common.QuotaPerUnit,
-			BillingCurrency: "CNY",
-			BillingStatus:   "reserved",
+			ContractVersion:         c.GetString(relay.VideoBillingContractContextKey),
+			ModelPrice:              relayInfo.PriceData.ModelPrice,
+			GroupRatio:              relayInfo.PriceData.GroupRatioInfo.GroupRatio,
+			ModelRatio:              relayInfo.PriceData.ModelRatio,
+			OtherRatios:             relayInfo.PriceData.OtherRatios,
+			OriginModelName:         relayInfo.OriginModelName,
+			PerCallBilling:          common.StringsContains(constant.TaskPricePatches, relayInfo.OriginModelName) || relayInfo.PriceData.UsePrice,
+			QuotaPerUnit:            common.QuotaPerUnit,
+			BillingCurrency:         "CNY",
+			BillingStatus:           "reserved",
+			ReservedQuota:           result.Quota,
+			OfficialPricingRevision: c.GetString(relay.VideoOfficialRevisionContextKey),
 		}
 		task.Quota = result.Quota
 		task.Data = result.TaskData
 		task.Action = relayInfo.Action
+		if !videoBillingV2 {
+			if settleErr := service.SettleBilling(c, relayInfo, result.Quota); settleErr != nil {
+				common.SysError("settle task billing error: " + settleErr.Error())
+			}
+			service.LogTaskConsumption(c, relayInfo)
+		}
 		if insertErr := task.Insert(); insertErr != nil {
 			common.SysError("insert task error: " + insertErr.Error())
+			if videoBillingV2 && relayInfo.Billing != nil {
+				relayInfo.Billing.Refund(c)
+			}
+			return
+		}
+		if videoBillingV2 {
+			if settleErr := service.SettleBilling(c, relayInfo, result.Quota); settleErr != nil {
+				common.SysError("settle task billing error: " + settleErr.Error())
+			}
+			service.LogTaskConsumption(c, relayInfo)
 		}
 	}
 

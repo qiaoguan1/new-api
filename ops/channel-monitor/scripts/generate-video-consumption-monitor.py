@@ -68,12 +68,17 @@ def build(day: str | None = None, *, gateway_db: pathlib.Path | None = None):
             evidence.append(sanitized)
     jobs = gateway_rows_from_sqlite(gateway_db or GATEWAY_DB, business_day)
     reconciled = reconcile_video_usage(jobs, evidence)
-    return build_monitor_snapshots(
+    snapshots = build_monitor_snapshots(
         business_day,
         reconciled,
         generated_at=beijing_iso_now(),
         collection_entries=video_entries,
     )
+    # Exact provider-task evidence remains in the private snapshot only. It is
+    # consumed by the authenticated settlement publisher and never exposed by
+    # the public monitor endpoint.
+    snapshots["private"]["provider_evidence"] = evidence
+    return snapshots
 
 
 def main() -> int:

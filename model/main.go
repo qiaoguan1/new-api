@@ -268,6 +268,7 @@ func migrateDB() error {
 		&TopUp{},
 		&QuotaData{},
 		&Task{},
+		&VideoTaskSettlement{},
 		&Model{},
 		&Vendor{},
 		&PrefillGroup{},

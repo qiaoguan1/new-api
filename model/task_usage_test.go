@@ -99,3 +99,24 @@ func TestTaskVideoUsageDoesNotGuessLegacyConversion(t *testing.T) {
 	require.Equal(t, "CNY", usage.Currency)
 	require.Equal(t, "unavailable", usage.BillingStatus)
 }
+
+func TestTaskOpenAIVideoHoldsResultUntilSettlement(t *testing.T) {
+	task := &Task{
+		TaskID:     "task_pending",
+		Quota:      500000,
+		Status:     TaskStatusSuccess,
+		FailReason: "https://private-result.example/video.mp4",
+		PrivateData: TaskPrivateData{BillingContext: &TaskBillingContext{
+			ContractVersion: "xtai-video-billing-v2",
+			QuotaPerUnit:    500000,
+			BillingStatus:   "settlement_pending",
+			ReservedQuota:   500000,
+		}},
+	}
+
+	video := task.ToOpenAIVideo()
+	require.Equal(t, "pending_settlement", video.ResultDelivery)
+	require.NotContains(t, video.Metadata, "url")
+	require.Equal(t, "settlement_pending", video.Usage.BillingStatus)
+	require.Equal(t, 1.0, video.Usage.ReservedAmount)
+}

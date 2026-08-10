@@ -18,6 +18,8 @@ import (
 
 const UserNameMaxLength = 20
 
+var ErrUserQuotaNotPositive = errors.New("user wallet balance is not positive")
+
 // User if you add sensitive fields, don't forget to clean them in setupLogin function.
 // Otherwise, the sensitive information will be saved on local storage in plain text!
 type User struct {
@@ -922,6 +924,64 @@ func DecreaseUserQuota(id int, quota int, db bool) (err error) {
 		return nil
 	}
 	return decreaseUserQuota(id, quota)
+}
+
+// ReserveUserQuotaIfPositive reserves one accepted request while the authoritative
+// wallet balance is positive. The subtraction itself may make the balance negative;
+// later requests are rejected until a recharge restores a positive balance.
+func ReserveUserQuotaIfPositive(id int, quota int) error {
+	if quota < 0 {
+		return errors.New("quota 不能为负数！")
+	}
+	if quota == 0 {
+		return nil
+	}
+	if common.RedisEnabled && common.RDB != nil {
+		reserved, missing, err := cacheReserveUserQuotaIfPositive(id, int64(quota))
+		if err != nil {
+			return err
+		}
+		if missing {
+			current, dbErr := GetUserQuota(id, true)
+			if dbErr != nil {
+				return dbErr
+			}
+			if err := updateUserQuotaCache(id, current); err != nil {
+				return err
+			}
+			reserved, _, err = cacheReserveUserQuotaIfPositive(id, int64(quota))
+			if err != nil {
+				return err
+			}
+		}
+		if !reserved {
+			return ErrUserQuotaNotPositive
+		}
+		if common.BatchUpdateEnabled {
+			addNewRecord(BatchUpdateTypeUserQuota, id, -quota)
+			return nil
+		}
+		result := DB.Model(&User{}).Where("id = ?", id).
+			Update("quota", gorm.Expr("quota - ?", quota))
+		if result.Error != nil || result.RowsAffected != 1 {
+			_ = cacheIncrUserQuota(id, int64(quota))
+			if result.Error != nil {
+				return result.Error
+			}
+			return gorm.ErrRecordNotFound
+		}
+		return nil
+	}
+	result := DB.Model(&User{}).
+		Where("id = ? AND quota > 0", id).
+		Update("quota", gorm.Expr("quota - ?", quota))
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected != 1 {
+		return ErrUserQuotaNotPositive
+	}
+	return nil
 }
 
 func decreaseUserQuota(id int, quota int) (err error) {

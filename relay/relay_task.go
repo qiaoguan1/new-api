@@ -204,6 +204,14 @@ func RelayTaskSubmit(c *gin.Context, info *relaycommon.RelayInfo) (*TaskSubmitRe
 	}
 
 	// 7. 预扣费（仅首次 — 重试时 info.Billing 已存在，跳过）
+	// Stable Seedance SKUs ignore group ratios and provider catalog prices.
+	// The final reservation is the reviewed Ark official price multiplied by 1.5.
+	if matched, pricingErr := applyOfficialVideoReservation(c, info); pricingErr != nil {
+		return nil, service.TaskErrorWrapperLocal(pricingErr, "official_video_price_error", http.StatusBadRequest)
+	} else if matched {
+		common.SysLog(fmt.Sprintf("video reservation uses Ark official x1.5 revision %s", VideoOfficialPricingRevision))
+	}
+
 	if info.Billing == nil && !info.PriceData.FreeModel {
 		info.ForcePreConsume = true
 		if apiErr := service.PreConsumeBilling(c, info.PriceData.Quota, info); apiErr != nil {
@@ -243,7 +251,7 @@ func RelayTaskSubmit(c *gin.Context, info *relaycommon.RelayInfo) (*TaskSubmitRe
 
 	// 11. 提交后计费调整：让适配器根据上游实际返回调整 OtherRatios
 	finalQuota := info.PriceData.Quota
-	if adjustedRatios := adaptor.AdjustBillingOnSubmit(info, taskData); len(adjustedRatios) > 0 {
+	if adjustedRatios := adaptor.AdjustBillingOnSubmit(info, taskData); len(adjustedRatios) > 0 && c.GetString(VideoBillingContractContextKey) == "" {
 		// 基于调整后的 ratios 重新计算 quota
 		finalQuota = recalcQuotaFromRatios(info, adjustedRatios)
 		info.PriceData.OtherRatios = adjustedRatios
@@ -387,6 +395,13 @@ func videoFetchByIDRespBodyBuilder(c *gin.Context) (respBody []byte, taskResp *d
 
 	// OpenAI Video API 格式: 走各 adaptor 的 ConvertToOpenAIVideo
 	if isOpenAIVideoAPI {
+		if originTask.ResultDeliveryStatus() == "pending_settlement" {
+			respBody, err = common.Marshal(originTask.ToOpenAIVideo())
+			if err != nil {
+				taskResp = service.TaskErrorWrapper(err, "marshal_pending_video_failed", http.StatusInternalServerError)
+			}
+			return
+		}
 		adaptor := GetTaskAdaptor(originTask.Platform)
 		if adaptor == nil {
 			taskResp = service.TaskErrorWrapperLocal(fmt.Errorf("invalid channel id: %d", originTask.ChannelId), "invalid_channel_id", http.StatusBadRequest)
@@ -424,6 +439,9 @@ func videoFetchByIDRespBodyBuilder(c *gin.Context) (respBody []byte, taskResp *d
 // 仅当渠道类型为 Gemini 或 Vertex 时触发；其他渠道或出错时返回 nil。
 // 当非 OpenAI Video API 时，还会构建自定义格式的响应体。
 func tryRealtimeFetch(task *model.Task, isOpenAIVideoAPI bool) []byte {
+	if task.PrivateData.BillingContext != nil && task.PrivateData.BillingContext.ContractVersion == VideoBillingContractVersion {
+		return nil
+	}
 	channelModel, err := model.GetChannelById(task.ChannelId, true)
 	if err != nil {
 		return nil
@@ -544,28 +562,51 @@ func mapTaskStatusToSimple(status model.TaskStatus) string {
 }
 
 func TaskModel2Dto(task *model.Task) *dto.TaskDto {
+	resultURL := task.GetResultURL()
+	data := task.Data
+	delivery := task.ResultDeliveryStatus()
+	channelID := task.ChannelId
+	quota := task.Quota
+	properties := task.Properties
+	failReason := task.FailReason
+	if task.PrivateData.BillingContext != nil && task.PrivateData.BillingContext.ContractVersion == VideoBillingContractVersion {
+		channelID = 0
+		quota = 0
+		properties.UpstreamModelName = ""
+		data = nil
+		if task.Status == model.TaskStatusFailure {
+			failReason = "video task failed"
+		} else {
+			failReason = ""
+		}
+	}
+	if delivery == "pending_settlement" {
+		resultURL = ""
+		data = nil
+	}
 	return &dto.TaskDto{
-		ID:         task.ID,
-		CreatedAt:  task.CreatedAt,
-		UpdatedAt:  task.UpdatedAt,
-		TaskID:     task.TaskID,
-		Platform:   string(task.Platform),
-		UserId:     task.UserId,
-		Group:      task.Group,
-		ChannelId:  task.ChannelId,
-		Quota:      task.Quota,
-		Action:     task.Action,
-		Status:     string(task.Status),
-		FailReason: task.FailReason,
-		ResultURL:  task.GetResultURL(),
-		SubmitTime: task.SubmitTime,
-		StartTime:  task.StartTime,
-		FinishTime: task.FinishTime,
-		Progress:   task.Progress,
-		Properties: task.Properties,
-		Username:   task.Username,
-		Data:       task.Data,
-		Usage:      task.VideoUsage(),
+		ID:             task.ID,
+		CreatedAt:      task.CreatedAt,
+		UpdatedAt:      task.UpdatedAt,
+		TaskID:         task.TaskID,
+		Platform:       string(task.Platform),
+		UserId:         task.UserId,
+		Group:          task.Group,
+		ChannelId:      channelID,
+		Quota:          quota,
+		Action:         task.Action,
+		Status:         string(task.Status),
+		FailReason:     failReason,
+		ResultURL:      resultURL,
+		SubmitTime:     task.SubmitTime,
+		StartTime:      task.StartTime,
+		FinishTime:     task.FinishTime,
+		Progress:       task.Progress,
+		Properties:     properties,
+		Username:       task.Username,
+		Data:           data,
+		Usage:          task.VideoUsage(),
+		ResultDelivery: delivery,
 	}
 }
 
@@ -574,10 +615,74 @@ func attachOpenAIVideoUsage(task *model.Task, payload []byte) ([]byte, error) {
 	if err := common.Unmarshal(payload, &video); err != nil {
 		return nil, err
 	}
+	if task.PrivateData.BillingContext != nil &&
+		task.PrivateData.BillingContext.ContractVersion == VideoBillingContractVersion {
+		redactPrivateVideoFields(video)
+	}
 	usage, err := common.Marshal(task.VideoUsage())
 	if err != nil {
 		return nil, err
 	}
 	video["usage"] = usage
+	delivery, err := common.Marshal(task.ResultDeliveryStatus())
+	if err != nil {
+		return nil, err
+	}
+	video["result_delivery"] = delivery
+	if task.ResultDeliveryStatus() == "pending_settlement" {
+		delete(video, "url")
+		delete(video, "output_url")
+		if metadataRaw, ok := video["metadata"]; ok {
+			var metadata map[string]json.RawMessage
+			if common.Unmarshal(metadataRaw, &metadata) == nil {
+				delete(metadata, "url")
+				delete(metadata, "output_url")
+				video["metadata"], _ = common.Marshal(metadata)
+			}
+		}
+	}
 	return common.Marshal(video)
+}
+
+func redactPrivateVideoFields(value map[string]json.RawMessage) {
+	for key, raw := range value {
+		normalized := strings.ToLower(strings.ReplaceAll(key, "-", "_"))
+		if normalized == "channel" || normalized == "channel_id" ||
+			normalized == "route" || normalized == "routes" ||
+			normalized == "route_plan" || normalized == "selection_reason" ||
+			normalized == "cost" || strings.HasPrefix(normalized, "cost_") ||
+			strings.Contains(normalized, "provider") ||
+			strings.Contains(normalized, "vendor") ||
+			strings.Contains(normalized, "upstream") ||
+			strings.Contains(normalized, "actual_cost") ||
+			strings.Contains(normalized, "margin") ||
+			strings.Contains(normalized, "markup") ||
+			strings.Contains(normalized, "api_key") {
+			delete(value, key)
+			continue
+		}
+		var nested map[string]json.RawMessage
+		if common.Unmarshal(raw, &nested) == nil && nested != nil {
+			redactPrivateVideoFields(nested)
+			encoded, err := common.Marshal(nested)
+			if err == nil {
+				value[key] = encoded
+			}
+			continue
+		}
+		var items []json.RawMessage
+		if common.Unmarshal(raw, &items) == nil && items != nil {
+			for index := range items {
+				var item map[string]json.RawMessage
+				if common.Unmarshal(items[index], &item) == nil && item != nil {
+					redactPrivateVideoFields(item)
+					items[index], _ = common.Marshal(item)
+				}
+			}
+			encoded, err := common.Marshal(items)
+			if err == nil {
+				value[key] = encoded
+			}
+		}
+	}
 }
