@@ -12,4 +12,4 @@
 - [x] T010 Run focused Go/Python tests, race/concurrency checks, format, build, and existing regression suites.
 - [x] T011 Perform comprehensive and security review; fix every finding and post the review artifact.
 - [x] T012 Run ten deterministic integration rounds and document rollback/production verification.
-- [ ] T013 Commit, push, create PR, verify CI, merge, and update #50/project status.
+- [x] T013 Commit, push, create PR, verify CI, merge, and update #50/project status.
