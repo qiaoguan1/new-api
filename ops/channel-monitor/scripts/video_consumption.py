@@ -70,7 +70,7 @@ def _toonflow_rows(payload: Any) -> list[dict[str, Any]]:
         return [row for row in current if isinstance(row, dict)]
     if not isinstance(current, dict):
         return []
-    for key in ("list", "rows", "records", "items"):
+    for key in ("data", "list", "rows", "records", "items"):
         value = current.get(key)
         if isinstance(value, list):
             return [row for row in value if isinstance(row, dict)]

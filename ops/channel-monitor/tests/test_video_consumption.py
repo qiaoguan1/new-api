@@ -90,6 +90,28 @@ class ToonflowParsingTests(unittest.TestCase):
         self.assertEqual(result[0]["state"], "completed")
         self.assertEqual(result[0]["actual_cost_cny"], 2.0)
 
+    def test_current_toonflow_nested_data_list_is_parsed(self):
+        payload = {
+            "data": {
+                "data": [
+                    {
+                        "taskICode": "tf-current-shape",
+                        "modelName": "seedance-2.0-full-720p",
+                        "state": 2,
+                        "price": "1.75",
+                        "creationTime": "2026-08-09 08:00:00",
+                    }
+                ],
+                "total": 1,
+            }
+        }
+
+        rows = parse_toonflow_operation_rows(payload, DAY, rate=1.0)
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["provider_task_id"], "tf-current-shape")
+        self.assertEqual(rows[0]["actual_cost_cny"], 1.75)
+
 
 class PaisioTaskParsingTests(unittest.TestCase):
     def test_authenticated_video_tasks_use_task_id_and_quota(self):

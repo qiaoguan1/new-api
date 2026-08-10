@@ -285,6 +285,39 @@ class UsageV1AggregationTests(unittest.TestCase):
         self.assertEqual(rows[0]["actual_cost_cny"], 1.5)
         self.assertNotIn("operator-token", str(rows))
 
+    def test_toonflow_operation_log_accepts_current_nested_data_list(self):
+        response = mock.Mock(status_code=200)
+        response.json.return_value = {
+            "code": 200,
+            "data": {
+                "data": [
+                    {
+                        "taskICode": "toon-current-shape",
+                        "modelName": "seedance-2.0-full-720p",
+                        "state": 2,
+                        "price": 2.25,
+                        "creationTime": "2026-08-09 20:00:00",
+                    }
+                ],
+                "total": 1,
+            },
+        }
+        session = mock.Mock()
+        session.headers = {}
+        session.get.return_value = response
+
+        rows = collector.toonflow_operation_logs(
+            session,
+            "https://api.toonflow.net",
+            "operator-token",
+            "2026-08-09",
+            1.0,
+        )
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["provider_task_id"], "toon-current-shape")
+        self.assertEqual(rows[0]["actual_cost_cny"], 2.25)
+
     def test_toonflow_rejects_short_page_before_reported_total(self):
         response = mock.Mock(status_code=200)
         response.json.return_value = {
