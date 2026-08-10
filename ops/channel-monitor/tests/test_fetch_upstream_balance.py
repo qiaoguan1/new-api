@@ -194,6 +194,141 @@ class UsageV1AggregationTests(unittest.TestCase):
                 "2026-07-22",
             )
 
+    def test_toonflow_collection_requires_operator_authorized_web_token(self):
+        with self.assertRaisesRegex(RuntimeError, "web token"):
+            collector.collect_one(
+                "toonflow",
+                {
+                    "username": "user",
+                    "password": "secret",
+                    "website_url": "https://api.toonflow.net",
+                    "rate": 1,
+                },
+                "",
+                {"days": {}},
+                "2026-08-09",
+            )
+
+    def test_newapi_task_api_preserves_video_task_evidence(self):
+        response = mock.Mock(status_code=200)
+        response.json.return_value = {
+            "success": True,
+            "data": {
+                "items": [
+                    {
+                        "task_id": "paisio-task",
+                        "action": "videoGenerate",
+                        "status": "SUCCESS",
+                        "quota": 500000,
+                        "created_at": 1786291199,
+                    }
+                ],
+                "total": 1,
+            },
+        }
+        session = mock.Mock()
+        session.get.return_value = response
+
+        rows = collector.standard_video_tasks(
+            session, "https://example.test", "2026-08-09", "paisio", 1.0
+        )
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["provider_task_id"], "paisio-task")
+        self.assertEqual(rows[0]["actual_cost_cny"], 1.0)
+
+    def test_newapi_task_api_rejects_short_page_before_reported_total(self):
+        response = mock.Mock(status_code=200)
+        response.json.return_value = {
+            "success": True,
+            "data": {"items": [{"task_id": "one"}], "total": 200},
+        }
+        session = mock.Mock()
+        session.get.return_value = response
+
+        with self.assertRaisesRegex(RuntimeError, "pagination incomplete"):
+            collector.standard_video_tasks(
+                session, "https://example.test", "2026-08-09", "paisio", 1.0
+            )
+
+    def test_toonflow_operation_log_uses_bearer_token_and_sanitized_cost(self):
+        response = mock.Mock(status_code=200)
+        response.json.return_value = {
+            "code": 200,
+            "data": {
+                "list": [
+                    {
+                        "taskICode": "toon-task",
+                        "modelName": "seedance-2.0-full-720p",
+                        "state": 2,
+                        "price": 1.5,
+                        "creationTime": "2026-08-09 20:00:00",
+                    }
+                ],
+                "total": 1,
+            },
+        }
+        session = mock.Mock()
+        session.headers = {}
+        session.get.return_value = response
+
+        rows = collector.toonflow_operation_logs(
+            session,
+            "https://api.toonflow.net",
+            "operator-token",
+            "2026-08-09",
+            1.0,
+        )
+
+        self.assertEqual(session.headers["Authorization"], "Bearer operator-token")
+        self.assertEqual(rows[0]["provider_task_id"], "toon-task")
+        self.assertEqual(rows[0]["actual_cost_cny"], 1.5)
+        self.assertNotIn("operator-token", str(rows))
+
+    def test_toonflow_rejects_short_page_before_reported_total(self):
+        response = mock.Mock(status_code=200)
+        response.json.return_value = {
+            "code": 200,
+            "data": {"list": [{"taskICode": "one"}], "total": 200},
+        }
+        session = mock.Mock()
+        session.headers = {}
+        session.get.return_value = response
+
+        with self.assertRaisesRegex(RuntimeError, "pagination incomplete"):
+            collector.toonflow_operation_logs(
+                session, "https://api.toonflow.net", "operator-token", "2026-08-09", 1.0
+            )
+
+    def test_toonflow_token_is_never_sent_to_unapproved_host(self):
+        with self.assertRaisesRegex(RuntimeError, "unapproved host"):
+            collector.collect_toonflow(
+                {
+                    "web_token": "operator-token",
+                    "website_url": "https://evil.example",
+                    "rate": 1,
+                },
+                "",
+                {"days": {}},
+                "2026-08-09",
+            )
+
+    def test_task_cost_evidence_fails_closed_when_it_disagrees_with_billing_log(self):
+        rows, status = collector.validate_video_task_evidence(
+            [
+                {
+                    "provider_task_id": "task-1",
+                    "actual_cost_cny": 3.0,
+                    "actual_cost_status": "actual",
+                }
+            ],
+            expected_cost_cny=1.0,
+        )
+
+        self.assertEqual(status, "cost_mismatch")
+        self.assertIsNone(rows[0]["actual_cost_cny"])
+        self.assertEqual(rows[0]["actual_cost_status"], "unknown")
+
     def test_per_second_video_refunds_are_not_averaged_over_log_rows(self):
         samples = []
         for duration, count in ((4, 20), (5, 7), (12, 4)):

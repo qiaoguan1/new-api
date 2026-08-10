@@ -12,6 +12,7 @@ import math
 import os
 import pathlib
 import re
+import stat
 import sys
 import time
 from urllib.parse import urlsplit
@@ -23,12 +24,23 @@ from monitor_time import (
     beijing_iso_now,
     resolve_beijing_business_day,
 )
+from video_consumption import (
+    dedupe_provider_usage,
+    parse_newapi_video_task_rows,
+    parse_toonflow_operation_rows,
+)
 
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 UPSTREAMS_PATH = ROOT / "upstreams.json"
 CRED_PATH = ROOT / "upstream-credentials.json"
 LEDGER_PATH = ROOT / "data" / "upstream-balance-ledger.json"
+TOONFLOW_TOKEN_PATH = pathlib.Path(
+    os.environ.get(
+        "CHANNEL_MONITOR_TOONFLOW_TOKEN_FILE",
+        str(ROOT / "secrets" / "toonflow-web-token"),
+    )
+)
 
 TIMEOUT = 25
 PAGE_SIZE = 100
@@ -264,6 +276,287 @@ def standard_logs(session, origin, day):
     if not completed:
         raise RuntimeError(f"classic logs exceed safety limit ({MAX_PAGES * PAGE_SIZE} rows)")
     return rows, total_quota, per_model, details
+
+
+def standard_video_tasks(session, origin, day, provider_id, rate):
+    """Fetch a complete authenticated NewAPI video-task set for one Beijing day."""
+    result = []
+    completed = False
+    for page in range(1, MAX_PAGES + 1):
+        response = session.get(
+            origin + "/api/task/self",
+            params={"p": page, "page_size": PAGE_SIZE},
+            timeout=TIMEOUT,
+        )
+        body = json_response(response, f"video task page {page}")
+        data = body.get("data") if isinstance(body, dict) else None
+        items = data.get("items") if isinstance(data, dict) else None
+        if response.status_code != 200 or not body.get("success") or not isinstance(items, list):
+            raise RuntimeError(
+                f"video task page {page} failed (http {response.status_code}): "
+                f"{clean_error(body.get('message'))}"
+            )
+        result.extend(
+            parse_newapi_video_task_rows(
+                body,
+                day,
+                provider_id=provider_id,
+                rate=rate,
+                quota_per_usd=QUOTA_PER_USD,
+            )
+        )
+        total = int(data.get("total") or 0)
+        if total:
+            if page * PAGE_SIZE >= total:
+                completed = True
+                break
+            if len(items) < PAGE_SIZE:
+                raise RuntimeError(
+                    f"video task pagination incomplete: expected {total}, received short page {page}"
+                )
+        elif not items or len(items) < PAGE_SIZE:
+            completed = True
+            break
+    if not completed:
+        raise RuntimeError(f"video tasks exceed safety limit ({MAX_PAGES * PAGE_SIZE} rows)")
+    return dedupe_provider_usage(result)
+
+
+def validate_video_task_evidence(rows, expected_cost_cny):
+    """Fail closed when task-level costs do not reconcile to the complete billing ledger."""
+    evidence = [dict(row) for row in rows or []]
+    expected = safe_float(expected_cost_cny)
+    if expected is None or expected < 0:
+        status = "billing_total_unavailable"
+    else:
+        actual = sum(
+            float(row.get("actual_cost_cny") or 0)
+            for row in evidence
+            if row.get("actual_cost_status") in {"actual", "zero_verified"}
+        )
+        tolerance = max(0.01, abs(expected) * 0.005)
+        status = "complete" if abs(actual - expected) <= tolerance else "cost_mismatch"
+    if status != "complete":
+        for row in evidence:
+            row["actual_cost_cny"] = None
+            row["actual_cost_status"] = "unknown"
+    return evidence, status
+
+
+def _toonflow_json_get(session, url, *, params=None, label):
+    response = session.get(
+        url,
+        params=params or {},
+        timeout=TIMEOUT,
+        allow_redirects=False,
+    )
+    raw_content = getattr(response, "content", b"")
+    if isinstance(raw_content, (bytes, bytearray)) and len(raw_content) > 4 * 1024 * 1024:
+        raise RuntimeError(f"{label} response exceeds 4 MiB safety limit")
+    body = json_response(response, label)
+    mapping = body if isinstance(body, dict) else {}
+    code = mapping.get("code")
+    if (
+        response.status_code != 200
+        or not isinstance(body, dict)
+        or mapping.get("success") is False
+        or (code is not None and str(code) not in {"0", "200"})
+    ):
+        raise RuntimeError(
+            f"{label} failed (http {response.status_code}): "
+            f"{clean_error(mapping.get('message') or mapping.get('msg'))}"
+        )
+    return body
+
+
+def _toonflow_token(credential, token_path=None):
+    token = str(credential.get("web_token") or credential.get("access_token") or "").strip()
+    path = pathlib.Path(token_path or TOONFLOW_TOKEN_PATH)
+    if not token:
+        try:
+            token_stat = path.stat()
+            if token_stat.st_size > 16_384:
+                raise RuntimeError("Toonflow web token file is unexpectedly large")
+            if os.name == "posix" and stat.S_IMODE(token_stat.st_mode) & 0o077:
+                raise RuntimeError("Toonflow web token file permissions must be 0600")
+            token = path.read_text(encoding="utf-8").strip()
+        except FileNotFoundError:
+            token = ""
+        except OSError as exc:
+            raise RuntimeError("Toonflow web token file cannot be read") from exc
+    if token.lower().startswith("bearer "):
+        token = token[7:].strip()
+    if not token:
+        raise RuntimeError("missing operator-authorized Toonflow web token (CAPTCHA login required)")
+    if len(token) > 16_384 or any(character.isspace() for character in token):
+        raise RuntimeError("operator-authorized Toonflow web token is malformed")
+    parts = token.split(".")
+    if len(parts) == 3:
+        try:
+            padded = parts[1] + "=" * (-len(parts[1]) % 4)
+            claims = json.loads(base64.urlsafe_b64decode(padded).decode("utf-8"))
+            expires = int(claims.get("exp") or 0)
+        except Exception:
+            expires = 0
+        if expires and expires <= int(time.time()) + 60:
+            raise RuntimeError("operator-authorized Toonflow web token is expired")
+    return token
+
+
+def toonflow_operation_logs(session, origin, token, day, rate):
+    """Fetch a complete Toonflow operation-log set using an authorized Bearer token."""
+    session.headers.update({"Authorization": f"Bearer {token}"})
+    result = []
+    completed = False
+    for page in range(1, MAX_PAGES + 1):
+        body = _toonflow_json_get(
+            session,
+            origin + "/web/web/operationLog/getOperationLog",
+            params={"page": page, "limit": PAGE_SIZE, "taskICode": ""},
+            label=f"Toonflow operation log page {page}",
+        )
+        data = body.get("data") if isinstance(body.get("data"), dict) else {}
+        items = None
+        for key in ("list", "rows", "records", "items"):
+            if isinstance(data.get(key), list):
+                items = data.get(key)
+                break
+        if items is None:
+            raise RuntimeError(f"Toonflow operation log page {page} has no record list")
+        result.extend(parse_toonflow_operation_rows(body, day, rate=rate))
+        total = int(data.get("total") or data.get("count") or 0)
+        if total:
+            if page * PAGE_SIZE >= total:
+                completed = True
+                break
+            if len(items) < PAGE_SIZE:
+                raise RuntimeError(
+                    f"Toonflow pagination incomplete: expected {total}, received short page {page}"
+                )
+        elif not items or len(items) < PAGE_SIZE:
+            completed = True
+            break
+    if not completed:
+        raise RuntimeError(f"Toonflow logs exceed safety limit ({MAX_PAGES * PAGE_SIZE} rows)")
+    return dedupe_provider_usage(result)
+
+
+def _toonflow_pricing_metadata(session, origin):
+    body = _toonflow_json_get(
+        session,
+        origin + "/web/web/model/getModelData",
+        label="Toonflow model catalog",
+    )
+    data = body.get("data")
+    candidates = data if isinstance(data, list) else []
+    if isinstance(data, dict):
+        for key in ("list", "rows", "records", "items"):
+            if isinstance(data.get(key), list):
+                candidates = data.get(key)
+                break
+    allowed = ("modelName", "name", "ability", "quality", "price", "billingType")
+    models = [
+        {key: row.get(key) for key in allowed if key in row}
+        for row in candidates
+        if isinstance(row, dict)
+    ]
+    return {
+        "status": "complete",
+        "models": models,
+        "account_models": sorted(
+            {
+                str(row.get("modelName") or row.get("name") or "").strip()
+                for row in candidates
+                if isinstance(row, dict)
+            }
+            - {""}
+        ),
+        "fetched_at": int(time.time()),
+    }
+
+
+def collect_toonflow(credential, website, ledger, day):
+    origin = origin_of(credential.get("website_url") or website)
+    if urlsplit(origin).scheme != "https":
+        raise RuntimeError("refusing Toonflow authentication over non-HTTPS transport")
+    parsed_origin = urlsplit(origin)
+    if (parsed_origin.hostname or "").lower() != "api.toonflow.net" or parsed_origin.port not in (
+        None,
+        443,
+    ):
+        raise RuntimeError("refusing to send Toonflow web token to an unapproved host")
+    token = _toonflow_token(credential)
+    rate = safe_float(credential.get("rate"), 1.0) or 1.0
+    session = requests.Session()
+    session.headers.update(
+        {
+            "User-Agent": UA,
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+            "Origin": origin,
+            "Referer": origin + "/",
+        }
+    )
+    evidence = toonflow_operation_logs(session, origin, token, day, rate)
+    raw_cost = sum(float(row.get("actual_cost_cny") or 0) for row in evidence) / rate
+    per_model = {}
+    model_real = {}
+    for row in evidence:
+        model = row.get("raw_model") or row.get("stable_model") or "unknown"
+        actual = float(row.get("actual_cost_cny") or 0)
+        per_model[model] = per_model.get(model, 0.0) + actual / rate
+        detail = model_real.setdefault(
+            model,
+            {
+                "kind": "video_actual",
+                "billing_unit": "task",
+                "successful_calls": 0,
+                "net_cost_cny": 0.0,
+                "pricing_source": "toonflow_web_operation_log",
+            },
+        )
+        if row.get("state") == "completed":
+            detail["successful_calls"] += 1
+        detail["net_cost_cny"] += actual
+    for detail in model_real.values():
+        detail["net_cost_cny"] = round(detail["net_cost_cny"], 8)
+    balance = None
+    used = None
+    try:
+        dashboard = _toonflow_json_get(
+            session,
+            origin + "/web/web/pointsPreview/getPreviewData",
+            label="Toonflow points preview",
+        ).get("data") or {}
+        balance = safe_float(dashboard.get("totalPoints"))
+        used = safe_float(dashboard.get("totalConsumption"))
+    except Exception:
+        pass
+    try:
+        pricing_metadata = _toonflow_pricing_metadata(session, origin)
+    except Exception as exc:
+        pricing_metadata = {
+            "status": "unavailable",
+            "error": clean_error(exc, (token,)),
+            "models": [],
+            "account_models": [],
+            "fetched_at": int(time.time()),
+        }
+    prior = previous_balance(ledger, day, "toonflow")
+    return complete_entry(
+        "toonflow_web",
+        rate,
+        "",
+        balance,
+        used,
+        raw_cost,
+        len(evidence),
+        {model: round(value, 8) for model, value in per_model.items()},
+        model_real,
+        prior,
+        pricing_metadata=pricing_metadata,
+        video_task_evidence=evidence,
+    )
 
 
 def parse_tiered_prices(sample):
@@ -570,6 +863,7 @@ def complete_entry(
     real_cost,
     prior,
     pricing_metadata=None,
+    video_task_evidence=None,
 ):
     delta = None
     if prior is not None and balance is not None:
@@ -590,6 +884,7 @@ def complete_entry(
         "per_model_cost_usd": per_model,
         "per_model_real_cost": real_cost,
         "pricing_metadata": pricing_metadata,
+        "video_task_evidence": video_task_evidence or [],
         "prev_balance_usd": prior,
         "day_balance_delta_usd": delta,
         "fetched_at": int(time.time()),
@@ -599,6 +894,8 @@ def complete_entry(
 
 
 def collect_one(slug, credential, website, ledger, day):
+    if str(slug or "").strip().lower() == "toonflow":
+        return collect_toonflow(credential, website, ledger, day)
     username = credential.get("username")
     password = credential.get("password")
     origin = origin_of(credential.get("website_url") or website)
@@ -618,6 +915,7 @@ def collect_one(slug, credential, website, ledger, day):
         group = standard_login(session, origin, username, password)
         self_data = standard_self(session, origin)
         rows, quota, per_model_quota, details = standard_logs(session, origin, day)
+        real_cost = classic_model_real_costs(details, rate)
         try:
             pricing_metadata = standard_pricing_metadata(session, origin)
         except Exception as exc:
@@ -628,6 +926,24 @@ def collect_one(slug, credential, website, ledger, day):
                 "account_models": [],
                 "fetched_at": int(time.time()),
             }
+        try:
+            video_task_evidence = standard_video_tasks(session, origin, day, slug, rate)
+        except Exception as exc:
+            video_task_evidence = []
+            pricing_metadata["video_task_evidence_status"] = "unavailable"
+            pricing_metadata["video_task_evidence_error"] = clean_error(
+                exc, (username, password)
+            )
+        else:
+            expected_video_cost = sum(
+                float(detail.get("net_cost_cny") or 0)
+                for detail in real_cost.values()
+                if isinstance(detail, dict) and detail.get("kind") == "video"
+            )
+            video_task_evidence, evidence_status = validate_video_task_evidence(
+                video_task_evidence, expected_video_cost
+            )
+            pricing_metadata["video_task_evidence_status"] = evidence_status
         return complete_entry(
             "newapi_classic",
             rate,
@@ -637,9 +953,10 @@ def collect_one(slug, credential, website, ledger, day):
             quota / QUOTA_PER_USD,
             rows,
             {model: q2usd(value) for model, value in per_model_quota.items()},
-            classic_model_real_costs(details, rate),
+            real_cost,
             prior,
             pricing_metadata=pricing_metadata,
+            video_task_evidence=video_task_evidence,
         )
     except Exception as exc:
         errors.append(clean_error(exc, (username, password)))
