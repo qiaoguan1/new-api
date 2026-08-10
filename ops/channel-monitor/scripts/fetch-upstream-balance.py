@@ -417,7 +417,7 @@ def toonflow_operation_logs(session, origin, token, day, rate):
         )
         data = body.get("data") if isinstance(body.get("data"), dict) else {}
         items = None
-        for key in ("list", "rows", "records", "items"):
+        for key in ("data", "list", "rows", "records", "items"):
             if isinstance(data.get(key), list):
                 items = data.get(key)
                 break
