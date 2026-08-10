@@ -153,6 +153,60 @@ class OfficialRouteTests(unittest.TestCase):
                 expected_day="2026-08-08",
             )
 
+    def test_reviewed_exact_alias_remains_priced_when_upstream_catalog_drops_it(self):
+        policy = self.policy()
+        policy["rules"] = [
+            {
+                "id": "paisio-reviewed-alias",
+                "version": 1,
+                "priority": 100,
+                "enabled": True,
+                "review_state": "approved",
+                "source": "paisio",
+                "match": "exact",
+                "pattern": "seedance2.0-selfsur-720p",
+                "stable_model": "seedance-2.0",
+                "resolution": "720p",
+                "reason": "manually reviewed production alias",
+            }
+        ]
+        audit = {
+            "date": "2026-08-08",
+            "channels": [
+                {
+                    "channel_id": 42,
+                    "status": 1,
+                    "upstream_slug": "paisio",
+                    "configured_models": ["seedance2.0-selfsur-720p"],
+                    "unavailable_models": {
+                        "seedance2.0-selfsur-720p": {
+                            "reason": "not_in_upstream_pricing_catalog"
+                        }
+                    },
+                }
+            ],
+        }
+
+        routes = worker.build_official_routes(
+            {"policy_revision": "test", "matched": []},
+            audit,
+            policy,
+            expected_day="2026-08-08",
+        )
+
+        self.assertEqual(
+            routes,
+            [
+                {
+                    "channel_id": 42,
+                    "source": "paisio",
+                    "raw_model": "seedance2.0-selfsur-720p",
+                    "stable_model": "seedance-2.0",
+                    "resolution": "720p",
+                }
+            ],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

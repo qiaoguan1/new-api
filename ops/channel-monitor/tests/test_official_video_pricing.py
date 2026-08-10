@@ -189,6 +189,40 @@ class OfficialVideoPricingTests(unittest.TestCase):
         self.assertNotIn("seedance2.0-selfsur-720p", plan["options"]["ModelRatio"])
         self.assertNotIn("seedance2.0-selfsur-720p", plan["options"]["CompletionRatio"])
 
+    def test_option_plan_always_prices_every_canonical_official_sku(self):
+        catalog = validate_official_video_pricing(catalog_fixture())
+        expected_model_prices = {
+            "seedance-2.0-480p": 4.41945,
+            "seedance-2.0-720p": 9.936,
+            "seedance-2.0-1080p": 24.786,
+            "seedance-2.0-fast-480p": 3.554775,
+            "seedance-2.0-fast-720p": 7.992,
+            "seedance-2.0-mini-480p": 2.209725,
+            "seedance-2.0-mini-720p": 4.968,
+        }
+        options = {
+            "ModelRatio": dict.fromkeys(expected_model_prices, 99),
+            "CompletionRatio": dict.fromkeys(expected_model_prices, 2),
+            "ModelPrice": {},
+            "GroupRatio": {"default": 0.15},
+        }
+
+        plan = build_official_model_price_plan(catalog, [], options)
+
+        self.assertEqual(plan["options"]["ModelPrice"], expected_model_prices)
+        self.assertTrue(
+            expected_model_prices.keys().isdisjoint(plan["options"]["ModelRatio"])
+        )
+        self.assertTrue(
+            expected_model_prices.keys().isdisjoint(
+                plan["options"]["CompletionRatio"]
+            )
+        )
+        self.assertEqual(
+            {row["model"] for row in plan["decisions"]},
+            set(expected_model_prices),
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
