@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/dto"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
@@ -86,7 +87,7 @@ func validXingTuWebhookEventType(eventType string) bool {
 // caller's transaction. Repeating eventKey is a successful no-op.
 func EnqueueXingTuVideoWebhookTx(tx *gorm.DB, task *Task, eventType, eventKey string) error {
 	if tx == nil || task == nil || task.TaskID == "" || eventKey == "" || !validXingTuWebhookEventType(eventType) ||
-		task.PrivateData.BillingContext == nil || task.PrivateData.BillingContext.ContractVersion != "xtai-video-billing-v2" {
+		task.PrivateData.BillingContext == nil || !constant.IsXingTuVideoContract(task.PrivateData.BillingContext.ContractVersion) {
 		return errors.New("invalid xingtu webhook event")
 	}
 	beijing := time.FixedZone("Asia/Shanghai", 8*60*60)
@@ -108,7 +109,7 @@ func EnqueueXingTuVideoWebhookTx(tx *gorm.DB, task *Task, eventType, eventKey st
 	event := XingTuVideoWebhookEvent{
 		CreatedAt: time.Now().Unix(), UpdatedAt: time.Now().Unix(), EventID: eventID,
 		EventKey: xingTuWebhookEventKey(eventKey), TaskID: task.TaskID, EventType: eventType,
-		ContractVersion: "xtai-video-billing-v2", Payload: payload,
+		ContractVersion: task.PrivateData.BillingContext.ContractVersion, Payload: payload,
 		Status: XingTuWebhookStatusPending, NextAttemptAt: time.Now().Unix(),
 	}
 	return tx.Clauses(clause.OnConflict{Columns: []clause.Column{{Name: "event_key"}}, DoNothing: true}).Create(&event).Error

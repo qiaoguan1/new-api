@@ -84,6 +84,25 @@ func TestXingTuVideoResponseWithholdsResultWhileSettlementPending(t *testing.T) 
 	require.Nil(t, response.Billing.SupplementAmount)
 }
 
+func TestXingTuLegacyDebtIsPaymentRequiredAndNotDeliverable(t *testing.T) {
+	task := &Task{
+		TaskID: "task_legacy_debt",
+		Status: TaskStatusSuccess,
+		Quota:  1087500,
+		PrivateData: TaskPrivateData{BillingContext: &TaskBillingContext{
+			ContractVersion: "xtai-video-billing-v2",
+			BillingStatus:   "settled_with_debt",
+			ReservedQuota:   500000,
+			QuotaPerUnit:    500000,
+		}},
+	}
+
+	response := task.ToXingTuVideo()
+	require.Equal(t, "payment_required", response.Billing.Status)
+	require.Equal(t, "pending_settlement", response.ResultDelivery)
+	require.Nil(t, response.Result)
+}
+
 func TestXingTuVideoFailureDoesNotExposeRawProviderReason(t *testing.T) {
 	task := &Task{
 		TaskID:     "task_failed",

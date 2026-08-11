@@ -57,25 +57,32 @@ func seedSettlingVideoTask(t *testing.T, userID, tokenID, reservedQuota int, unl
 	return task
 }
 
-func TestApplyVideoTaskSettlementSupplementsWalletAndIsReplaySafe(t *testing.T) {
+func TestApplyVideoTaskSettlementRequiresWalletSupplementBeforeDelivery(t *testing.T) {
 	truncate(t)
 	task := seedSettlingVideoTask(t, 201, 201, 500000, true)
 	evidence := settlementEvidence(task.TaskID, task.GetUpstreamTaskID(), "1.450000", 1)
 
 	first, err := ApplyVideoTaskSettlement(context.Background(), evidence)
 	require.NoError(t, err)
-	require.True(t, first.Applied)
-	assert.Equal(t, "settled_with_debt", first.BillingStatus)
-	assert.Equal(t, "2.175000", first.ChargedAmount)
-	assert.Equal(t, "1.175000", first.SupplementAmount)
-	assert.Equal(t, -587400, getUserQuota(t, 201))
-	assert.Equal(t, 1_087_500, getUserUsedQuota(t, 201))
+	assert.False(t, first.Applied)
+	assert.Equal(t, "payment_required", first.BillingStatus)
+	assert.Equal(t, 100, getUserQuota(t, 201))
+	assert.Equal(t, 500000, getUserUsedQuota(t, 201))
+	assert.Equal(t, int64(0), countVideoSettlements(t))
 
-	replay, err := ApplyVideoTaskSettlement(context.Background(), evidence)
+	retry, err := ApplyVideoTaskSettlement(context.Background(), evidence)
 	require.NoError(t, err)
-	assert.True(t, replay.Replay)
-	assert.False(t, replay.Applied)
-	assert.Equal(t, -587400, getUserQuota(t, 201))
+	assert.False(t, retry.Applied)
+	assert.Equal(t, "payment_required", retry.BillingStatus)
+	assert.Equal(t, 100, getUserQuota(t, 201))
+	assert.Equal(t, int64(0), countVideoSettlements(t))
+
+	require.NoError(t, model.IncreaseUserQuota(201, 600000, true))
+	settled, err := ApplyVideoTaskSettlement(context.Background(), evidence)
+	require.NoError(t, err)
+	assert.True(t, settled.Applied)
+	assert.Equal(t, "settled", settled.BillingStatus)
+	assert.Equal(t, 12600, getUserQuota(t, 201))
 	assert.Equal(t, int64(1), countVideoSettlements(t))
 	assert.Equal(t, int64(1), countVideoWebhookEvents(t, model.XingTuWebhookBillingSettled))
 }
@@ -161,8 +168,9 @@ func TestConcurrentVideoSettlementAppliesMoneyOnce(t *testing.T) {
 	for err := range errs {
 		require.NoError(t, err)
 	}
-	assert.Equal(t, -587400, getUserQuota(t, 204))
-	assert.Equal(t, int64(1), countVideoSettlements(t))
+	assert.Equal(t, 100, getUserQuota(t, 204))
+	assert.Equal(t, int64(0), countVideoSettlements(t))
+	assert.Equal(t, int64(1), countVideoWebhookEvents(t, model.XingTuWebhookBillingPaymentRequired))
 }
 
 func TestFiniteTokenSettlementWaitsForRecharge(t *testing.T) {
@@ -180,6 +188,7 @@ func TestFiniteTokenSettlementWaitsForRecharge(t *testing.T) {
 	assert.Equal(t, int64(1), countVideoWebhookEvents(t, model.XingTuWebhookBillingPaymentRequired))
 
 	require.NoError(t, model.DB.Model(&model.Token{}).Where("id = ?", 205).Update("remain_quota", 600000).Error)
+	require.NoError(t, model.IncreaseUserQuota(205, 600000, true))
 	settled, err := ApplyVideoTaskSettlement(context.Background(), evidence)
 	require.NoError(t, err)
 	assert.True(t, settled.Applied)

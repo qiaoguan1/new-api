@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/QuantumNous/new-api/constant"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	"github.com/gin-gonic/gin"
 )
@@ -12,7 +13,7 @@ const (
 	VideoBillingContractContextKey  = "video_billing_contract_version"
 	VideoOfficialRevisionContextKey = "video_official_pricing_revision"
 	VideoOfficialPricingRevision    = "official-fallback-2026-08-09.1"
-	VideoBillingContractVersion     = "xtai-video-billing-v2"
+	VideoBillingContractVersion     = constant.XingTuVideoContractCurrent
 )
 
 type officialVideoSKU struct {
@@ -138,6 +139,7 @@ func applyOfficialVideoReservation(c *gin.Context, info *relaycommon.RelayInfo) 
 	}
 	info.PriceData.Quota = quota
 	info.PriceData.FreeModel = false
+	info.HardQuota = true
 	c.Set(VideoBillingContractContextKey, VideoBillingContractVersion)
 	c.Set(VideoOfficialRevisionContextKey, VideoOfficialPricingRevision)
 	return true, nil

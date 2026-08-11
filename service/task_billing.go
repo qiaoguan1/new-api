@@ -151,7 +151,7 @@ func taskModelName(task *model.Task) string {
 // 当异步任务失败时，将预扣的 quota 退还给用户（支持钱包和订阅），并退还令牌额度。
 func RefundTaskQuota(ctx context.Context, task *model.Task, reason string) {
 	if task != nil && task.PrivateData.BillingContext != nil &&
-		task.PrivateData.BillingContext.ContractVersion == VideoBillingContractVersion {
+		constant.IsXingTuVideoContract(task.PrivateData.BillingContext.ContractVersion) {
 		outcome, err := RefundVideoTaskReservation(ctx, task.TaskID)
 		if err != nil {
 			logger.LogWarn(ctx, fmt.Sprintf("atomic video reservation refund failed for task %s: %s", task.TaskID, err.Error()))

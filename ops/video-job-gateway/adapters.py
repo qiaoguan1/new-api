@@ -409,8 +409,8 @@ class ToonflowAdapter(VideoAdapter):
             "duration": int(payload.get("duration") or 0),
             "metadata": {
                 "ratio": str(payload.get("aspect_ratio") or "16:9"),
-                # Preserve the relay's existing default for callers that omit the switch.
-                # XingTu Cloud explicitly sends false and strips any unexpected audio on delivery.
+                # XingTu requires an explicit switch. Preserve true for active
+                # audio generation and false for a deliberately silent request.
                 "generate_audio": payload.get("generate_audio") is not False,
                 "watermark": False,
                 "seed": -1,
@@ -431,8 +431,7 @@ class RollDekAdapter(VideoAdapter):
         generate_audio = payload.get("generate_audio")
         if upstream_model.startswith("seedance-"):
             _rolldek_seedance_assets(body, images, videos)
-            # RollDek defaults Seedance audio generation to true.  The XingTu
-            # protocol defaults it to false, so always make that choice explicit.
+            # Always preserve the explicit XingTu audio choice.
             body["generate_audio"] = bool(generate_audio)
         elif upstream_model.startswith("kling-"):
             _rolldek_kling_assets(body, images, videos)
@@ -466,6 +465,8 @@ def _base_body(upstream_model: str, payload: dict[str, Any]) -> dict[str, Any]:
     route = payload.get("_route") if isinstance(payload.get("_route"), dict) else {}
     if route.get("send_resolution") and str(route.get("resolution") or "").strip():
         body["resolution"] = str(route["resolution"]).strip().lower()
+    if "generate_audio" in payload:
+        body["generate_audio"] = bool(payload.get("generate_audio"))
     return body
 
 

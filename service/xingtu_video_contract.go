@@ -8,16 +8,25 @@ import (
 	"strings"
 
 	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/constant"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 )
 
 const (
-	XingTuVideoContractHeader = "X-XingTu-Contract-Version"
-	XingTuVideoContractV2     = VideoBillingContractVersion
-	XingTuVideoProviderID     = "video-aixingtu-api"
+	XingTuVideoContractHeader  = "X-XingTu-Contract-Version"
+	XingTuVideoContractV2      = constant.XingTuVideoContractLegacy
+	XingTuVideoContractV21     = constant.XingTuVideoContractCurrent
+	XingTuVideoContractCurrent = constant.XingTuVideoContractCurrent
+	XingTuVideoProviderID      = "video-aixingtu-api"
 )
 
 var xingTuRequestIDPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9._:-]{7,127}$`)
+
+// IsXingTuVideoContractVersion accepts the current contract and the legacy
+// read/settlement window used by already-created tasks.
+func IsXingTuVideoContractVersion(version string) bool {
+	return constant.IsXingTuVideoContract(strings.TrimSpace(version))
+}
 
 type XingTuVideoValidation struct {
 	RequestID   string

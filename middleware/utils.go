@@ -54,7 +54,7 @@ func abortWithOpenAiMessage(c *gin.Context, statusCode int, message string, code
 func isXingTuVideoContractRequest(c *gin.Context) bool {
 	path := c.Request.URL.Path
 	return (path == "/v1/videos" || strings.HasPrefix(path, "/v1/videos/")) &&
-		strings.TrimSpace(c.GetHeader(service.XingTuVideoContractHeader)) == service.XingTuVideoContractV2
+		service.IsXingTuVideoContractVersion(c.GetHeader(service.XingTuVideoContractHeader))
 }
 
 func abortWithMidjourneyMessage(c *gin.Context, statusCode int, code int, description string) {

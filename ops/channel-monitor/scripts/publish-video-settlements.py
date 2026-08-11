@@ -19,7 +19,12 @@ from typing import Any, Iterable
 from zoneinfo import ZoneInfo
 
 
-BILLING_CONTRACT_VERSION = "xtai-video-billing-v2"
+BILLING_CONTRACT_LEGACY = "xtai-video-billing-v2"
+BILLING_CONTRACT_VERSION = "xtai-video-billing-v2.1"
+SUPPORTED_BILLING_CONTRACT_VERSIONS = {
+    BILLING_CONTRACT_LEGACY,
+    BILLING_CONTRACT_VERSION,
+}
 PRIVATE_PATH = pathlib.Path(__file__).resolve().parent.parent / "data" / "video-consumption-private.json"
 BEIJING = ZoneInfo("Asia/Shanghai")
 MONEY_QUANTUM = Decimal("0.000001")
@@ -53,7 +58,7 @@ def _observed_at(value: Any) -> str | None:
 def _fingerprint(request: dict[str, Any]) -> str:
     material = "\0".join(
         (
-            BILLING_CONTRACT_VERSION,
+            request["contract_version"],
             request["job_id"],
             request["provider_task_id"],
             request["actual_cost_status"],
@@ -120,8 +125,13 @@ def build_settlement_requests(rows: Iterable[dict[str, Any]]) -> list[dict[str, 
                 )
             ).encode("utf-8")
         ).hexdigest()
+        contract_version = str(
+            row.get("billing_contract_version") or BILLING_CONTRACT_VERSION
+        ).strip()
+        if contract_version not in SUPPORTED_BILLING_CONTRACT_VERSIONS:
+            continue
         request = {
-            "contract_version": BILLING_CONTRACT_VERSION,
+            "contract_version": contract_version,
             "job_id": job_id,
             "revision": revision,
             "provider_task_id": provider_task,
@@ -191,8 +201,13 @@ def build_newapi_settlement_requests(
                 )
             ).encode("utf-8")
         ).hexdigest()
+        contract_version = str(
+            pending.get("contract_version") or BILLING_CONTRACT_VERSION
+        ).strip()
+        if contract_version not in SUPPORTED_BILLING_CONTRACT_VERSIONS:
+            continue
         request = {
-            "contract_version": BILLING_CONTRACT_VERSION,
+            "contract_version": contract_version,
             "job_id": job_id,
             "revision": revision,
             "provider_task_id": provider_task,

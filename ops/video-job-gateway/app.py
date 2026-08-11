@@ -31,7 +31,7 @@ from adapters import AdapterError, PaisioAdapter, ProviderConfig, RollDekAdapter
 from catalog import Catalog, CatalogError, Model, Route
 from relay_pricing import RelayPricing, RelayPricingError
 from routing import RoutePlanError, build_route_plan
-from store import Store, StoreConflict
+from store import BILLING_CONTRACT_VERSION, Store, StoreConflict
 
 
 REQUEST_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
@@ -278,13 +278,13 @@ class Gateway:
         capabilities = snapshot.get("capabilities") if isinstance(snapshot.get("capabilities"), dict) else {}
         video = capabilities.get("video") if isinstance(capabilities.get("video"), dict) else {}
         video["traffic_enabled"] = ready
-        video["billing_contract_version"] = "xtai-video-billing-v2"
+        video["billing_contract_version"] = BILLING_CONTRACT_VERSION
         video["settlement_capabilities"] = [
             DURABLE_REQUEST_ID_SUBMIT_CONTRACT,
             "provider-actual-cost-settlement-v1",
             "authenticated-billing-evidence-v1",
         ]
-        snapshot["billing_contract_version"] = "xtai-video-billing-v2"
+        snapshot["billing_contract_version"] = BILLING_CONTRACT_VERSION
         return snapshot
 
     def price_pairs(self) -> list[tuple[str, str]]:

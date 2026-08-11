@@ -23,7 +23,7 @@ import (
 
 // videoProxyError returns a standardized OpenAI-style error response.
 func videoProxyError(c *gin.Context, status int, errType, message string) {
-	if strings.TrimSpace(c.GetHeader(service.XingTuVideoContractHeader)) == service.XingTuVideoContractV2 {
+	if service.IsXingTuVideoContractVersion(c.GetHeader(service.XingTuVideoContractHeader)) {
 		code := "video_result_failed"
 		safeMessage := "unable to retrieve video result"
 		switch status {
@@ -184,7 +184,7 @@ func VideoProxy(c *gin.Context) {
 		return
 	}
 
-	if strings.TrimSpace(c.GetHeader(service.XingTuVideoContractHeader)) == service.XingTuVideoContractV2 {
+	if service.IsXingTuVideoContractVersion(c.GetHeader(service.XingTuVideoContractHeader)) {
 		for _, key := range []string{"Content-Type", "Content-Length", "Content-Range", "Accept-Ranges"} {
 			for _, value := range resp.Header.Values(key) {
 				c.Writer.Header().Add(key, value)
@@ -239,7 +239,7 @@ func writeVideoDataURL(c *gin.Context, dataURL string) error {
 }
 
 func setVideoCacheControl(c *gin.Context) {
-	if strings.TrimSpace(c.GetHeader(service.XingTuVideoContractHeader)) == service.XingTuVideoContractV2 {
+	if service.IsXingTuVideoContractVersion(c.GetHeader(service.XingTuVideoContractHeader)) {
 		c.Writer.Header().Set("Cache-Control", "private, no-store")
 		return
 	}

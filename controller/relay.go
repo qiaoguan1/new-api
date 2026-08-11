@@ -472,7 +472,7 @@ func RelayTaskFetch(c *gin.Context) {
 		contractVersion := strings.TrimSpace(c.GetHeader(service.XingTuVideoContractHeader))
 		if contractVersion != "" {
 			c.Set(relaycommon.XingTuVideoContractContextKey, true)
-			if contractVersion != service.XingTuVideoContractV2 {
+			if contractVersion != service.XingTuVideoContractCurrent && contractVersion != service.XingTuVideoContractV2 {
 				respondXingTuVideoError(c, http.StatusBadRequest, "unsupported_contract_version", "unsupported XingTu video contract version", false, "", c.Param("task_id"))
 				return
 			}
@@ -495,7 +495,7 @@ func RelayTaskFetch(c *gin.Context) {
 func RelayTask(c *gin.Context) {
 	if c.Request.URL.Path == "/v1/videos" && strings.TrimSpace(c.GetHeader(service.XingTuVideoContractHeader)) != "" {
 		c.Set(relaycommon.XingTuVideoContractContextKey, true)
-		if strings.TrimSpace(c.GetHeader(service.XingTuVideoContractHeader)) != service.XingTuVideoContractV2 {
+		if strings.TrimSpace(c.GetHeader(service.XingTuVideoContractHeader)) != service.XingTuVideoContractCurrent {
 			respondXingTuVideoError(c, http.StatusBadRequest, "unsupported_contract_version", "unsupported XingTu video contract version", false, strings.TrimSpace(c.GetHeader("Idempotency-Key")), "")
 			return
 		}
@@ -671,7 +671,7 @@ func beginXingTuVideoRequest(c *gin.Context, relayInfo *relaycommon.RelayInfo) (
 		return nil, false
 	}
 	c.Set(relaycommon.XingTuVideoContractContextKey, true)
-	if contractVersion != service.XingTuVideoContractV2 {
+	if contractVersion != service.XingTuVideoContractCurrent {
 		respondXingTuVideoError(c, http.StatusBadRequest, "unsupported_contract_version", "unsupported XingTu video contract version", false, "", "")
 		return nil, true
 	}
@@ -711,6 +711,23 @@ func beginXingTuVideoRequest(c *gin.Context, relayInfo *relaycommon.RelayInfo) (
 		}
 		switch claim.State {
 		case model.VideoRequestStateFailed:
+			if claim.ErrorCode == string(types.ErrorCodeInsufficientUserQuota) {
+				reopened, reopenErr := model.ReopenVideoRequestClaim(claim.ID, claim.ErrorCode)
+				if reopenErr != nil {
+					respondXingTuVideoError(c, http.StatusInternalServerError, "idempotency_store_failed", "unable to resume request after recharge", true, claim.RequestID, claim.TaskID)
+					return nil, true
+				}
+				if reopened {
+					claim.State = model.VideoRequestStateClaimed
+					claim.ErrorCode = ""
+					claim.ErrorMessage = ""
+					relayInfo.PublicTaskID = claim.TaskID
+					return claim, false
+				}
+				c.Header("Retry-After", "2")
+				respondXingTuVideoError(c, http.StatusConflict, "request_in_progress", "the original request is being retried after recharge", true, claim.RequestID, claim.TaskID)
+				return nil, true
+			}
 			respondXingTuVideoError(c, http.StatusConflict, claim.ErrorCode, claim.ErrorMessage, false, claim.RequestID, claim.TaskID)
 		case model.VideoRequestStateUncertain:
 			respondXingTuVideoError(c, http.StatusConflict, "request_uncertain", "the original submission is uncertain; do not create another request_id", false, claim.RequestID, claim.TaskID)
@@ -754,7 +771,7 @@ func safeXingTuTaskErrorCode(taskErr *dto.TaskError) string {
 		return "video_request_failed"
 	}
 	switch taskErr.Code {
-	case "task_contract_mismatch", "account_in_debt":
+	case "task_contract_mismatch", "account_in_debt", string(types.ErrorCodeInsufficientUserQuota):
 		return taskErr.Code
 	}
 	switch taskErr.StatusCode {

@@ -17,7 +17,12 @@ from typing import Any
 
 ACTIVE_STATUSES = {"queued", "submitting", "running"}
 TERMINAL_STATUSES = {"succeeded", "failed", "uncertain", "pending_review"}
-BILLING_CONTRACT_VERSION = "xtai-video-billing-v2"
+BILLING_CONTRACT_LEGACY = "xtai-video-billing-v2"
+BILLING_CONTRACT_VERSION = "xtai-video-billing-v2.1"
+SUPPORTED_BILLING_CONTRACT_VERSIONS = {
+    BILLING_CONTRACT_LEGACY,
+    BILLING_CONTRACT_VERSION,
+}
 PRICE_CONTRACT_VERSION = "xtai-video-pricing-v1"
 MONEY_QUANTUM = Decimal("0.000001")
 MONEY_LIMIT = Decimal("100000")
@@ -75,7 +80,7 @@ class Store:
                     missing_count integer not null default 0,
                     missing_last_at integer not null default 0,
                     next_poll_at integer not null default 0,
-                    billing_contract_version text not null default 'xtai-video-billing-v2',
+                    billing_contract_version text not null default 'xtai-video-billing-v2.1',
                     billing_status text not null default 'unavailable',
                     reserved_cny_exact text not null default '',
                     charged_cny_exact text not null default '',
@@ -126,7 +131,7 @@ class Store:
                 "route_index": "integer not null default 0",
                 "selection_reason": "text not null default ''",
                 "route_history_json": "text not null default '[]'",
-                "billing_contract_version": "text not null default 'xtai-video-billing-v2'",
+                "billing_contract_version": "text not null default 'xtai-video-billing-v2.1'",
                 "billing_status": "text not null default 'unavailable'",
                 "reserved_cny_exact": "text not null default ''",
                 "charged_cny_exact": "text not null default ''",
@@ -148,7 +153,9 @@ class Store:
         result: dict[str, Any] | None = None
         error: dict[str, Any] | None = None
         billing_status = str(source.get("billing_status") or "unavailable")
-        result_ready = billing_status in {"settled", "settled_with_debt", "unavailable"}
+        if billing_status == "settled_with_debt":
+            billing_status = "payment_required"
+        result_ready = billing_status in {"settled", "unavailable"}
         if (
             include_result
             and source.get("status") == "succeeded"
@@ -477,6 +484,9 @@ class Store:
             if str(row["status"]) != "succeeded":
                 connection.rollback()
                 raise StoreConflict("only a succeeded video job can be settled")
+            if str(row["billing_contract_version"]) != evidence["contract_version"]:
+                connection.rollback()
+                raise StoreConflict("settlement contract does not match the video job")
             if str(row["billing_status"]) not in {"settlement_pending", "settled"}:
                 connection.rollback()
                 raise StoreConflict("video job has no settleable reservation")
@@ -845,7 +855,7 @@ def _reservation_from_payload(payload_json: str) -> dict[str, str]:
 def _evidence_fingerprint(evidence: dict[str, Any]) -> str:
     material = "\0".join(
         (
-            BILLING_CONTRACT_VERSION,
+            evidence["contract_version"],
             evidence["job_id"],
             evidence["provider_task_id"],
             evidence["actual_cost_status"],
@@ -868,7 +878,8 @@ def _settlement_id(job_id: str, revision: int, fingerprint: str) -> str:
 def _validated_settlement(payload: Any) -> dict[str, Any]:
     if not isinstance(payload, dict):
         raise StoreConflict("settlement payload must be an object")
-    if payload.get("contract_version") != BILLING_CONTRACT_VERSION:
+    contract_version = str(payload.get("contract_version") or "")
+    if contract_version not in SUPPORTED_BILLING_CONTRACT_VERSIONS:
         raise StoreConflict("settlement contract version is invalid")
     job_id = str(payload.get("job_id") or "").strip()
     provider_task_id = str(payload.get("provider_task_id") or "").strip()
@@ -910,7 +921,7 @@ def _validated_settlement(payload: Any) -> dict[str, Any]:
     if observed > current + timedelta(minutes=5) or observed < current - timedelta(days=30):
         raise StoreConflict("settlement observed_at is outside the approved window")
     evidence = {
-        "contract_version": BILLING_CONTRACT_VERSION,
+        "contract_version": contract_version,
         "job_id": job_id,
         "provider_task_id": provider_task_id,
         "revision": revision,

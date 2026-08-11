@@ -1,6 +1,6 @@
-# 星途AI软件—星途中转站视频API对接与部署协议 v2
+﻿# 星途AI软件—星途中转站视频API对接与部署协议 v2.1
 
-**合同版本**：`xtai-video-billing-v2`  
+**合同版本**：`xtai-video-billing-v2.1`
 **时区**：北京时间 `Asia/Shanghai`（UTC+8）  
 **金额**：人民币 CNY，跨系统一律使用六位小数字符串  
 **接口模式**：异步任务 + 签名 Webhook 主通知 + 查询接口兜底
@@ -65,7 +65,7 @@ supplement_amount = max(charged_amount - reserved_amount, 0)
 ```text
 XINGTU_VIDEO_BASE_URL=https://api.example.com
 XINGTU_VIDEO_API_TOKEN=sk-...
-XINGTU_VIDEO_CONTRACT_VERSION=xtai-video-billing-v2
+XINGTU_VIDEO_CONTRACT_VERSION=xtai-video-billing-v2.1
 XINGTU_VIDEO_PROVIDER_ID=video-aixingtu-api
 XINGTU_VIDEO_WEBHOOK_SECRET=<中转站安全交付的随机密钥>
 ```
@@ -119,7 +119,7 @@ HTTP超时、断网、5xx或下游进程重启后，必须继续使用原 `reque
 ```http
 POST /v1/videos
 Authorization: Bearer <XINGTU_VIDEO_API_TOKEN>
-X-XingTu-Contract-Version: xtai-video-billing-v2
+X-XingTu-Contract-Version: xtai-video-billing-v2.1
 Idempotency-Key: req_20260811_000001
 Content-Type: application/json
 ```
@@ -147,12 +147,19 @@ Content-Type: application/json
 | `resolution` | 是 | string | 模型支持的 `480p`、`720p`或`1080p` |
 | `duration` | 是 | integer | 视频秒数，必须大于0 |
 | `aspect_ratio` | 是 | string | 例如 `16:9`、`9:16`、`1:1` |
-| `generate_audio` | 是 | boolean | 必须明确传 `true` 或 `false`，不能省略或传 `null` |
+| `generate_audio` | 是 | boolean | 必须明确传 `true` 或 `false`；`true` 表示生成带声视频，`false` 表示无声视频 |
 | `prompt` | 条件必填 | string | 文生视频必填；图生视频也建议填写 |
 | `image` | 否 | string | 单张参考图URL或适配器支持的图片值 |
 | `images` | 否 | array | 多张参考图 |
 
 下游不能提交：渠道ID、Paisio/Toonflow名称、上游原始模型名、上游任务ID、上游账号或价格。
+
+`generate_audio=true` 是受支持的正式能力。中转站必须保持该值并只选择支持音轨的上游路由，
+不得拒绝、忽略或静默降级为 `false`。参考素材含原始音轨时，中转站也不得主动剥离音轨。
+
+本合同创建接口的解压后 JSON 请求体上限为 **256 KiB（262144字节）**。图片、音频和视频
+参考素材应使用可鉴权的 HTTPS URL，不应内嵌大段 Base64。超过限制返回 HTTP 413，且不得
+预扣、创建任务或调用上游。
 
 ### 创建成功
 
@@ -168,7 +175,7 @@ Content-Type: application/json
   "result": null,
   "result_delivery": "unavailable",
   "billing": {
-    "contract_version": "xtai-video-billing-v2",
+    "contract_version": "xtai-video-billing-v2.1",
     "status": "reserved",
     "currency": "CNY",
     "reserve_basis": "ark_official_1_5",
@@ -190,7 +197,7 @@ Content-Type: application/json
 ```http
 GET /v1/videos/task_public_xxx
 Authorization: Bearer <XINGTU_VIDEO_API_TOKEN>
-X-XingTu-Contract-Version: xtai-video-billing-v2
+X-XingTu-Contract-Version: xtai-video-billing-v2.1
 ```
 
 中转站内部每15秒查询上游一次。下游启用回调后不需要高频轮询：建议每1至2分钟兜底查询一次，
@@ -212,7 +219,7 @@ X-XingTu-Contract-Version: xtai-video-billing-v2
   "result": null,
   "result_delivery": "unavailable",
   "billing": {
-    "contract_version": "xtai-video-billing-v2",
+    "contract_version": "xtai-video-billing-v2.1",
     "status": "reserved",
     "currency": "CNY",
     "reserve_basis": "ark_official_1_5",
@@ -240,7 +247,7 @@ X-XingTu-Contract-Version: xtai-video-billing-v2
   "result": null,
   "result_delivery": "pending_settlement",
   "billing": {
-    "contract_version": "xtai-video-billing-v2",
+    "contract_version": "xtai-video-billing-v2.1",
     "status": "settlement_pending",
     "currency": "CNY",
     "reserve_basis": "ark_official_1_5",
@@ -274,7 +281,7 @@ X-XingTu-Contract-Version: xtai-video-billing-v2
   },
   "result_delivery": "ready",
   "billing": {
-    "contract_version": "xtai-video-billing-v2",
+    "contract_version": "xtai-video-billing-v2.1",
     "status": "settled",
     "currency": "CNY",
     "reserve_basis": "ark_official_1_5",
@@ -294,7 +301,7 @@ X-XingTu-Contract-Version: xtai-video-billing-v2
 ```text
 status == succeeded
 result_delivery == ready
-billing.status in [settled, settled_with_debt]
+billing.status == settled
 result.url 非空
 ```
 
@@ -302,7 +309,7 @@ result.url 非空
 
 ```http
 Authorization: Bearer <XINGTU_VIDEO_API_TOKEN>
-X-XingTu-Contract-Version: xtai-video-billing-v2
+X-XingTu-Contract-Version: xtai-video-billing-v2.1
 ```
 
 下游需要长期保存时，应在授权范围内及时下载到自己的对象存储。
@@ -322,7 +329,7 @@ X-XingTu-Contract-Version: xtai-video-billing-v2
 | `event_type` | 含义 | 下游动作 |
 |---|---|---|
 | `video.task.failed` | 任务失败且预扣已退款 | 标记失败，读取 `billing.refund_amount` |
-| `video.billing.payment_required` | 硬限额令牌或订阅无法完成补扣 | 暂停交付并提示充值/人工处理 |
+| `video.billing.payment_required` | 任一资金来源无法完成补扣 | 暂停交付并提示充值；充值后按原任务继续结算 |
 | `video.billing.pending_review` | 证据冲突，需人工复核 | 禁止重提同一业务请求，联系管理员 |
 
 回调只在数据库状态事务提交后入队。因此不会出现“通知已经成功，但状态或资金尚未落库”。
@@ -333,7 +340,7 @@ X-XingTu-Contract-Version: xtai-video-billing-v2
 POST /webhooks/video HTTP/1.1
 Content-Type: application/json
 User-Agent: XingTuVideoWebhook/1
-X-XingTu-Contract-Version: xtai-video-billing-v2
+X-XingTu-Contract-Version: xtai-video-billing-v2.1
 X-XingTu-Event-ID: evt_8d5e...
 X-XingTu-Timestamp: 1786406400
 X-XingTu-Delivery-Attempt: 1
@@ -361,7 +368,7 @@ X-XingTu-Signature: v1=<小写十六进制HMAC-SHA256>
     },
     "result_delivery": "ready",
     "billing": {
-      "contract_version": "xtai-video-billing-v2",
+      "contract_version": "xtai-video-billing-v2.1",
       "status": "settled",
       "currency": "CNY",
       "reserve_basis": "ark_official_1_5",
@@ -435,10 +442,10 @@ Webhook 不是唯一数据源。下游回调服务故障时，查询接口仍可
 | `reserved` | 已预扣，非最终费用 |
 | `settlement_pending` | 等待可信真实扣费证据，继续查询 |
 | `settled` | 最终收费完成 |
-| `settled_with_debt` | 最终收费完成，但普通钱包余额已为负；结果仍可交付，禁止新任务 |
+| `settled_with_debt` | 仅兼容旧记录；公共接口按 `payment_required` 返回，结果不可交付 |
 | `refund_pending` | 已决定退款，等待账户入账 |
 | `refunded` | 已全额退款 |
-| `payment_required` | 硬限额令牌或订阅额度无法补扣，按错误提示处理 |
+| `payment_required` | 余额、订阅或令牌无法完成补扣；充值后用原任务继续结算 |
 | `pending_review` | 账单证据冲突或异常，等待人工处理 |
 
 结果交付状态：
@@ -504,22 +511,23 @@ Token自行反算费用。
 | 400 | `missing_generate_audio` | 没有明确传声音开关 |
 | 400 | `unsupported_video_sku` | 模型、分辨率或时长不在方舟官方预扣表内 |
 | 401 | 认证类错误 | API令牌无效 |
-| 402/403 | 余额或权限错误 | 余额、订阅或令牌硬限额不足 |
+| 403 | `insufficient_user_quota` | 余额、订阅或令牌硬限额不足；充值后可用原请求ID重试 |
 | 409 | `idempotency_conflict` | 相同请求ID对应了不同内容 |
 | 409 | `request_in_progress` | 原提交正在处理中，可按原ID重试 |
 | 409 | `request_uncertain` | 原提交状态不确定，禁止新ID重提 |
-| 409 | `task_contract_mismatch` | 用v2合同查询了旧合同任务 |
+| 409 | `task_contract_mismatch` | 请求合同版本与任务保存的合同版本不一致 |
+| 413 | `request_too_large` | 解压后的创建请求体超过256 KiB，未预扣且未调用上游 |
 | 429 | 限流错误 | 按 `Retry-After` 退避 |
 | 5xx | 服务错误 | `retryable=true`时使用原ID重试 |
 
-## 11. 普通注册用户余额
+## 11. 所有账户统一硬额度
 
-- 任务受理时普通钱包余额大于0，可以让当前一个任务预扣或补扣后跨到负数。
-- 该任务仍继续生成、结算和交付。
-- 余额小于或等于0后禁止创建下一任务。
-- 用户充值先冲抵负余额；余额重新大于0后才能创建新任务。
-- 订阅额度和带硬上限的API令牌不允许透支。
-- `settled_with_debt`已经是最终结算，充值后不得再次补扣同一任务。
+- 普通注册用户钱包、订阅额度和有限额度API令牌均不允许透支，余额不得变成负数。
+- 创建任务时必须一次性成功预扣方舟官方基准价的1.5倍；不足时不创建任务、不调用上游。
+- 任务成功后按可信上游真实扣费乘1.5倍结算。实际收费较低时退款，较高时原子补扣。
+- 补扣不足时进入 `payment_required`，保留已预扣金额但不交付结果，也不把账户扣成负数。
+- 用户充值后必须使用原 `task_id` / `request_id`继续同一任务结算，禁止新建任务避免重复收费。
+- 旧版 `settled_with_debt`记录统一按 `payment_required`展示，充值后按原任务完成差额结算。
 
 ## 12. 隐私边界
 
@@ -569,7 +577,7 @@ reconcile(task_id):
     if task.status == failed and task.billing.status == refunded:
         stop
     if task.result_delivery == ready
-       and task.billing.status in [settled, settled_with_debt]:
+       and task.billing.status == settled:
         deliver task.result.url
         stop
     if task.status in [uncertain, pending_review]
@@ -596,7 +604,8 @@ fallback_scheduler:
 - [ ] `XINGTU_VIDEO_BASE_URL` 是公网HTTPS地址；成功响应中的 `result.url` 不得是 localhost 或内网地址。
 - [ ] 每次用户操作只生成一个稳定 `request_id`。
 - [ ] `Idempotency-Key`和JSON `request_id`始终相同。
-- [ ] `generate_audio`始终明确传布尔值，带声视频传 `true`。
+- [ ] `generate_audio`始终明确传布尔值；`true`全链路保持为带声，不被拒绝或静默降级。
+- [ ] 创建请求JSON不超过256 KiB；大素材使用可鉴权HTTPS URL。
 - [ ] 相同请求重试不会产生第二个 `task_id`。
 - [ ] 相同请求ID修改提示词会收到409冲突。
 - [ ] 下游分别保存任务状态、计费状态和交付状态。
@@ -605,12 +614,14 @@ fallback_scheduler:
 - [ ] 金额以六位小数字符串保存。
 - [ ] 按次/按秒任务没有Token时，下游仍能正确显示最终收费。
 - [ ] 失败任务能看到退款状态。
-- [ ] `settled_with_debt`能交付当前结果，但阻止下一任务。
+- [ ] 所有账户均不能透支；补扣不足进入 `payment_required`且不交付结果。
+- [ ] 充值后用原任务完成结算，不新建付费任务。
 - [ ] 日志和页面没有展示渠道、上游成本或利润。
 - [ ] 超时恢复使用原请求ID和原任务ID，不新建付费任务。
 
 ## 15. 兼容说明
 
-旧客户端不发送 `X-XingTu-Contract-Version` 时继续使用原 OpenAI 视频响应格式。星途AI软件
-必须始终发送该版本头，才能获得本协议的统一字段、六位金额和幂等保障。新合同只改变视频
-公共接口，不改变 CLR 和非视频计费。
+旧客户端不发送 `X-XingTu-Contract-Version` 时继续使用原 OpenAI 视频响应格式。新提交的
+星途AI任务必须发送 `xtai-video-billing-v2.1`，才能获得本协议的硬额度、音轨、256 KiB、
+六位金额和幂等保障。历史 `xtai-video-billing-v2` 任务仍可按原版本查询和完成迁移结算，
+但新任务不能再使用v2。新合同只改变视频公共接口，不改变 CLR 和非视频计费。
