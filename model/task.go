@@ -16,6 +16,7 @@ import (
 	"github.com/QuantumNous/new-api/dto"
 	commonRelay "github.com/QuantumNous/new-api/relay/common"
 	"github.com/QuantumNous/new-api/setting/system_setting"
+	"gorm.io/gorm"
 )
 
 type TaskStatus string
@@ -445,6 +446,28 @@ func (t *Task) UpdateWithStatus(fromStatus TaskStatus) (bool, error) {
 		return false, result.Error
 	}
 	return result.RowsAffected > 0, nil
+}
+
+// UpdateWithStatusAndXingTuWebhook commits a terminal v2 status transition and
+// its durable public callback event in one database transaction.
+func (t *Task) UpdateWithStatusAndXingTuWebhook(fromStatus TaskStatus, eventType, eventKey string) (bool, error) {
+	if t == nil {
+		return false, nil
+	}
+	won := false
+	t.UpdatedAt = time.Now().Unix()
+	err := DB.Transaction(func(tx *gorm.DB) error {
+		result := tx.Model(t).Where("status = ?", fromStatus).Select("*").Updates(t)
+		if result.Error != nil {
+			return result.Error
+		}
+		if result.RowsAffected == 0 {
+			return nil
+		}
+		won = true
+		return EnqueueXingTuVideoWebhookTx(tx, t, eventType, eventKey)
+	})
+	return won, err
 }
 
 // TaskBulkUpdate performs an unconditional bulk UPDATE by upstream task_id strings.

@@ -64,6 +64,16 @@ type XingTuVideoResponse struct {
 	Error          *OpenAIVideoError   `json:"error,omitempty"`
 }
 
+// XingTuVideoWebhookEnvelope is the signed, durable callback body. Data is the
+// same provider-neutral object returned by GET /v1/videos/{id}.
+type XingTuVideoWebhookEnvelope struct {
+	EventID      string               `json:"event_id"`
+	EventVersion int                  `json:"event_version"`
+	EventType    string               `json:"event_type"`
+	OccurredAt   string               `json:"occurred_at"`
+	Data         *XingTuVideoResponse `json:"data"`
+}
+
 type XingTuVideoResult struct {
 	Type string `json:"type"`
 	URL  string `json:"url"`

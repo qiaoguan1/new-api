@@ -307,8 +307,14 @@ func ApplyVideoTaskSettlement(ctx context.Context, evidence VideoSettlementEvide
 				}
 				if result.RowsAffected != 1 {
 					billing.BillingStatus = "payment_required"
-					if updateErr := tx.Model(&model.Task{}).Where("id = ?", task.ID).Update("private_data", task.PrivateData).Error; updateErr != nil {
+					task.UpdatedAt = time.Now().Unix()
+					if updateErr := tx.Model(&model.Task{}).Where("id = ?", task.ID).
+						Updates(map[string]any{"private_data": task.PrivateData, "updated_at": task.UpdatedAt}).Error; updateErr != nil {
 						return updateErr
+					}
+					if enqueueErr := model.EnqueueXingTuVideoWebhookTx(tx, &task, model.XingTuWebhookBillingPaymentRequired,
+						fmt.Sprintf("billing-payment-required:%s:%d", task.TaskID, evidence.Revision)); enqueueErr != nil {
+						return enqueueErr
 					}
 					outcome = settlementOutcome(&task, false, false)
 					return nil
@@ -428,8 +434,13 @@ func ApplyVideoTaskSettlement(ctx context.Context, evidence VideoSettlementEvide
 			billing.BillingStatus = "settled_with_debt"
 		}
 		task.Quota = chargedQuota
+		task.UpdatedAt = time.Now().Unix()
 		if err := tx.Model(&model.Task{}).Where("id = ?", task.ID).
-			Updates(map[string]any{"quota": chargedQuota, "private_data": task.PrivateData}).Error; err != nil {
+			Updates(map[string]any{"quota": chargedQuota, "private_data": task.PrivateData, "updated_at": task.UpdatedAt}).Error; err != nil {
+			return err
+		}
+		if err := model.EnqueueXingTuVideoWebhookTx(tx, &task, model.XingTuWebhookBillingSettled,
+			"billing-settled:"+task.TaskID+":"+evidence.SettlementID); err != nil {
 			return err
 		}
 		outcome = settlementOutcome(&task, true, false)
@@ -474,8 +485,13 @@ func markVideoSettlementPaymentRequired(ctx context.Context, taskID string, revi
 			return nil
 		}
 		billing.BillingStatus = "payment_required"
-		return tx.Model(&model.Task{}).Where("id = ?", task.ID).
-			Update("private_data", task.PrivateData).Error
+		task.UpdatedAt = time.Now().Unix()
+		if err := tx.Model(&model.Task{}).Where("id = ?", task.ID).
+			Updates(map[string]any{"private_data": task.PrivateData, "updated_at": task.UpdatedAt}).Error; err != nil {
+			return err
+		}
+		return model.EnqueueXingTuVideoWebhookTx(tx, &task, model.XingTuWebhookBillingPaymentRequired,
+			fmt.Sprintf("billing-payment-required:%s:%d", task.TaskID, revision))
 	})
 	return &task, err
 }
@@ -621,8 +637,13 @@ func RefundVideoTaskReservation(ctx context.Context, taskID string) (*VideoSettl
 		billing.SettlementRevision = revision
 		billing.SettlementFingerprint = fingerprint
 		billing.BillingStatus = "refunded"
+		task.UpdatedAt = time.Now().Unix()
 		if err := tx.Model(&model.Task{}).Where("id = ?", task.ID).
-			Update("private_data", task.PrivateData).Error; err != nil {
+			Updates(map[string]any{"private_data": task.PrivateData, "updated_at": task.UpdatedAt}).Error; err != nil {
+			return err
+		}
+		if err := model.EnqueueXingTuVideoWebhookTx(tx, &task, model.XingTuWebhookTaskFailed,
+			"task-failed:"+task.TaskID+":"+settlementID); err != nil {
 			return err
 		}
 		outcome = settlementOutcome(&task, true, false)

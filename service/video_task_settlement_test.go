@@ -77,6 +77,7 @@ func TestApplyVideoTaskSettlementSupplementsWalletAndIsReplaySafe(t *testing.T) 
 	assert.False(t, replay.Applied)
 	assert.Equal(t, -587400, getUserQuota(t, 201))
 	assert.Equal(t, int64(1), countVideoSettlements(t))
+	assert.Equal(t, int64(1), countVideoWebhookEvents(t, model.XingTuWebhookBillingSettled))
 }
 
 func TestApplyVideoTaskSettlementRefundsReservation(t *testing.T) {
@@ -176,6 +177,7 @@ func TestFiniteTokenSettlementWaitsForRecharge(t *testing.T) {
 	assert.Equal(t, 100, getUserQuota(t, 205))
 	assert.Equal(t, 100, getTokenRemainQuota(t, 205))
 	assert.Equal(t, int64(0), countVideoSettlements(t))
+	assert.Equal(t, int64(1), countVideoWebhookEvents(t, model.XingTuWebhookBillingPaymentRequired))
 
 	require.NoError(t, model.DB.Model(&model.Token{}).Where("id = ?", 205).Update("remain_quota", 600000).Error)
 	settled, err := ApplyVideoTaskSettlement(context.Background(), evidence)
@@ -306,6 +308,7 @@ func TestFailedVideoReservationRefundIsAtomicAndReplaySafe(t *testing.T) {
 	require.NotNil(t, updated.PrivateData.BillingContext)
 	assert.Equal(t, "refunded", updated.PrivateData.BillingContext.BillingStatus)
 	assert.Equal(t, 500000, updated.PrivateData.BillingContext.RefundedQuota)
+	assert.Equal(t, int64(1), countVideoWebhookEvents(t, model.XingTuWebhookTaskFailed))
 }
 
 func getUserUsedQuota(t *testing.T, userID int) int {
@@ -320,5 +323,12 @@ func countVideoSettlements(t *testing.T) int64 {
 	t.Helper()
 	var count int64
 	require.NoError(t, model.DB.Model(&model.VideoTaskSettlement{}).Count(&count).Error)
+	return count
+}
+
+func countVideoWebhookEvents(t *testing.T, eventType string) int64 {
+	t.Helper()
+	var count int64
+	require.NoError(t, model.DB.Model(&model.XingTuVideoWebhookEvent{}).Where("event_type = ?", eventType).Count(&count).Error)
 	return count
 }
