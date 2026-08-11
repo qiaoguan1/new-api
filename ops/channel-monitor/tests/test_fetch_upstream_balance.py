@@ -15,6 +15,103 @@ SPEC.loader.exec_module(collector)
 
 
 class UsageV1AggregationTests(unittest.TestCase):
+    def test_balance_probe_reads_classic_self_without_logs_or_pricing(self):
+        with (
+            mock.patch.object(collector.requests, "Session"),
+            mock.patch.object(collector, "standard_login", return_value="default"),
+            mock.patch.object(
+                collector,
+                "standard_self",
+                return_value={"quota": 250_000, "used_quota": 750_000},
+            ),
+            mock.patch.object(collector, "standard_logs") as logs,
+            mock.patch.object(collector, "standard_pricing_metadata") as pricing,
+        ):
+            result = collector.probe_balance(
+                "paisio",
+                {
+                    "username": "account-name",
+                    "password": "secret",
+                    "website_url": "https://example.test",
+                    "rate": 1,
+                },
+                "",
+            )
+
+        self.assertEqual(result["status"], "complete")
+        self.assertEqual(result["balance_usd"], 0.5)
+        self.assertEqual(result["billing_api"], "newapi_classic")
+        logs.assert_not_called()
+        pricing.assert_not_called()
+
+    def test_balance_probe_falls_back_to_v1_and_accepts_zero(self):
+        with (
+            mock.patch.object(collector.requests, "Session"),
+            mock.patch.object(
+                collector, "standard_login", side_effect=RuntimeError("unsupported")
+            ),
+            mock.patch.object(collector, "v1_login"),
+            mock.patch.object(collector, "v1_self", return_value={"balance": 0}),
+            mock.patch.object(collector, "v1_logs") as logs,
+        ):
+            result = collector.probe_balance(
+                "v1-provider",
+                {
+                    "username": "account-name",
+                    "password": "secret",
+                    "website_url": "https://example.test",
+                    "rate": 1,
+                },
+                "",
+            )
+
+        self.assertEqual(result["balance_usd"], 0.0)
+        self.assertEqual(result["billing_api"], "usage_v1")
+        logs.assert_not_called()
+
+    def test_balance_probe_rejects_missing_balance_instead_of_using_zero(self):
+        with (
+            mock.patch.object(collector.requests, "Session"),
+            mock.patch.object(collector, "standard_login"),
+            mock.patch.object(collector, "standard_self", return_value={}),
+            mock.patch.object(collector, "v1_login"),
+            mock.patch.object(collector, "v1_self", return_value={}),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "balance unavailable"):
+                collector.probe_balance(
+                    "missing",
+                    {
+                        "username": "account-name",
+                        "password": "secret",
+                        "website_url": "https://example.test",
+                    },
+                    "",
+                )
+
+    def test_toonflow_balance_probe_only_reads_points_preview(self):
+        session = mock.Mock()
+        session.headers = {}
+        with (
+            mock.patch.object(collector.requests, "Session", return_value=session),
+            mock.patch.object(collector, "_toonflow_token", return_value="operator-token"),
+            mock.patch.object(
+                collector,
+                "_toonflow_json_get",
+                return_value={"data": {"totalPoints": "2.25"}},
+            ) as get_json,
+            mock.patch.object(collector, "toonflow_operation_logs") as operation_logs,
+        ):
+            result = collector.probe_balance(
+                "toonflow",
+                {"website_url": "https://api.toonflow.net", "rate": 1},
+                "",
+            )
+
+        self.assertEqual(result["balance_usd"], 2.25)
+        self.assertEqual(result["billing_api"], "toonflow_web")
+        self.assertIn("pointsPreview/getPreviewData", get_json.call_args.args[1])
+        operation_logs.assert_not_called()
+
     def test_classic_login_accepts_nested_user_and_bearer_token(self):
         response = mock.Mock(status_code=200)
         response.json.return_value = {

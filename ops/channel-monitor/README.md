@@ -190,3 +190,56 @@ publish-video-settlements.py
 
 The hourly monitor may refresh health data, while final settlement should
 follow the complete daily ledger and may be retried safely.
+
+## Upstream balance email alerts
+
+`scripts/monitor-upstream-balances.py` performs a lightweight authenticated
+balance probe for every enabled upstream that has credentials. It does not
+fetch billing logs, price catalogs, task history, or call a paid model. Its
+live snapshot and alert state are separate from the daily actual-cost ledger:
+
+- `data/upstream-balance-live.json`
+- `data/upstream-balance-alert-state.json`
+
+A finite raw provider balance at or below
+`UPSTREAM_BALANCE_ALERT_THRESHOLD` (default `0`) is depleted. Missing balance
+fields, login failures, timeouts, malformed responses, and expired Toonflow
+authorization are `unknown`, never zero. The third consecutive unknown result
+creates a separate monitor-failure notification. Depletion and monitor-failure
+events are deduplicated across restarts; depletion reminders default to 24
+hours, and recovery is sent once after a previously delivered alert.
+
+The monitor does not store SMTP credentials. It calls the RootAuth-protected
+`POST /api/option/upstream_balance_alert` endpoint using the existing NewAPI
+root access-token file. NewAPI constructs the subject and HTML body internally,
+then uses its configured SMTP transport. The endpoint sends only to
+`UPSTREAM_BALANCE_ALERT_EMAIL`; the caller cannot choose a recipient, subject,
+SMTP setting, or arbitrary HTML.
+
+Copy `balance-alert.env.example` to the untracked, mode-0600
+`balance-alert.env`, set the internal NewAPI URL/root user ID/token-file path,
+and set `UPSTREAM_BALANCE_ALERT_EMAIL` in the NewAPI container environment.
+Validate without sending or changing alert state:
+
+```bash
+set -a
+. /opt/ai-api-stack/channel-monitor/balance-alert.env
+set +a
+python3 /opt/ai-api-stack/channel-monitor/scripts/monitor-upstream-balances.py --dry-run
+```
+
+Send one explicit transport test after deployment:
+
+```bash
+set -a
+. /opt/ai-api-stack/channel-monitor/balance-alert.env
+set +a
+python3 /opt/ai-api-stack/channel-monitor/scripts/monitor-upstream-balances.py --test-email
+```
+
+Run once per hour in Beijing time under a non-overlapping lock:
+
+```cron
+CRON_TZ=Asia/Shanghai
+2 * * * * cd /opt/ai-api-stack && /usr/bin/flock -n /run/lock/upstream-balance-alert.lock /bin/bash -c 'set -a; . channel-monitor/balance-alert.env; set +a; exec /usr/bin/python3 channel-monitor/scripts/monitor-upstream-balances.py' >> /var/log/upstream-balance-alert.log 2>&1
+```
