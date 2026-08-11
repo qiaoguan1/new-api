@@ -11,4 +11,4 @@
 - [x] T009 Update gateway settlement compatibility and canonical v2.1 documentation.
 - [x] T010 Run focused and full relevant tests plus deterministic verification rounds.
 - [x] T011 Complete comprehensive/security review and address every finding.
-- [ ] T012 Commit, push, PR, CI, merge, project Done, and production deployment.
+- [x] T012 Commit, push, PR, CI, merge, project Done, and production deployment.
