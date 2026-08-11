@@ -97,6 +97,23 @@ func officialVideoQuote(modelName, size string, seconds int) (quota int, sku off
 	return int(quota64), sku, true, nil
 }
 
+// ValidateOfficialVideoRequest ensures the public v2 contract can create a
+// frozen Ark-official reservation for the requested stable SKU.
+func ValidateOfficialVideoRequest(modelName, resolution string, seconds int) error {
+	stableName := strings.TrimSpace(modelName)
+	if _, ok := officialVideoStableRates[stableName]; !ok {
+		return fmt.Errorf("unsupported XingTu video model %s", modelName)
+	}
+	_, _, matched, err := officialVideoQuote(modelName, resolution, seconds)
+	if err != nil {
+		return err
+	}
+	if !matched {
+		return fmt.Errorf("unsupported XingTu video model %s", modelName)
+	}
+	return nil
+}
+
 func applyOfficialVideoReservation(c *gin.Context, info *relaycommon.RelayInfo) (bool, error) {
 	req, err := relaycommon.GetTaskRequest(c)
 	if err != nil {

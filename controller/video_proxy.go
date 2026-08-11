@@ -12,6 +12,7 @@ import (
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
+	"github.com/QuantumNous/new-api/dto"
 	"github.com/QuantumNous/new-api/logger"
 	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/service"
@@ -22,6 +23,26 @@ import (
 
 // videoProxyError returns a standardized OpenAI-style error response.
 func videoProxyError(c *gin.Context, status int, errType, message string) {
+	if strings.TrimSpace(c.GetHeader(service.XingTuVideoContractHeader)) == service.XingTuVideoContractV2 {
+		code := "video_result_failed"
+		safeMessage := "unable to retrieve video result"
+		switch status {
+		case http.StatusBadRequest:
+			code, safeMessage = "invalid_video_result_request", "video result is not ready"
+		case http.StatusNotFound:
+			code, safeMessage = "task_not_found", "video task was not found"
+		case http.StatusPaymentRequired:
+			code, safeMessage = "billing_settlement_pending", "video result is held until billing settlement completes"
+		case http.StatusForbidden:
+			code, safeMessage = "video_result_access_denied", "video result access was denied"
+		case http.StatusBadGateway:
+			code, safeMessage = "video_result_unavailable", "video result is temporarily unavailable"
+		}
+		c.JSON(status, dto.XingTuVideoErrorEnvelope{Error: dto.XingTuVideoPublicError{
+			Code: code, Message: safeMessage, RequestID: c.GetString("xingtu_request_id"), TaskID: c.Param("task_id"), Retryable: status >= 500,
+		}})
+		return
+	}
 	c.JSON(status, gin.H{
 		"error": gin.H{
 			"message": message,
@@ -48,6 +69,7 @@ func VideoProxy(c *gin.Context) {
 		videoProxyError(c, http.StatusNotFound, "invalid_request_error", "Task not found")
 		return
 	}
+	c.Set("xingtu_request_id", task.PrivateData.RequestID)
 
 	if task.Status != model.TaskStatusSuccess {
 		videoProxyError(c, http.StatusBadRequest, "invalid_request_error",
@@ -162,13 +184,21 @@ func VideoProxy(c *gin.Context) {
 		return
 	}
 
-	for key, values := range resp.Header {
-		for _, value := range values {
-			c.Writer.Header().Add(key, value)
+	if strings.TrimSpace(c.GetHeader(service.XingTuVideoContractHeader)) == service.XingTuVideoContractV2 {
+		for _, key := range []string{"Content-Type", "Content-Length", "Content-Range", "Accept-Ranges"} {
+			for _, value := range resp.Header.Values(key) {
+				c.Writer.Header().Add(key, value)
+			}
+		}
+	} else {
+		for key, values := range resp.Header {
+			for _, value := range values {
+				c.Writer.Header().Add(key, value)
+			}
 		}
 	}
 
-	c.Writer.Header().Set("Cache-Control", "public, max-age=86400")
+	setVideoCacheControl(c)
 	c.Writer.WriteHeader(resp.StatusCode)
 	if _, err = io.Copy(c.Writer, resp.Body); err != nil {
 		logger.LogError(c.Request.Context(), fmt.Sprintf("Failed to stream video content: %s", err.Error()))
@@ -202,8 +232,16 @@ func writeVideoDataURL(c *gin.Context, dataURL string) error {
 	}
 
 	c.Writer.Header().Set("Content-Type", mimeType)
-	c.Writer.Header().Set("Cache-Control", "public, max-age=86400")
+	setVideoCacheControl(c)
 	c.Writer.WriteHeader(http.StatusOK)
 	_, err = c.Writer.Write(videoBytes)
 	return err
+}
+
+func setVideoCacheControl(c *gin.Context) {
+	if strings.TrimSpace(c.GetHeader(service.XingTuVideoContractHeader)) == service.XingTuVideoContractV2 {
+		c.Writer.Header().Set("Cache-Control", "private, no-store")
+		return
+	}
+	c.Writer.Header().Set("Cache-Control", "public, max-age=86400")
 }

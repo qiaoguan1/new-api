@@ -115,7 +115,7 @@ func (a *TaskAdaptor) DoResponse(c *gin.Context, resp *http.Response, info *rela
 		Message: sunoResponse.Message,
 		Data:    info.PublicTaskID,
 	}
-	c.JSON(http.StatusOK, publicResponse)
+	relaycommon.WriteTaskSubmitResponse(c, http.StatusOK, publicResponse)
 
 	return sunoResponse.Data, nil, nil
 }

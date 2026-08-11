@@ -413,7 +413,7 @@ func (a *TaskAdaptor) DoResponse(c *gin.Context, resp *http.Response, info *rela
 	openAIResp.CreatedAt = common.GetTimestamp()
 
 	// 返回 OpenAI 格式
-	c.JSON(http.StatusOK, openAIResp)
+	relaycommon.WriteTaskSubmitResponse(c, http.StatusOK, openAIResp)
 
 	return aliResp.Output.TaskID, responseBody, nil
 }

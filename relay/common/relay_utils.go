@@ -22,6 +22,21 @@ type HasImage interface {
 	HasImage() bool
 }
 
+const XingTuVideoContractContextKey = "xingtu_video_contract_v2"
+
+func IsXingTuVideoContract(c *gin.Context) bool {
+	return c.GetBool(XingTuVideoContractContextKey)
+}
+
+// WriteTaskSubmitResponse preserves legacy adapter responses while allowing
+// the controller to emit one canonical XingTu response after task persistence.
+func WriteTaskSubmitResponse(c *gin.Context, status int, payload any) {
+	if IsXingTuVideoContract(c) {
+		return
+	}
+	c.JSON(status, payload)
+}
+
 func GetFullRequestURL(baseURL string, requestURL string, channelType int) string {
 	fullRequestURL := fmt.Sprintf("%s%s", baseURL, requestURL)
 

@@ -387,7 +387,22 @@ func videoFetchByIDRespBodyBuilder(c *gin.Context) (respBody []byte, taskResp *d
 
 	isOpenAIVideoAPI := strings.HasPrefix(c.Request.RequestURI, "/v1/videos/")
 
-	// Gemini/Vertex 支持实时查询：用户 fetch 时直接从上游拉取最新状态
+	if isOpenAIVideoAPI && relaycommon.IsXingTuVideoContract(c) {
+		billing := originTask.PrivateData.BillingContext
+		if billing == nil || billing.ContractVersion != service.XingTuVideoContractV2 || originTask.PrivateData.RequestID == "" {
+			taskResp = service.TaskErrorWrapperLocal(errors.New("task_contract_mismatch"), "task_contract_mismatch", http.StatusConflict)
+			return
+		}
+		respBody, err = common.Marshal(originTask.ToXingTuVideo())
+		if err != nil {
+			taskResp = service.TaskErrorWrapper(err, "marshal_xingtu_video_failed", http.StatusInternalServerError)
+		}
+		return
+	}
+
+	// Legacy Gemini/Vertex clients may query the provider in real time. The
+	// versioned XingTu contract is handled above so it can never bypass the
+	// canonical DTO or expose a provider response.
 	if realtimeResp := tryRealtimeFetch(originTask, isOpenAIVideoAPI); len(realtimeResp) > 0 {
 		respBody = realtimeResp
 		return

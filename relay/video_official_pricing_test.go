@@ -73,3 +73,11 @@ func TestOfficialVideoReservationCannotBeBypassedByFreeModelSetting(t *testing.T
 	assert.False(t, info.PriceData.FreeModel)
 	assert.Equal(t, 2_980_800, info.PriceData.Quota)
 }
+
+func TestValidateOfficialVideoRequestRejectsUnknownPublicSKU(t *testing.T) {
+	require.NoError(t, ValidateOfficialVideoRequest("seedance-2.0", "720p", 4))
+	require.ErrorContains(t, ValidateOfficialVideoRequest("provider-private-video", "720p", 4), "unsupported XingTu video model")
+	require.Error(t, ValidateOfficialVideoRequest("sd2-720p", "720p", 4))
+	require.Error(t, ValidateOfficialVideoRequest("Seedance-2.0", "720p", 4))
+	require.Error(t, ValidateOfficialVideoRequest("seedance-2.0-mini", "1080p", 4))
+}

@@ -261,7 +261,7 @@ func (a *TaskAdaptor) DoResponse(c *gin.Context, resp *http.Response, info *rela
 	if err != nil {
 		return "", nil, topazTaskError("encode public task response", "invalid_response")
 	}
-	c.JSON(http.StatusOK, publicVideo)
+	relaycommon.WriteTaskSubmitResponse(c, http.StatusOK, publicVideo)
 	return created.RequestID, taskData, nil
 }
 
