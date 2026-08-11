@@ -468,9 +468,19 @@ func RelayNotFound(c *gin.Context) {
 }
 
 func RelayTaskFetch(c *gin.Context) {
+	if c.Request.URL.Path != "" && strings.HasPrefix(c.Request.URL.Path, "/v1/videos/") {
+		contractVersion := strings.TrimSpace(c.GetHeader(service.XingTuVideoContractHeader))
+		if contractVersion != "" {
+			c.Set(relaycommon.XingTuVideoContractContextKey, true)
+			if contractVersion != service.XingTuVideoContractV2 {
+				respondXingTuVideoError(c, http.StatusBadRequest, "unsupported_contract_version", "unsupported XingTu video contract version", false, "", c.Param("task_id"))
+				return
+			}
+		}
+	}
 	relayInfo, err := relaycommon.GenRelayInfo(c, types.RelayFormatTask, nil, nil)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, &dto.TaskError{
+		respondTaskError(c, &dto.TaskError{
 			Code:       "gen_relay_info_failed",
 			Message:    err.Error(),
 			StatusCode: http.StatusInternalServerError,
@@ -483,17 +493,31 @@ func RelayTaskFetch(c *gin.Context) {
 }
 
 func RelayTask(c *gin.Context) {
+	if c.Request.URL.Path == "/v1/videos" && strings.TrimSpace(c.GetHeader(service.XingTuVideoContractHeader)) != "" {
+		c.Set(relaycommon.XingTuVideoContractContextKey, true)
+		if strings.TrimSpace(c.GetHeader(service.XingTuVideoContractHeader)) != service.XingTuVideoContractV2 {
+			respondXingTuVideoError(c, http.StatusBadRequest, "unsupported_contract_version", "unsupported XingTu video contract version", false, strings.TrimSpace(c.GetHeader("Idempotency-Key")), "")
+			return
+		}
+	}
 	relayInfo, err := relaycommon.GenRelayInfo(c, types.RelayFormatTask, nil, nil)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, &dto.TaskError{
+		respondTaskError(c, &dto.TaskError{
 			Code:       "gen_relay_info_failed",
 			Message:    err.Error(),
 			StatusCode: http.StatusInternalServerError,
 		})
 		return
 	}
+	videoRequestClaim, handled := beginXingTuVideoRequest(c, relayInfo)
+	if handled {
+		return
+	}
 
 	if taskErr := relay.ResolveOriginTask(c, relayInfo); taskErr != nil {
+		if videoRequestClaim != nil {
+			_ = model.FailVideoRequestClaim(videoRequestClaim.ID, safeXingTuTaskErrorCode(taskErr), safeXingTuTaskErrorMessage(taskErr), false)
+		}
 		respondTaskError(c, taskErr)
 		return
 	}
@@ -573,6 +597,10 @@ func RelayTask(c *gin.Context) {
 	if taskErr == nil {
 		videoBillingV2 := c.GetString(relay.VideoBillingContractContextKey) == service.VideoBillingContractVersion
 		task := model.InitTask(result.Platform, relayInfo)
+		if videoRequestClaim != nil {
+			task.PrivateData.RequestID = videoRequestClaim.RequestID
+			task.PrivateData.RequestFingerprint = videoRequestClaim.RequestFingerprint
+		}
 		task.PrivateData.UpstreamTaskID = result.UpstreamTaskID
 		task.PrivateData.BillingSource = relayInfo.BillingSource
 		task.PrivateData.SubscriptionId = relayInfo.SubscriptionId
@@ -605,7 +633,17 @@ func RelayTask(c *gin.Context) {
 			if videoBillingV2 && relayInfo.Billing != nil {
 				relayInfo.Billing.Refund(c)
 			}
+			if videoRequestClaim != nil {
+				_ = model.FailVideoRequestClaim(videoRequestClaim.ID, "task_persistence_failed", "task persistence failed after provider submission", true)
+				respondXingTuVideoError(c, http.StatusInternalServerError, "task_persistence_failed", "task state is uncertain; do not submit with a new request_id", true, videoRequestClaim.RequestID, videoRequestClaim.TaskID)
+			}
 			return
+		}
+		if videoRequestClaim != nil {
+			if completeErr := model.CompleteVideoRequestClaim(videoRequestClaim.ID); completeErr != nil {
+				common.SysError("complete XingTu idempotency claim error: " + completeErr.Error())
+			}
+			c.JSON(http.StatusOK, task.ToXingTuVideo())
 		}
 		if videoBillingV2 {
 			if settleErr := service.SettleBilling(c, relayInfo, result.Quota); settleErr != nil {
@@ -616,8 +654,79 @@ func RelayTask(c *gin.Context) {
 	}
 
 	if taskErr != nil {
+		if videoRequestClaim != nil {
+			uncertain := taskErr.StatusCode == http.StatusRequestTimeout || taskErr.StatusCode >= http.StatusInternalServerError
+			_ = model.FailVideoRequestClaim(videoRequestClaim.ID, safeXingTuTaskErrorCode(taskErr), safeXingTuTaskErrorMessage(taskErr), uncertain)
+		}
 		respondTaskError(c, taskErr)
 	}
+}
+
+func beginXingTuVideoRequest(c *gin.Context, relayInfo *relaycommon.RelayInfo) (*model.VideoRequestClaim, bool) {
+	if c.Request.URL.Path != "/v1/videos" {
+		return nil, false
+	}
+	contractVersion := strings.TrimSpace(c.GetHeader(service.XingTuVideoContractHeader))
+	if contractVersion == "" {
+		return nil, false
+	}
+	c.Set(relaycommon.XingTuVideoContractContextKey, true)
+	if contractVersion != service.XingTuVideoContractV2 {
+		respondXingTuVideoError(c, http.StatusBadRequest, "unsupported_contract_version", "unsupported XingTu video contract version", false, "", "")
+		return nil, true
+	}
+	request, err := relaycommon.GetTaskRequest(c)
+	if err != nil {
+		respondXingTuVideoError(c, http.StatusBadRequest, "invalid_request", err.Error(), false, "", "")
+		return nil, true
+	}
+	validation, contractErr := service.ValidateXingTuVideoRequest(request, c.GetHeader("Idempotency-Key"))
+	if contractErr != nil {
+		respondXingTuVideoError(c, contractErr.StatusCode, contractErr.Code, contractErr.Message, contractErr.Retryable, request.RequestID, "")
+		return nil, true
+	}
+	if pricingErr := relay.ValidateOfficialVideoRequest(request.Model, request.Resolution, request.Duration); pricingErr != nil {
+		respondXingTuVideoError(c, http.StatusBadRequest, "unsupported_video_sku", pricingErr.Error(), false, validation.RequestID, "")
+		return nil, true
+	}
+	c.Set("xingtu_request_id", validation.RequestID)
+	publicTaskID := model.GenerateTaskID()
+	claim, created, claimErr := model.ClaimVideoRequest(relayInfo.UserId, validation.RequestID, validation.Fingerprint, publicTaskID)
+	if errors.Is(claimErr, model.ErrVideoRequestIdempotencyConflict) {
+		respondXingTuVideoError(c, http.StatusConflict, "idempotency_conflict", "request_id was already used with a different payload", false, validation.RequestID, "")
+		return nil, true
+	}
+	if claimErr != nil {
+		respondXingTuVideoError(c, http.StatusInternalServerError, "idempotency_store_failed", "unable to reserve request identity", true, validation.RequestID, "")
+		return nil, true
+	}
+	c.Set("xingtu_task_id", claim.TaskID)
+	if !created {
+		if existingTask, exists, lookupErr := model.GetByTaskId(relayInfo.UserId, claim.TaskID); lookupErr == nil && exists {
+			if claim.State != model.VideoRequestStateCompleted {
+				_ = model.CompleteVideoRequestClaim(claim.ID)
+			}
+			c.JSON(http.StatusOK, existingTask.ToXingTuVideo())
+			return nil, true
+		}
+		switch claim.State {
+		case model.VideoRequestStateFailed:
+			respondXingTuVideoError(c, http.StatusConflict, claim.ErrorCode, claim.ErrorMessage, false, claim.RequestID, claim.TaskID)
+		case model.VideoRequestStateUncertain:
+			respondXingTuVideoError(c, http.StatusConflict, "request_uncertain", "the original submission is uncertain; do not create another request_id", false, claim.RequestID, claim.TaskID)
+		default:
+			if time.Now().Unix()-claim.UpdatedAt >= 600 {
+				_ = model.FailVideoRequestClaim(claim.ID, "request_uncertain", "the original submission did not finish acceptance", true)
+				respondXingTuVideoError(c, http.StatusConflict, "request_uncertain", "the original submission is uncertain; do not create another request_id", false, claim.RequestID, claim.TaskID)
+				return nil, true
+			}
+			c.Header("Retry-After", "2")
+			respondXingTuVideoError(c, http.StatusConflict, "request_in_progress", "the original request is still being accepted", true, claim.RequestID, claim.TaskID)
+		}
+		return nil, true
+	}
+	relayInfo.PublicTaskID = claim.TaskID
+	return claim, false
 }
 
 // respondTaskError 统一输出 Task 错误响应（含 429 限流提示改写）
@@ -625,7 +734,82 @@ func respondTaskError(c *gin.Context, taskErr *dto.TaskError) {
 	if taskErr.StatusCode == http.StatusTooManyRequests {
 		taskErr.Message = "当前分组上游负载已饱和，请稍后再试"
 	}
+	if relaycommon.IsXingTuVideoContract(c) {
+		requestID := c.GetString("xingtu_request_id")
+		if requestID == "" {
+			requestID = strings.TrimSpace(c.GetHeader("Idempotency-Key"))
+		}
+		taskID := c.GetString("xingtu_task_id")
+		if taskID == "" {
+			taskID = c.Param("task_id")
+		}
+		respondXingTuVideoError(c, taskErr.StatusCode, safeXingTuTaskErrorCode(taskErr), safeXingTuTaskErrorMessage(taskErr), taskErr.StatusCode >= 500 || taskErr.StatusCode == http.StatusTooManyRequests, requestID, taskID)
+		return
+	}
 	c.JSON(taskErr.StatusCode, taskErr)
+}
+
+func safeXingTuTaskErrorCode(taskErr *dto.TaskError) string {
+	if taskErr == nil {
+		return "video_request_failed"
+	}
+	switch taskErr.Code {
+	case "task_contract_mismatch", "account_in_debt":
+		return taskErr.Code
+	}
+	switch taskErr.StatusCode {
+	case http.StatusBadRequest:
+		return "invalid_video_request"
+	case http.StatusUnauthorized:
+		return "authentication_failed"
+	case http.StatusForbidden:
+		return "access_denied"
+	case http.StatusRequestTimeout:
+		return "submission_timeout"
+	case http.StatusConflict:
+		return "task_conflict"
+	case http.StatusTooManyRequests:
+		return "rate_limited"
+	default:
+		if taskErr.StatusCode >= http.StatusInternalServerError {
+			return "video_service_unavailable"
+		}
+		return "video_request_failed"
+	}
+}
+
+func safeXingTuTaskErrorMessage(taskErr *dto.TaskError) string {
+	if taskErr == nil {
+		return "video request failed"
+	}
+	switch {
+	case taskErr.StatusCode == http.StatusTooManyRequests:
+		return "video service is busy; retry the same request_id later"
+	case taskErr.StatusCode == http.StatusRequestTimeout:
+		return "video submission timed out; do not create a new request_id"
+	case taskErr.StatusCode >= http.StatusInternalServerError:
+		return "video service temporarily failed"
+	case taskErr.StatusCode == http.StatusBadRequest:
+		return "video request was rejected"
+	case taskErr.StatusCode == http.StatusUnauthorized:
+		return "authentication failed"
+	case taskErr.StatusCode == http.StatusForbidden:
+		return "video request is not permitted"
+	default:
+		return "video request failed"
+	}
+}
+
+func respondXingTuVideoError(c *gin.Context, status int, code, message string, retryable bool, requestID, taskID string) {
+	if code == "" {
+		code = "video_request_failed"
+	}
+	if message == "" {
+		message = "video request failed"
+	}
+	c.JSON(status, dto.XingTuVideoErrorEnvelope{Error: dto.XingTuVideoPublicError{
+		Code: code, Message: message, RequestID: requestID, TaskID: taskID, Retryable: retryable,
+	}})
 }
 
 func shouldRetryTaskRelay(c *gin.Context, channelId int, taskErr *dto.TaskError, retryTimes int) bool {

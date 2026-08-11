@@ -675,6 +675,8 @@ type TaskRelayInfo struct {
 
 type TaskSubmitReq struct {
 	Prompt         string                 `json:"prompt"`
+	ProviderID     string                 `json:"provider_id,omitempty"`
+	RequestID      string                 `json:"request_id,omitempty"`
 	Model          string                 `json:"model,omitempty"`
 	Mode           string                 `json:"mode,omitempty"`
 	Image          string                 `json:"image,omitempty"`
@@ -683,6 +685,8 @@ type TaskSubmitReq struct {
 	Resolution     string                 `json:"resolution,omitempty"`
 	Duration       int                    `json:"duration,omitempty"`
 	Seconds        string                 `json:"seconds,omitempty"`
+	AspectRatio    string                 `json:"aspect_ratio,omitempty"`
+	GenerateAudio  *bool                  `json:"generate_audio,omitempty"`
 	InputReference string                 `json:"input_reference,omitempty"`
 	Metadata       map[string]interface{} `json:"metadata,omitempty"`
 }
@@ -729,14 +733,24 @@ func (t *TaskSubmitReq) UnmarshalJSON(data []byte) error {
 			var metadataObj map[string]interface{}
 			if err := common.Unmarshal([]byte(metadataStr), &metadataObj); err == nil {
 				t.Metadata = metadataObj
-				return nil
 			}
 		}
 
-		var metadataObj map[string]interface{}
-		if err := common.Unmarshal(aux.Metadata, &metadataObj); err == nil {
-			t.Metadata = metadataObj
+		if t.Metadata == nil {
+			var metadataObj map[string]interface{}
+			if err := common.Unmarshal(aux.Metadata, &metadataObj); err == nil {
+				t.Metadata = metadataObj
+			}
 		}
+	}
+	if t.Metadata == nil {
+		t.Metadata = make(map[string]interface{})
+	}
+	if t.AspectRatio != "" {
+		t.Metadata["aspect_ratio"] = t.AspectRatio
+	}
+	if t.GenerateAudio != nil {
+		t.Metadata["generate_audio"] = *t.GenerateAudio
 	}
 
 	return nil

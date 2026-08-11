@@ -185,7 +185,7 @@ func (a *TaskAdaptor) DoResponse(c *gin.Context, resp *http.Response, info *rela
 	ov.TaskID = info.PublicTaskID
 	ov.CreatedAt = time.Now().Unix()
 	ov.Model = info.OriginModelName
-	c.JSON(http.StatusOK, ov)
+	relaycommon.WriteTaskSubmitResponse(c, http.StatusOK, ov)
 	return vResp.TaskId, responseBody, nil
 }
 

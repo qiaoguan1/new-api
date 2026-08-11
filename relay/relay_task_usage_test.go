@@ -2,11 +2,17 @@ package relay
 
 import (
 	"encoding/json"
+	"net/http/httptest"
 	"testing"
 
 	"github.com/QuantumNous/new-api/dto"
 	"github.com/QuantumNous/new-api/model"
+	relaycommon "github.com/QuantumNous/new-api/relay/common"
+	"github.com/QuantumNous/new-api/service"
+	"github.com/gin-gonic/gin"
+	"github.com/glebarez/sqlite"
 	"github.com/stretchr/testify/require"
+	"gorm.io/gorm"
 )
 
 func TestAttachOpenAIVideoUsageNormalizesEveryAdaptorResponse(t *testing.T) {
@@ -89,4 +95,57 @@ func TestV2PublicVideoPayloadRedactsPrivateRoutingAndCost(t *testing.T) {
 	properties, ok := dtoValue.Properties.(model.Properties)
 	require.True(t, ok)
 	require.Empty(t, properties.UpstreamModelName)
+}
+
+func TestXingTuV2QueryUsesCanonicalContract(t *testing.T) {
+	previousDB := model.DB
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	require.NoError(t, err)
+	require.NoError(t, db.AutoMigrate(&model.Task{}))
+	model.DB = db
+	t.Cleanup(func() { model.DB = previousDB })
+
+	task := &model.Task{
+		TaskID:     "task_contract",
+		UserId:     77,
+		Quota:      1087500,
+		Status:     model.TaskStatusSuccess,
+		Progress:   "100%",
+		Properties: model.Properties{OriginModelName: "seedance-2.0", UpstreamModelName: "private-model"},
+		PrivateData: model.TaskPrivateData{
+			RequestID:      "req_contract_0001",
+			UpstreamTaskID: "private-upstream-id",
+			ResultURL:      "https://result.example/video.mp4",
+			BillingContext: &model.TaskBillingContext{
+				ContractVersion: service.XingTuVideoContractV2,
+				QuotaPerUnit:    500000,
+				BillingStatus:   "settled",
+				ReservedQuota:   2980800,
+				RefundedQuota:   1893300,
+			},
+		},
+	}
+	require.NoError(t, task.Insert())
+
+	gin.SetMode(gin.TestMode)
+	recorder := httptest.NewRecorder()
+	context, _ := gin.CreateTestContext(recorder)
+	request := httptest.NewRequest("GET", "/v1/videos/task_contract", nil)
+	request.Header.Set(service.XingTuVideoContractHeader, service.XingTuVideoContractV2)
+	context.Request = request
+	context.Params = gin.Params{{Key: "task_id", Value: "task_contract"}}
+	context.Set("id", 77)
+	context.Set(relaycommon.XingTuVideoContractContextKey, true)
+
+	payload, taskErr := videoFetchByIDRespBodyBuilder(context)
+	require.Nil(t, taskErr)
+	text := string(payload)
+	require.Contains(t, text, `"request_id":"req_contract_0001"`)
+	require.Contains(t, text, `"status":"succeeded"`)
+	require.Contains(t, text, `"charged_amount":"2.175000"`)
+	require.Contains(t, text, `"result_delivery":"ready"`)
+	require.Contains(t, text, `/v1/videos/task_contract/content`)
+	require.NotContains(t, text, "result.example")
+	require.NotContains(t, text, "private-upstream-id")
+	require.NotContains(t, text, "private-model")
 }

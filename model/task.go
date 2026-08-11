@@ -4,13 +4,18 @@ import (
 	"bytes"
 	"database/sql/driver"
 	"encoding/json"
+	"fmt"
 	"math"
+	"net/url"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/dto"
 	commonRelay "github.com/QuantumNous/new-api/relay/common"
+	"github.com/QuantumNous/new-api/setting/system_setting"
 )
 
 type TaskStatus string
@@ -98,9 +103,11 @@ func (m Properties) Value() (driver.Value, error) {
 }
 
 type TaskPrivateData struct {
-	Key            string `json:"key,omitempty"`
-	UpstreamTaskID string `json:"upstream_task_id,omitempty"` // 上游真实 task ID
-	ResultURL      string `json:"result_url,omitempty"`       // 任务成功后的结果 URL（视频地址等）
+	Key                string `json:"key,omitempty"`
+	RequestID          string `json:"request_id,omitempty"`
+	RequestFingerprint string `json:"request_fingerprint,omitempty"`
+	UpstreamTaskID     string `json:"upstream_task_id,omitempty"` // 上游真实 task ID
+	ResultURL          string `json:"result_url,omitempty"`       // 任务成功后的结果 URL（视频地址等）
 	// 计费上下文：用于异步退款/差额结算（轮询阶段读取）
 	BillingSource  string              `json:"billing_source,omitempty"`  // "wallet" 或 "subscription"
 	SubscriptionId int                 `json:"subscription_id,omitempty"` // 订阅 ID，用于订阅退款
@@ -608,4 +615,130 @@ func (t *Task) VideoUsage() *dto.VideoUsage {
 		usage.BillingStatus = "unavailable"
 	}
 	return usage
+}
+
+// ToXingTuVideo renders the stable public contract without provider routing,
+// upstream task identifiers, actual provider cost, or margin information.
+func (t *Task) ToXingTuVideo() *dto.XingTuVideoResponse {
+	response := &dto.XingTuVideoResponse{
+		ID:             t.TaskID,
+		RequestID:      t.PrivateData.RequestID,
+		Object:         "video",
+		Model:          t.Properties.OriginModelName,
+		Status:         t.xingTuTaskStatus(),
+		Progress:       parseTaskProgress(t.Progress),
+		CreatedAt:      t.CreatedAt,
+		ResultDelivery: t.ResultDeliveryStatus(),
+		Billing:        t.xingTuVideoBilling(),
+	}
+	if t.Status == TaskStatusSuccess || t.Status == TaskStatusFailure {
+		response.CompletedAt = t.UpdatedAt
+	}
+	if response.ResultDelivery == "ready" && t.GetResultURL() != "" {
+		baseURL := strings.TrimRight(system_setting.ServerAddress, "/")
+		response.Result = &dto.XingTuVideoResult{
+			Type: "url",
+			URL:  fmt.Sprintf("%s/v1/videos/%s/content", baseURL, url.PathEscape(t.TaskID)),
+		}
+	}
+	if t.Status == TaskStatusFailure {
+		response.Error = &dto.OpenAIVideoError{Code: "video_generation_failed", Message: "video generation failed"}
+	}
+	if ctx := t.PrivateData.BillingContext; ctx != nil && (ctx.TotalTokens > 0 || ctx.CompletionTokens > 0) {
+		response.Usage = &dto.XingTuVideoUsage{}
+		if ctx.CompletionTokens > 0 {
+			value := ctx.CompletionTokens
+			response.Usage.OutputTokens = &value
+		}
+		if ctx.TotalTokens > 0 {
+			value := ctx.TotalTokens
+			response.Usage.TotalTokens = &value
+		}
+	}
+	return response
+}
+
+func (t *Task) xingTuTaskStatus() string {
+	if billing := t.PrivateData.BillingContext; billing != nil && billing.BillingStatus == "pending_review" {
+		return "pending_review"
+	}
+	switch t.Status {
+	case TaskStatusSuccess:
+		return "succeeded"
+	case TaskStatusFailure:
+		return "failed"
+	case TaskStatusInProgress:
+		return "running"
+	case TaskStatusUnknown:
+		return "uncertain"
+	case TaskStatusSubmitted:
+		return "submitting"
+	default:
+		return "queued"
+	}
+}
+
+func parseTaskProgress(progress string) int {
+	progress = strings.TrimSuffix(strings.TrimSpace(progress), "%")
+	value, _ := strconv.Atoi(progress)
+	return value
+}
+
+func quotaCNYExact(quota int, quotaPerUnit float64) string {
+	units := int64(math.Round(quotaPerUnit))
+	if quota <= 0 || units <= 0 || math.Abs(quotaPerUnit-float64(units)) > 0.000001 {
+		return "0.000000"
+	}
+	microCNY := (int64(quota)*1_000_000 + units/2) / units
+	return fmt.Sprintf("%d.%06d", microCNY/1_000_000, microCNY%1_000_000)
+}
+
+func exactString(value string) *string {
+	return &value
+}
+
+func (t *Task) xingTuVideoBilling() *dto.XingTuVideoBilling {
+	ctx := t.PrivateData.BillingContext
+	if ctx == nil {
+		return &dto.XingTuVideoBilling{
+			ContractVersion: "xtai-video-billing-v2",
+			Status:          "unavailable",
+			Currency:        "CNY",
+			ReserveBasis:    "ark_official_1_5",
+			ReservedAmount:  "0.000000",
+			Markup:          "1.5",
+		}
+	}
+	currency := ctx.BillingCurrency
+	if currency == "" {
+		currency = "CNY"
+	}
+	reservedQuota := ctx.ReservedQuota
+	if reservedQuota <= 0 {
+		reservedQuota = t.Quota
+	}
+	publicBilling := &dto.XingTuVideoBilling{
+		ContractVersion: ctx.ContractVersion,
+		Status:          ctx.BillingStatus,
+		Currency:        currency,
+		ReserveBasis:    "ark_official_1_5",
+		ReservedAmount:  quotaCNYExact(reservedQuota, ctx.QuotaPerUnit),
+		Markup:          "1.5",
+		PricingRevision: ctx.OfficialPricingRevision,
+	}
+	switch ctx.BillingStatus {
+	case "settled", "settled_with_debt":
+		publicBilling.ChargedAmount = exactString(quotaCNYExact(t.Quota, ctx.QuotaPerUnit))
+		publicBilling.RefundAmount = exactString(quotaCNYExact(ctx.RefundedQuota, ctx.QuotaPerUnit))
+		publicBilling.SupplementAmount = exactString(quotaCNYExact(ctx.SupplementedQuota, ctx.QuotaPerUnit))
+		if t.UpdatedAt > 0 {
+			beijing := time.FixedZone("Asia/Shanghai", 8*60*60)
+			publicBilling.SettledAt = time.Unix(t.UpdatedAt, 0).In(beijing).Format(time.RFC3339)
+		}
+	case "refunded":
+		publicBilling.ChargedAmount = exactString("0.000000")
+		publicBilling.RefundAmount = exactString(quotaCNYExact(ctx.RefundedQuota, ctx.QuotaPerUnit))
+		publicBilling.SupplementAmount = exactString("0.000000")
+	}
+	return publicBilling
 }

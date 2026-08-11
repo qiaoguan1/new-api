@@ -46,6 +46,60 @@ type VideoUsage struct {
 	BillingStatus       string  `json:"billing_status"`
 }
 
+// XingTuVideoResponse is the versioned provider-neutral contract returned to
+// XingTu software. Monetary values are fixed six-decimal CNY strings.
+type XingTuVideoResponse struct {
+	ID             string              `json:"id"`
+	RequestID      string              `json:"request_id"`
+	Object         string              `json:"object"`
+	Model          string              `json:"model"`
+	Status         string              `json:"status"`
+	Progress       int                 `json:"progress"`
+	CreatedAt      int64               `json:"created_at"`
+	CompletedAt    int64               `json:"completed_at,omitempty"`
+	Result         *XingTuVideoResult  `json:"result"`
+	ResultDelivery string              `json:"result_delivery"`
+	Billing        *XingTuVideoBilling `json:"billing"`
+	Usage          *XingTuVideoUsage   `json:"usage,omitempty"`
+	Error          *OpenAIVideoError   `json:"error,omitempty"`
+}
+
+type XingTuVideoResult struct {
+	Type string `json:"type"`
+	URL  string `json:"url"`
+}
+
+type XingTuVideoBilling struct {
+	ContractVersion  string  `json:"contract_version"`
+	Status           string  `json:"status"`
+	Currency         string  `json:"currency"`
+	ReserveBasis     string  `json:"reserve_basis"`
+	ReservedAmount   string  `json:"reserved_amount"`
+	ChargedAmount    *string `json:"charged_amount"`
+	RefundAmount     *string `json:"refund_amount"`
+	SupplementAmount *string `json:"supplement_amount"`
+	Markup           string  `json:"markup"`
+	PricingRevision  string  `json:"pricing_revision,omitempty"`
+	SettledAt        string  `json:"settled_at,omitempty"`
+}
+
+type XingTuVideoUsage struct {
+	OutputTokens *int `json:"output_tokens"`
+	TotalTokens  *int `json:"total_tokens"`
+}
+
+type XingTuVideoErrorEnvelope struct {
+	Error XingTuVideoPublicError `json:"error"`
+}
+
+type XingTuVideoPublicError struct {
+	Code      string `json:"code"`
+	Message   string `json:"message"`
+	RequestID string `json:"request_id,omitempty"`
+	TaskID    string `json:"task_id,omitempty"`
+	Retryable bool   `json:"retryable"`
+}
+
 func (m *OpenAIVideo) SetProgressStr(progress string) {
 	progress = strings.TrimSuffix(progress, "%")
 	m.Progress, _ = strconv.Atoi(progress)
