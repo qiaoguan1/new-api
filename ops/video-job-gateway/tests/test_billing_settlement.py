@@ -11,7 +11,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from relay_pricing import RelayPricing
-from store import Store, StoreConflict
+from store import BILLING_CONTRACT_VERSION, Store, StoreConflict
 
 
 def priced_payload(amount: str = "5.961600") -> str:
@@ -94,7 +94,7 @@ class StoreSettlementTests(unittest.TestCase):
 
     def evidence(self, job_id: str, **overrides):
         value = {
-            "contract_version": "xtai-video-billing-v2",
+            "contract_version": BILLING_CONTRACT_VERSION,
             "job_id": job_id,
             "revision": 1,
             "provider_task_id": "provider-task-1",
@@ -199,6 +199,28 @@ class StoreSettlementTests(unittest.TestCase):
             self.assertEqual(failed["billing"]["charged_amount"], "0.000000")
             self.assertEqual(failed["billing"]["refund_amount"], "5.961600")
             self.assertIsNone(failed["result"])
+
+    def test_legacy_debt_record_is_withheld_as_payment_required(self):
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as directory:
+            store = Store(pathlib.Path(directory))
+            job_id = self.create_job(store, request_id="legacy-debt-request")
+            self.finish_success(store, job_id)
+            with store.connect() as connection:
+                connection.execute(
+                    """
+                    update video_jobs
+                    set billing_contract_version = ?, billing_status = ?, charged_cny_exact = ?
+                    where job_id = ?
+                    """,
+                    ("xtai-video-billing-v2", "settled_with_debt", "9.000000", job_id),
+                )
+
+            snapshot = store.get(job_id=job_id)
+
+            self.assertEqual(snapshot["billing"]["contract_version"], "xtai-video-billing-v2")
+            self.assertEqual(snapshot["billing"]["status"], "payment_required")
+            self.assertEqual(snapshot["result_delivery"], "pending_settlement")
+            self.assertIsNone(snapshot["result"])
 
 
 if __name__ == "__main__":

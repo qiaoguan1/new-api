@@ -10,12 +10,13 @@ import (
 	"strings"
 	"time"
 
+	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/model"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 )
 
-const VideoBillingContractVersion = "xtai-video-billing-v2"
+const VideoBillingContractVersion = constant.XingTuVideoContractCurrent
 
 var (
 	ErrVideoSettlementInvalid         = errors.New("invalid video settlement evidence")
@@ -50,10 +51,11 @@ type VideoSettlementOutcome struct {
 }
 
 type PendingVideoSettlementTask struct {
-	JobID          string `json:"job_id"`
-	ProviderTaskID string `json:"provider_task_id"`
-	ChannelID      int    `json:"channel_id"`
-	Revision       int    `json:"next_revision"`
+	ContractVersion string `json:"contract_version"`
+	JobID           string `json:"job_id"`
+	ProviderTaskID  string `json:"provider_task_id"`
+	ChannelID       int    `json:"channel_id"`
+	Revision        int    `json:"next_revision"`
 }
 
 func ListPendingVideoSettlementTasks(limit int) ([]PendingVideoSettlementTask, error) {
@@ -78,15 +80,16 @@ func ListPendingVideoSettlementTasks(limit int) ([]PendingVideoSettlementTask, e
 		cursor = tasks[len(tasks)-1].ID
 		for i := range tasks {
 			billing := tasks[i].PrivateData.BillingContext
-			if billing == nil || billing.ContractVersion != VideoBillingContractVersion ||
+			if billing == nil || !constant.IsXingTuVideoContract(billing.ContractVersion) ||
 				(billing.BillingStatus != "settlement_pending" && billing.BillingStatus != "payment_required" && billing.BillingStatus != "pending_review") {
 				continue
 			}
 			result = append(result, PendingVideoSettlementTask{
-				JobID:          tasks[i].TaskID,
-				ProviderTaskID: tasks[i].GetUpstreamTaskID(),
-				ChannelID:      tasks[i].ChannelId,
-				Revision:       billing.SettlementRevision + 1,
+				ContractVersion: billing.ContractVersion,
+				JobID:           tasks[i].TaskID,
+				ProviderTaskID:  tasks[i].GetUpstreamTaskID(),
+				ChannelID:       tasks[i].ChannelId,
+				Revision:        billing.SettlementRevision + 1,
 			})
 			if len(result) >= limit {
 				break
@@ -112,7 +115,7 @@ func settlementDigest(parts ...string) string {
 
 func expectedVideoEvidenceFingerprint(e VideoSettlementEvidence) string {
 	return settlementDigest(
-		VideoBillingContractVersion,
+		e.ContractVersion,
 		e.JobID,
 		e.ProviderTaskID,
 		e.ActualCostStatus,
@@ -198,7 +201,7 @@ func validateVideoSettlementEvidence(e VideoSettlementEvidence) (int, error) {
 	approvedSource := e.EvidenceSource == "provider_account_ledger" ||
 		e.EvidenceSource == "newapi_authenticated_video_task" ||
 		e.EvidenceSource == "toonflow_web_operation_log"
-	if e.ContractVersion != VideoBillingContractVersion || e.Revision < 1 ||
+	if !constant.IsXingTuVideoContract(e.ContractVersion) || e.Revision < 1 ||
 		!strings.HasPrefix(e.JobID, "task_") || len(e.JobID) > 191 ||
 		strings.TrimSpace(e.ProviderTaskID) == "" || len(e.ProviderTaskID) > 512 ||
 		strings.TrimSpace(e.EvidenceID) == "" || len(e.EvidenceID) > 191 ||
@@ -268,7 +271,8 @@ func ApplyVideoTaskSettlement(ctx context.Context, evidence VideoSettlementEvide
 		}
 		billing := task.PrivateData.BillingContext
 		userID = task.UserId
-		if task.Status != model.TaskStatusSuccess || billing == nil || billing.ContractVersion != VideoBillingContractVersion {
+		if task.Status != model.TaskStatusSuccess || billing == nil || !constant.IsXingTuVideoContract(billing.ContractVersion) ||
+			evidence.ContractVersion != billing.ContractVersion {
 			return ErrVideoSettlementTaskNotReady
 		}
 		if task.GetUpstreamTaskID() != evidence.ProviderTaskID {
@@ -341,7 +345,6 @@ func ApplyVideoTaskSettlement(ctx context.Context, evidence VideoSettlementEvide
 			}
 		}
 
-		walletBalance := 1
 		if taskIsSubscription(&task) {
 			if delta > 0 {
 				result := tx.Model(&model.UserSubscription{}).
@@ -364,7 +367,11 @@ func ApplyVideoTaskSettlement(ctx context.Context, evidence VideoSettlementEvide
 				}
 			}
 		} else if delta != 0 {
-			result := tx.Model(&model.User{}).Where("id = ?", task.UserId).
+			query := tx.Model(&model.User{}).Where("id = ?", task.UserId)
+			if delta > 0 {
+				query = query.Where("quota >= ?", delta)
+			}
+			result := query.
 				Updates(map[string]any{
 					"quota":      gorm.Expr("quota - ?", delta),
 					"used_quota": gorm.Expr("used_quota + ?", delta),
@@ -373,10 +380,10 @@ func ApplyVideoTaskSettlement(ctx context.Context, evidence VideoSettlementEvide
 				if result.Error != nil {
 					return result.Error
 				}
+				if delta > 0 {
+					return ErrVideoSettlementPaymentRequired
+				}
 				return gorm.ErrRecordNotFound
-			}
-			if err := tx.Model(&model.User{}).Select("quota").Where("id = ?", task.UserId).Scan(&walletBalance).Error; err != nil {
-				return err
 			}
 		}
 		if taskIsSubscription(&task) && delta != 0 {
@@ -430,9 +437,6 @@ func ApplyVideoTaskSettlement(ctx context.Context, evidence VideoSettlementEvide
 		billing.SettlementRevision = evidence.Revision
 		billing.SettlementFingerprint = evidence.EvidenceFingerprint
 		billing.BillingStatus = "settled"
-		if !taskIsSubscription(&task) && walletBalance <= 0 {
-			billing.BillingStatus = "settled_with_debt"
-		}
 		task.Quota = chargedQuota
 		task.UpdatedAt = time.Now().Unix()
 		if err := tx.Model(&model.Task{}).Where("id = ?", task.ID).
@@ -478,7 +482,7 @@ func markVideoSettlementPaymentRequired(ctx context.Context, taskID string, revi
 			return err
 		}
 		billing := task.PrivateData.BillingContext
-		if task.Status != model.TaskStatusSuccess || billing == nil || billing.ContractVersion != VideoBillingContractVersion {
+		if task.Status != model.TaskStatusSuccess || billing == nil || !constant.IsXingTuVideoContract(billing.ContractVersion) {
 			return ErrVideoSettlementTaskNotReady
 		}
 		if billing.SettlementRevision+1 != revision {
@@ -516,7 +520,7 @@ func RefundVideoTaskReservation(ctx context.Context, taskID string) (*VideoSettl
 		}
 		billing := task.PrivateData.BillingContext
 		userID = task.UserId
-		if task.Status != model.TaskStatusFailure || billing == nil || billing.ContractVersion != VideoBillingContractVersion {
+		if task.Status != model.TaskStatusFailure || billing == nil || !constant.IsXingTuVideoContract(billing.ContractVersion) {
 			return ErrVideoSettlementTaskNotReady
 		}
 		if billing.BillingStatus == "refunded" {

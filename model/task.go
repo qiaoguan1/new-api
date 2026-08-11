@@ -578,10 +578,10 @@ func (t *Task) ToOpenAIVideo() *dto.OpenAIVideo {
 
 func (t *Task) ResultDeliveryStatus() string {
 	billing := t.PrivateData.BillingContext
-	if billing == nil || billing.ContractVersion != "xtai-video-billing-v2" {
+	if billing == nil || !constant.IsXingTuVideoContract(billing.ContractVersion) {
 		return "ready"
 	}
-	if t.Status == TaskStatusSuccess && billing.BillingStatus != "settled" && billing.BillingStatus != "settled_with_debt" {
+	if t.Status == TaskStatusSuccess && billing.BillingStatus != "settled" {
 		return "pending_settlement"
 	}
 	if t.Status == TaskStatusSuccess {
@@ -618,8 +618,11 @@ func (t *Task) VideoUsage() *dto.VideoUsage {
 		Currency:      currency,
 		BillingStatus: billing.BillingStatus,
 	}
-	switch billing.BillingStatus {
-	case "settled", "settled_with_debt":
+	if usage.BillingStatus == "settled_with_debt" {
+		usage.BillingStatus = "payment_required"
+	}
+	switch usage.BillingStatus {
+	case "settled":
 		usage.ChargedAmount = amount
 		usage.SupplementAmount = math.Round(float64(billing.SupplementedQuota)/quotaPerUnit*1_000_000) / 1_000_000
 		usage.RefundedAmount = math.Round(float64(billing.RefundedQuota)/quotaPerUnit*1_000_000) / 1_000_000
@@ -724,7 +727,7 @@ func (t *Task) xingTuVideoBilling() *dto.XingTuVideoBilling {
 	ctx := t.PrivateData.BillingContext
 	if ctx == nil {
 		return &dto.XingTuVideoBilling{
-			ContractVersion: "xtai-video-billing-v2",
+			ContractVersion: constant.XingTuVideoContractCurrent,
 			Status:          "unavailable",
 			Currency:        "CNY",
 			ReserveBasis:    "ark_official_1_5",
@@ -740,17 +743,21 @@ func (t *Task) xingTuVideoBilling() *dto.XingTuVideoBilling {
 	if reservedQuota <= 0 {
 		reservedQuota = t.Quota
 	}
+	publicStatus := ctx.BillingStatus
+	if publicStatus == "settled_with_debt" {
+		publicStatus = "payment_required"
+	}
 	publicBilling := &dto.XingTuVideoBilling{
 		ContractVersion: ctx.ContractVersion,
-		Status:          ctx.BillingStatus,
+		Status:          publicStatus,
 		Currency:        currency,
 		ReserveBasis:    "ark_official_1_5",
 		ReservedAmount:  quotaCNYExact(reservedQuota, ctx.QuotaPerUnit),
 		Markup:          "1.5",
 		PricingRevision: ctx.OfficialPricingRevision,
 	}
-	switch ctx.BillingStatus {
-	case "settled", "settled_with_debt":
+	switch publicStatus {
+	case "settled":
 		publicBilling.ChargedAmount = exactString(quotaCNYExact(t.Quota, ctx.QuotaPerUnit))
 		publicBilling.RefundAmount = exactString(quotaCNYExact(ctx.RefundedQuota, ctx.QuotaPerUnit))
 		publicBilling.SupplementAmount = exactString(quotaCNYExact(ctx.SupplementedQuota, ctx.QuotaPerUnit))

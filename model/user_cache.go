@@ -3,7 +3,6 @@ package model
 import (
 	"context"
 	"fmt"
-	"time"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
@@ -64,17 +63,37 @@ func InvalidateUserCache(userId int) error {
 	return invalidateUserCache(userId)
 }
 
-// updateUserCache updates all user cache fields using hash
+// updateUserCache refreshes identity fields while initializing Quota only when
+// it is absent. A stale asynchronous DB read must never overwrite a concurrent
+// Redis quota reservation.
 func updateUserCache(user User) error {
-	if !common.RedisEnabled {
+	if !common.RedisEnabled || common.RDB == nil {
 		return nil
 	}
-
-	return common.RedisHSetObj(
-		getUserCacheKey(user.Id),
-		user.ToBaseUser(),
-		time.Duration(common.RedisKeyCacheSeconds())*time.Second,
-	)
+	base := user.ToBaseUser()
+	const script = `
+redis.call("HSET", KEYS[1],
+  "Id", ARGV[1], "Group", ARGV[2], "Email", ARGV[3],
+  "Status", ARGV[4], "Username", ARGV[5], "Setting", ARGV[6])
+redis.call("HSETNX", KEYS[1], "Quota", ARGV[7])
+if tonumber(ARGV[8]) > 0 then
+  redis.call("EXPIRE", KEYS[1], tonumber(ARGV[8]))
+end
+return 1
+`
+	return common.RDB.Eval(
+		context.Background(),
+		script,
+		[]string{getUserCacheKey(user.Id)},
+		base.Id,
+		base.Group,
+		base.Email,
+		base.Status,
+		base.Username,
+		base.Setting,
+		base.Quota,
+		common.RedisKeyCacheSeconds(),
+	).Err()
 }
 
 // GetUserCache gets complete user cache from hash
@@ -156,6 +175,34 @@ if current == false then
   return -1
 end
 if tonumber(current) <= 0 then
+  return 0
+end
+redis.call("HINCRBY", KEYS[1], "Quota", -tonumber(ARGV[1]))
+return 1
+`
+	value, err := common.RDB.Eval(
+		context.Background(),
+		script,
+		[]string{getUserCacheKey(userId)},
+		delta,
+	).Int64()
+	if err != nil {
+		return false, false, err
+	}
+	return value == 1, value == -1, nil
+}
+
+// cacheReserveUserQuotaIfEnough atomically reserves only a fully funded amount.
+func cacheReserveUserQuotaIfEnough(userId int, delta int64) (reserved bool, missing bool, err error) {
+	if !common.RedisEnabled || common.RDB == nil {
+		return false, false, nil
+	}
+	const script = `
+local current = redis.call("HGET", KEYS[1], "Quota")
+if current == false then
+  return -1
+end
+if tonumber(current) < tonumber(ARGV[1]) then
   return 0
 end
 redis.call("HINCRBY", KEYS[1], "Quota", -tonumber(ARGV[1]))

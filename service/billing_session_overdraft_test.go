@@ -20,6 +20,7 @@ func walletRelayInfo(userID, tokenID int, tokenKey string, unlimited bool) *rela
 		TokenKey:        tokenKey,
 		TokenUnlimited:  unlimited,
 		ForcePreConsume: true,
+		HardQuota:       true,
 		RequestId:       "request-overdraft",
 		OriginModelName: "seedance-2.0",
 		UserSetting: dto.UserSetting{
@@ -28,7 +29,7 @@ func walletRelayInfo(userID, tokenID int, tokenKey string, unlimited bool) *rela
 	}
 }
 
-func TestWalletReservationAllowsOneAcceptedTaskToCrossZero(t *testing.T) {
+func TestVideoWalletReservationRequiresFullHardQuota(t *testing.T) {
 	truncate(t)
 	gin.SetMode(gin.TestMode)
 	const userID, tokenID = 101, 101
@@ -43,19 +44,19 @@ func TestWalletReservationAllowsOneAcceptedTaskToCrossZero(t *testing.T) {
 		150,
 	)
 
-	require.Nil(t, apiErr)
-	require.NotNil(t, session)
-	assert.Equal(t, -50, getUserQuota(t, userID))
+	assert.Nil(t, session)
+	require.NotNil(t, apiErr)
+	assert.Equal(t, types.ErrorCodeInsufficientUserQuota, apiErr.GetErrorCode())
+	assert.Equal(t, 100, getUserQuota(t, userID))
 
 	second, apiErr := NewBillingSession(
 		&gin.Context{},
 		walletRelayInfo(userID, tokenID, "sk-overdraft", true),
-		1,
+		100,
 	)
-	assert.Nil(t, second)
-	require.NotNil(t, apiErr)
-	assert.Equal(t, types.ErrorCodeAccountInDebt, apiErr.GetErrorCode())
-	assert.Equal(t, -50, getUserQuota(t, userID))
+	require.Nil(t, apiErr)
+	require.NotNil(t, second)
+	assert.Equal(t, 0, getUserQuota(t, userID))
 
 	require.NoError(t, model.IncreaseUserQuota(userID, 100, true))
 	third, apiErr := NewBillingSession(
@@ -65,10 +66,10 @@ func TestWalletReservationAllowsOneAcceptedTaskToCrossZero(t *testing.T) {
 	)
 	require.Nil(t, apiErr)
 	require.NotNil(t, third)
-	assert.Equal(t, -50, getUserQuota(t, userID))
+	assert.Equal(t, 0, getUserQuota(t, userID))
 }
 
-func TestConcurrentWalletReservationsAllowOnlyOneCrossZero(t *testing.T) {
+func TestConcurrentVideoWalletReservationsNeverCrossZero(t *testing.T) {
 	truncate(t)
 	gin.SetMode(gin.TestMode)
 	const userID = 102
@@ -88,7 +89,7 @@ func TestConcurrentWalletReservationsAllowOnlyOneCrossZero(t *testing.T) {
 			_, apiErr := NewBillingSession(
 				&gin.Context{},
 				walletRelayInfo(userID, tokenID, key, true),
-				150,
+				60,
 			)
 			results <- apiErr == nil
 		}(tokenID, key)
@@ -103,7 +104,7 @@ func TestConcurrentWalletReservationsAllowOnlyOneCrossZero(t *testing.T) {
 	}
 
 	assert.Equal(t, 1, successes)
-	assert.Equal(t, -50, getUserQuota(t, userID))
+	assert.Equal(t, 40, getUserQuota(t, userID))
 }
 
 func TestHardLimitedTokenNeverOverdraftsForWalletReservation(t *testing.T) {

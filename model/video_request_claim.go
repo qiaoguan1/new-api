@@ -78,3 +78,18 @@ func FailVideoRequestClaim(id int64, code, message string, uncertain bool) error
 		"error_message": message,
 	}).Error
 }
+
+// ReopenVideoRequestClaim atomically permits one same-ID retry for a known
+// recoverable failure, such as a fully rejected reservation before any task or
+// provider side effect existed.
+func ReopenVideoRequestClaim(id int64, expectedErrorCode string) (bool, error) {
+	result := DB.Model(&VideoRequestClaim{}).
+		Where("id = ? AND state = ? AND error_code = ?", id, VideoRequestStateFailed, expectedErrorCode).
+		Updates(map[string]interface{}{
+			"state":         VideoRequestStateClaimed,
+			"updated_at":    time.Now().Unix(),
+			"error_code":    "",
+			"error_message": "",
+		})
+	return result.RowsAffected == 1, result.Error
+}

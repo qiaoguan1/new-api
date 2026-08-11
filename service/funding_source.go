@@ -27,8 +27,9 @@ type FundingSource interface {
 // ---------------------------------------------------------------------------
 
 type WalletFunding struct {
-	userId   int
-	consumed int // 实际预扣的用户额度
+	userId    int
+	consumed  int // 实际预扣的用户额度
+	hardLimit bool
 }
 
 func (w *WalletFunding) Source() string { return BillingSourceWallet }
@@ -37,7 +38,11 @@ func (w *WalletFunding) PreConsume(amount int) error {
 	if amount <= 0 {
 		return nil
 	}
-	if err := model.ReserveUserQuotaIfPositive(w.userId, amount); err != nil {
+	reserve := model.ReserveUserQuotaIfPositive
+	if w.hardLimit {
+		reserve = model.ReserveUserQuotaIfEnough
+	}
+	if err := reserve(w.userId, amount); err != nil {
 		return err
 	}
 	w.consumed = amount
@@ -49,6 +54,9 @@ func (w *WalletFunding) Settle(delta int) error {
 		return nil
 	}
 	if delta > 0 {
+		if w.hardLimit {
+			return model.ReserveUserQuotaIfEnough(w.userId, delta)
+		}
 		return model.DecreaseUserQuota(w.userId, delta, false)
 	}
 	return model.IncreaseUserQuota(w.userId, -delta, false)

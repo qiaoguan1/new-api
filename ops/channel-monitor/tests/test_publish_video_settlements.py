@@ -49,6 +49,7 @@ class PublishSettlementTests(unittest.TestCase):
 
         self.assertEqual(len(requests), 1)
         request = requests[0]
+        self.assertEqual(request["contract_version"], "xtai-video-billing-v2.1")
         self.assertEqual(request["actual_cost_cny_exact"], "1.450000")
         self.assertEqual(request["provider_task_id"], "provider-1")
         self.assertEqual(request["revision"], 1)
@@ -88,6 +89,7 @@ class PublishSettlementTests(unittest.TestCase):
     def test_newapi_pending_task_requires_one_exact_provider_record(self):
         pending = [
             {
+                "contract_version": "xtai-video-billing-v2",
                 "job_id": "task_" + "a" * 32,
                 "provider_task_id": "provider-ordinary-1",
                 "next_revision": 1,
@@ -109,6 +111,7 @@ class PublishSettlementTests(unittest.TestCase):
 
         self.assertEqual(len(requests), 1)
         self.assertEqual(requests[0]["job_id"], pending[0]["job_id"])
+        self.assertEqual(requests[0]["contract_version"], "xtai-video-billing-v2")
         self.assertEqual(requests[0]["actual_cost_cny_exact"], "0.290000")
 
     def test_newapi_pending_task_rejects_ambiguous_provider_ids(self):

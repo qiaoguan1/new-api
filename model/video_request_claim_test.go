@@ -57,3 +57,25 @@ func TestFailVideoRequestClaimPersistsSafeTerminalState(t *testing.T) {
 	require.Equal(t, "invalid_video_request", replay.ErrorCode)
 	require.Equal(t, "video request was rejected", replay.ErrorMessage)
 }
+
+func TestReopenVideoRequestClaimAllowsOneRetryAfterRecharge(t *testing.T) {
+	truncateTables(t)
+
+	claim, created, err := ClaimVideoRequest(12, "req_recharge", "fingerprint", "task_recharge")
+	require.NoError(t, err)
+	require.True(t, created)
+	require.NoError(t, FailVideoRequestClaim(claim.ID, "insufficient_user_quota", "recharge required", false))
+
+	reopened, err := ReopenVideoRequestClaim(claim.ID, "insufficient_user_quota")
+	require.NoError(t, err)
+	require.True(t, reopened)
+	reopened, err = ReopenVideoRequestClaim(claim.ID, "insufficient_user_quota")
+	require.NoError(t, err)
+	require.False(t, reopened)
+
+	replay, created, err := ClaimVideoRequest(12, "req_recharge", "fingerprint", "task_unused")
+	require.NoError(t, err)
+	require.False(t, created)
+	require.Equal(t, VideoRequestStateClaimed, replay.State)
+	require.Empty(t, replay.ErrorCode)
+}

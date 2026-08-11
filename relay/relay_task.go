@@ -389,7 +389,8 @@ func videoFetchByIDRespBodyBuilder(c *gin.Context) (respBody []byte, taskResp *d
 
 	if isOpenAIVideoAPI && relaycommon.IsXingTuVideoContract(c) {
 		billing := originTask.PrivateData.BillingContext
-		if billing == nil || billing.ContractVersion != service.XingTuVideoContractV2 || originTask.PrivateData.RequestID == "" {
+		requestedVersion := strings.TrimSpace(c.GetHeader(service.XingTuVideoContractHeader))
+		if billing == nil || billing.ContractVersion != requestedVersion || originTask.PrivateData.RequestID == "" {
 			taskResp = service.TaskErrorWrapperLocal(errors.New("task_contract_mismatch"), "task_contract_mismatch", http.StatusConflict)
 			return
 		}
@@ -454,7 +455,7 @@ func videoFetchByIDRespBodyBuilder(c *gin.Context) (respBody []byte, taskResp *d
 // 仅当渠道类型为 Gemini 或 Vertex 时触发；其他渠道或出错时返回 nil。
 // 当非 OpenAI Video API 时，还会构建自定义格式的响应体。
 func tryRealtimeFetch(task *model.Task, isOpenAIVideoAPI bool) []byte {
-	if task.PrivateData.BillingContext != nil && task.PrivateData.BillingContext.ContractVersion == VideoBillingContractVersion {
+	if task.PrivateData.BillingContext != nil && constant.IsXingTuVideoContract(task.PrivateData.BillingContext.ContractVersion) {
 		return nil
 	}
 	channelModel, err := model.GetChannelById(task.ChannelId, true)
@@ -584,7 +585,7 @@ func TaskModel2Dto(task *model.Task) *dto.TaskDto {
 	quota := task.Quota
 	properties := task.Properties
 	failReason := task.FailReason
-	if task.PrivateData.BillingContext != nil && task.PrivateData.BillingContext.ContractVersion == VideoBillingContractVersion {
+	if task.PrivateData.BillingContext != nil && constant.IsXingTuVideoContract(task.PrivateData.BillingContext.ContractVersion) {
 		channelID = 0
 		quota = 0
 		properties.UpstreamModelName = ""
@@ -631,7 +632,7 @@ func attachOpenAIVideoUsage(task *model.Task, payload []byte) ([]byte, error) {
 		return nil, err
 	}
 	if task.PrivateData.BillingContext != nil &&
-		task.PrivateData.BillingContext.ContractVersion == VideoBillingContractVersion {
+		constant.IsXingTuVideoContract(task.PrivateData.BillingContext.ContractVersion) {
 		redactPrivateVideoFields(video)
 	}
 	usage, err := common.Marshal(task.VideoUsage())

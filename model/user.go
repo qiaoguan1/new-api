@@ -18,7 +18,10 @@ import (
 
 const UserNameMaxLength = 20
 
-var ErrUserQuotaNotPositive = errors.New("user wallet balance is not positive")
+var (
+	ErrUserQuotaNotPositive  = errors.New("user wallet balance is not positive")
+	ErrUserQuotaInsufficient = errors.New("user wallet balance is insufficient")
+)
 
 // User if you add sensitive fields, don't forget to clean them in setupLogin function.
 // Otherwise, the sensitive information will be saved on local storage in plain text!
@@ -942,11 +945,11 @@ func ReserveUserQuotaIfPositive(id int, quota int) error {
 			return err
 		}
 		if missing {
-			current, dbErr := GetUserQuota(id, true)
+			user, dbErr := GetUserById(id, false)
 			if dbErr != nil {
 				return dbErr
 			}
-			if err := updateUserQuotaCache(id, current); err != nil {
+			if err := updateUserCache(*user); err != nil {
 				return err
 			}
 			reserved, _, err = cacheReserveUserQuotaIfPositive(id, int64(quota))
@@ -980,6 +983,62 @@ func ReserveUserQuotaIfPositive(id int, quota int) error {
 	}
 	if result.RowsAffected != 1 {
 		return ErrUserQuotaNotPositive
+	}
+	return nil
+}
+
+// ReserveUserQuotaIfEnough atomically reserves quota only when the wallet can
+// fund the complete amount. It never permits the balance to become negative.
+func ReserveUserQuotaIfEnough(id int, quota int) error {
+	if quota < 0 {
+		return errors.New("quota 不能为负数！")
+	}
+	if quota == 0 {
+		return nil
+	}
+	if common.RedisEnabled && common.RDB != nil {
+		reserved, missing, err := cacheReserveUserQuotaIfEnough(id, int64(quota))
+		if err != nil {
+			return err
+		}
+		if missing {
+			current, dbErr := GetUserQuota(id, true)
+			if dbErr != nil {
+				return dbErr
+			}
+			if err := updateUserQuotaCache(id, current); err != nil {
+				return err
+			}
+			reserved, _, err = cacheReserveUserQuotaIfEnough(id, int64(quota))
+			if err != nil {
+				return err
+			}
+		}
+		if !reserved {
+			return ErrUserQuotaInsufficient
+		}
+		if common.BatchUpdateEnabled {
+			addNewRecord(BatchUpdateTypeUserQuota, id, -quota)
+			return nil
+		}
+		result := DB.Model(&User{}).Where("id = ? AND quota >= ?", id, quota).
+			Update("quota", gorm.Expr("quota - ?", quota))
+		if result.Error != nil || result.RowsAffected != 1 {
+			_ = cacheIncrUserQuota(id, int64(quota))
+			if result.Error != nil {
+				return result.Error
+			}
+			return ErrUserQuotaInsufficient
+		}
+		return nil
+	}
+	result := DB.Model(&User{}).Where("id = ? AND quota >= ?", id, quota).
+		Update("quota", gorm.Expr("quota - ?", quota))
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected != 1 {
+		return ErrUserQuotaInsufficient
 	}
 	return nil
 }

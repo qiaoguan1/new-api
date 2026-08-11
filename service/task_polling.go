@@ -68,7 +68,7 @@ func sweepTimedOutTasks(ctx context.Context) {
 		}
 
 		if billing := task.PrivateData.BillingContext; billing != nil &&
-			billing.ContractVersion == VideoBillingContractVersion {
+			constant.IsXingTuVideoContract(billing.ContractVersion) {
 			billing.BillingStatus = "refund_pending"
 		}
 
@@ -355,7 +355,7 @@ func updateVideoTasks(ctx context.Context, platform constant.TaskPlatform, chann
 
 func failV2VideoTaskAndRefund(ctx context.Context, task *model.Task, reason string) bool {
 	if task == nil || task.PrivateData.BillingContext == nil ||
-		task.PrivateData.BillingContext.ContractVersion != VideoBillingContractVersion {
+		!constant.IsXingTuVideoContract(task.PrivateData.BillingContext.ContractVersion) {
 		return false
 	}
 	oldStatus := task.Status
@@ -512,7 +512,7 @@ func updateVideoSingleTask(ctx context.Context, adaptor TaskPollingAdaptor, ch *
 		var won bool
 		var err error
 		if task.Status == model.TaskStatusSuccess && task.PrivateData.BillingContext != nil &&
-			task.PrivateData.BillingContext.ContractVersion == VideoBillingContractVersion {
+			constant.IsXingTuVideoContract(task.PrivateData.BillingContext.ContractVersion) {
 			won, err = task.UpdateWithStatusAndXingTuWebhook(
 				snap.Status, model.XingTuWebhookTaskSucceeded, "task-success:"+task.TaskID,
 			)
@@ -560,7 +560,7 @@ func captureTaskUsage(task *model.Task, taskResult *relaycommon.TaskInfo) {
 	}
 	switch task.Status {
 	case model.TaskStatusSuccess:
-		if billing.ContractVersion == VideoBillingContractVersion {
+		if constant.IsXingTuVideoContract(billing.ContractVersion) {
 			billing.BillingStatus = "settlement_pending"
 		} else {
 			billing.BillingStatus = "settled"
@@ -610,7 +610,7 @@ func truncateBase64(s string) string {
 //  2. taskResult.TotalTokens > 0 → 按 token 重算
 //  3. 都不满足 → 保持预扣额度不变
 func settleTaskBillingOnComplete(ctx context.Context, adaptor TaskPollingAdaptor, task *model.Task, taskResult *relaycommon.TaskInfo) {
-	if bc := task.PrivateData.BillingContext; bc != nil && bc.ContractVersion == VideoBillingContractVersion {
+	if bc := task.PrivateData.BillingContext; bc != nil && constant.IsXingTuVideoContract(bc.ContractVersion) {
 		logger.LogInfo(ctx, fmt.Sprintf("task %s awaits exact provider-ledger settlement", task.TaskID))
 		return
 	}
