@@ -509,7 +509,16 @@ func updateVideoSingleTask(ctx context.Context, adaptor TaskPollingAdaptor, ch *
 
 	isDone := task.Status == model.TaskStatusSuccess || task.Status == model.TaskStatusFailure
 	if isDone && snap.Status != task.Status {
-		won, err := task.UpdateWithStatus(snap.Status)
+		var won bool
+		var err error
+		if task.Status == model.TaskStatusSuccess && task.PrivateData.BillingContext != nil &&
+			task.PrivateData.BillingContext.ContractVersion == VideoBillingContractVersion {
+			won, err = task.UpdateWithStatusAndXingTuWebhook(
+				snap.Status, model.XingTuWebhookTaskSucceeded, "task-success:"+task.TaskID,
+			)
+		} else {
+			won, err = task.UpdateWithStatus(snap.Status)
+		}
 		if err != nil {
 			logger.LogError(ctx, fmt.Sprintf("UpdateWithStatus failed for task %s: %s", task.TaskID, err.Error()))
 			shouldRefund = false

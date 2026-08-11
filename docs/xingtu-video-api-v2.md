@@ -3,7 +3,7 @@
 **合同版本**：`xtai-video-billing-v2`  
 **时区**：北京时间 `Asia/Shanghai`（UTC+8）  
 **金额**：人民币 CNY，跨系统一律使用六位小数字符串  
-**接口模式**：提交异步任务后轮询；当前不使用回调/Webhook
+**接口模式**：异步任务 + 签名 Webhook 主通知 + 查询接口兜底
 
 本文档是星途AI软件（下游）唯一需要实现的视频对接合同。下游不接触 Paisio、Toonflow
 或其他上游，不选择渠道，不读取上游模型广场，也不接收上游真实成本。
@@ -50,6 +50,15 @@ supplement_amount = max(charged_amount - reserved_amount, 0)
 - 一个独立的下游API令牌；
 - 可用模型和分辨率清单；
 - 测试环境和生产环境各自的令牌，二者不得混用。
+- 合同版本、回调事件格式和重试规则；
+- 一条随机生成、至少32字节的 Webhook 签名密钥，通过安全渠道单独交付。
+
+下游需要提供给中转站管理员：
+
+- 一个由下游服务端控制的公网 HTTPS 回调地址，例如 `https://xingtu.example.com/webhooks/video`；
+- 回调域名必须使用公开 DNS、仅开放443端口，不能使用 IP 地址、内网地址、URL 查询参数或跳转；
+- 回调服务的运维联系人；如有防火墙白名单，还需告知放行流程；
+- 测试环境和生产环境必须提供不同的回调地址。
 
 下游必须配置：
 
@@ -58,10 +67,21 @@ XINGTU_VIDEO_BASE_URL=https://api.example.com
 XINGTU_VIDEO_API_TOKEN=sk-...
 XINGTU_VIDEO_CONTRACT_VERSION=xtai-video-billing-v2
 XINGTU_VIDEO_PROVIDER_ID=video-aixingtu-api
+XINGTU_VIDEO_WEBHOOK_SECRET=<中转站安全交付的随机密钥>
 ```
 
 API令牌只能保存在下游服务端密钥配置中，不能放进浏览器、客户端安装包、日志、截图或
 源码仓库。
+
+中转站管理员收到下游回调地址后，在中转站服务端配置同一对地址和密钥：
+
+```text
+XINGTU_VIDEO_WEBHOOK_URL=https://xingtu.example.com/webhooks/video
+XINGTU_VIDEO_WEBHOOK_SECRET=<与下游相同的随机密钥>
+```
+
+两项都未配置时仅停止主动投递，事件仍持久保存，查询接口不受影响；只配置一项、URL 不合规或
+密钥短于32字节时会安全拒绝启动回调投递。配置值不会出现在公共接口和投递日志中。
 
 ## 3. 下游必须生成和保存的数据
 
@@ -173,8 +193,10 @@ Authorization: Bearer <XINGTU_VIDEO_API_TOKEN>
 X-XingTu-Contract-Version: xtai-video-billing-v2
 ```
 
-建议正常生成阶段每2至5秒查询一次。下游页面关闭不代表任务取消；重新打开后根据数据库中
-的 `task_id` 继续查询。
+中转站内部每15秒查询上游一次。下游启用回调后不需要高频轮询：建议每1至2分钟兜底查询一次，
+收到任何有效回调后立即再查询一次权威状态。未启用回调时，生成阶段每10至15秒查询一次；进入
+`settlement_pending` 后每30至60秒查询一次并逐渐退避。下游页面关闭不代表任务取消；重新打开后
+根据数据库中的 `task_id` 继续查询。
 
 ### 正在生成
 
@@ -285,7 +307,114 @@ X-XingTu-Contract-Version: xtai-video-billing-v2
 
 下游需要长期保存时，应在授权范围内及时下载到自己的对象存储。
 
-## 6. 状态表
+## 6. Webhook 回调协议
+
+### 6.1 回调何时发送
+
+回调是通知机制，不代替查询接口。一个成功任务通常会收到两个事件：
+
+1. `video.task.succeeded`：视频已经生成，但真实账单可能仍在核对；此时通常为
+   `billing.status=settlement_pending`、`result_delivery=pending_settlement`。
+2. `video.billing.settled`：真实扣费已按1.5倍多退少补，最终金额和结果地址可以使用。
+
+其他事件：
+
+| `event_type` | 含义 | 下游动作 |
+|---|---|---|
+| `video.task.failed` | 任务失败且预扣已退款 | 标记失败，读取 `billing.refund_amount` |
+| `video.billing.payment_required` | 硬限额令牌或订阅无法完成补扣 | 暂停交付并提示充值/人工处理 |
+| `video.billing.pending_review` | 证据冲突，需人工复核 | 禁止重提同一业务请求，联系管理员 |
+
+回调只在数据库状态事务提交后入队。因此不会出现“通知已经成功，但状态或资金尚未落库”。
+
+### 6.2 请求头和消息体
+
+```http
+POST /webhooks/video HTTP/1.1
+Content-Type: application/json
+User-Agent: XingTuVideoWebhook/1
+X-XingTu-Contract-Version: xtai-video-billing-v2
+X-XingTu-Event-ID: evt_8d5e...
+X-XingTu-Timestamp: 1786406400
+X-XingTu-Delivery-Attempt: 1
+X-XingTu-Signature: v1=<小写十六进制HMAC-SHA256>
+```
+
+```json
+{
+  "event_id": "evt_8d5e...",
+  "event_version": 1,
+  "event_type": "video.billing.settled",
+  "occurred_at": "2026-08-11T20:30:02+08:00",
+  "data": {
+    "id": "task_public_xxx",
+    "request_id": "req_20260811_000001",
+    "object": "video",
+    "model": "seedance-2.0",
+    "status": "succeeded",
+    "progress": 100,
+    "created_at": 1786400000,
+    "completed_at": 1786400102,
+    "result": {
+      "type": "url",
+      "url": "https://api.example.com/v1/videos/task_public_xxx/content"
+    },
+    "result_delivery": "ready",
+    "billing": {
+      "contract_version": "xtai-video-billing-v2",
+      "status": "settled",
+      "currency": "CNY",
+      "reserve_basis": "ark_official_1_5",
+      "reserved_amount": "5.961600",
+      "charged_amount": "2.175000",
+      "refund_amount": "3.786600",
+      "supplement_amount": "0.000000",
+      "markup": "1.5",
+      "pricing_revision": "official-fallback-2026-08-09.1",
+      "settled_at": "2026-08-11T20:30:02+08:00"
+    }
+  }
+}
+```
+
+`data` 与 `GET /v1/videos/{task_id}` 的响应结构完全一致。它不包含渠道名、上游任务ID、上游成本、
+账号凭据或利润。金额仍是六位小数字符串；`occurred_at` 和 `billing.settled_at` 统一使用带
+`+08:00` 偏移的北京时间 RFC3339，Unix 时间戳字段不受时区影响。
+
+### 6.3 下游必须如何验签
+
+签名原文必须使用收到的原始请求体字节，不能先解析 JSON 再序列化：
+
+```text
+signing_input = X-XingTu-Timestamp + "." + raw_body_bytes
+expected = "v1=" + lowercase_hex(HMAC_SHA256(webhook_secret, signing_input))
+```
+
+下游接收顺序必须是：
+
+1. 限制请求体大小，例如不超过64 KiB；
+2. 检查合同版本；
+3. 检查时间戳与当前时间相差不超过5分钟；
+4. 用服务端密钥计算 HMAC，并使用恒定时间比较；
+5. 在数据库中以 `event_id` 建唯一索引并先持久化；
+6. 持久化成功后立即返回任意 HTTP 2xx，耗时业务放入自己的后台队列；
+7. 收到重复 `event_id` 时不重复扣费、不重复退款，直接返回2xx；
+8. 回调可能乱序。收到通知后用 `data.id` 调用查询接口，以查询结果覆盖本地权威状态。
+
+下游绝不能仅按来源 IP 信任回调，也不能把签名密钥写到浏览器或 App 中。
+
+### 6.4 中转站重试规则
+
+- 只有 HTTP 2xx 表示接收成功；网络错误、超时、3xx、4xx、5xx 都会重试；
+- 中转站不跟随 HTTP 重定向；连接和总请求均有严格超时；
+- 首次立即发送，随后约在10秒、30秒、1分钟、2分钟、5分钟、10分钟、30分钟重试，之后每小时一次；
+- 最多尝试30次，约24小时后进入人工处理队列；
+- 每次重试的 `event_id` 和 JSON 消息体完全相同，只有时间戳、签名和尝试次数请求头变化；
+- 中转站重启后继续投递尚未确认的事件。
+
+Webhook 不是唯一数据源。下游回调服务故障时，查询接口仍可恢复全部任务与结算状态。
+
+## 7. 状态表
 
 任务状态：
 
@@ -320,7 +449,7 @@ X-XingTu-Contract-Version: xtai-video-billing-v2
 | `ready` | 可以读取 `result.url` |
 | `unavailable` | 尚无结果或任务失败 |
 
-## 7. Token字段
+## 8. Token字段
 
 如果上游提供可信Token使用量，响应可以包含：
 
@@ -336,7 +465,7 @@ X-XingTu-Contract-Version: xtai-video-billing-v2
 按次或按秒上游可能不返回 `usage`。下游最终扣费只能使用 `billing.charged_amount`，不能用
 Token自行反算费用。
 
-## 8. 幂等、超时和重试
+## 9. 幂等、超时和重试
 
 - 同一 `request_id`、相同请求内容：返回原任务，不重复生成、不重复扣费。
 - 同一 `request_id`、不同请求内容：HTTP 409 `idempotency_conflict`。
@@ -348,7 +477,7 @@ Token自行反算费用。
 建议退避：2秒、4秒、8秒、15秒、30秒，之后每30秒一次。下游自己的业务等待超时只停止
 前台等待，不取消服务端任务；后续仍用原任务ID恢复。
 
-## 9. 错误格式
+## 10. 错误格式
 
 ```json
 {
@@ -383,7 +512,7 @@ Token自行反算费用。
 | 429 | 限流错误 | 按 `Retry-After` 退避 |
 | 5xx | 服务错误 | `retryable=true`时使用原ID重试 |
 
-## 10. 普通注册用户余额
+## 11. 普通注册用户余额
 
 - 任务受理时普通钱包余额大于0，可以让当前一个任务预扣或补扣后跨到负数。
 - 该任务仍继续生成、结算和交付。
@@ -392,7 +521,7 @@ Token自行反算费用。
 - 订阅额度和带硬上限的API令牌不允许透支。
 - `settled_with_debt`已经是最终结算，充值后不得再次补扣同一任务。
 
-## 11. 隐私边界
+## 12. 隐私边界
 
 公共响应严禁出现：
 
@@ -409,7 +538,7 @@ Paisio、Toonflow或其他供应商名称
 
 `billing.charged_amount`是用户最终收费，不是上游真实成本。
 
-## 12. 下游最小处理伪代码
+## 13. 下游最小处理伪代码
 
 ```text
 request_id = load_or_create_stable_request_id(user_action)
@@ -422,9 +551,20 @@ else if error.retryable:
 else:
     show stable error code and stop automatic resubmission
 
-loop:
+callback(request):
+    raw_body = read_limited_raw_body(max=64KiB)
+    reject if timestamp outside +/- 5 minutes
+    reject unless constant_time_equal(received_signature,
+        "v1=" + hex(hmac_sha256(secret, timestamp + "." + raw_body)))
+    event = parse_json(raw_body)
+    insert event.event_id with UNIQUE constraint
+    if duplicate: return HTTP 204
+    enqueue local reconcile(event.data.id)
+    return HTTP 204
+
+reconcile(task_id):
     task = GET /v1/videos/{task_id}
-    persist task status and billing fields
+    transactionally persist task status, billing fields and result delivery
 
     if task.status == failed and task.billing.status == refunded:
         stop
@@ -436,13 +576,23 @@ loop:
        or task.billing.status in [payment_required, pending_review]:
         stop automatic retry and request operator review
 
-    wait 2-5 seconds
+
+fallback_scheduler:
+    while not terminal:
+        reconcile(task_id)
+        wait 1-2 minutes when webhook is enabled
 ```
 
-## 13. 上线验收清单
+## 14. 上线验收清单
 
 - [ ] 测试与生产使用不同API令牌。
 - [ ] API令牌只在服务端保存。
+- [ ] 测试与生产使用不同的 HTTPS 回调地址和 Webhook 密钥。
+- [ ] 回调原始请求体先验签后解析，时间戳窗口不超过5分钟。
+- [ ] `event_id` 有数据库唯一索引，重复回调不会重复更新余额或业务订单。
+- [ ] 回调先持久化再快速返回2xx，3xx不会被当作成功。
+- [ ] 回调乱序时会调用查询接口恢复权威状态，不用旧事件覆盖新结算。
+- [ ] 即使没有收到回调，也有每1至2分钟的低频兜底查询。
 - [ ] `XINGTU_VIDEO_BASE_URL` 是公网HTTPS地址；成功响应中的 `result.url` 不得是 localhost 或内网地址。
 - [ ] 每次用户操作只生成一个稳定 `request_id`。
 - [ ] `Idempotency-Key`和JSON `request_id`始终相同。
@@ -459,7 +609,7 @@ loop:
 - [ ] 日志和页面没有展示渠道、上游成本或利润。
 - [ ] 超时恢复使用原请求ID和原任务ID，不新建付费任务。
 
-## 14. 兼容说明
+## 15. 兼容说明
 
 旧客户端不发送 `X-XingTu-Contract-Version` 时继续使用原 OpenAI 视频响应格式。星途AI软件
 必须始终发送该版本头，才能获得本协议的统一字段、六位金额和幂等保障。新合同只改变视频
