@@ -751,6 +751,96 @@ def v1_self(session, origin):
     return body.get("data") or {}
 
 
+def _balance_probe_result(adapter, balance, rate):
+    number = safe_float(balance)
+    if number is None:
+        raise RuntimeError("balance unavailable")
+    return {
+        "status": "complete",
+        "billing_api": adapter,
+        "balance_usd": number,
+        "rate": rate,
+        "checked_at": int(time.time()),
+        "checked_at_iso": beijing_iso_now(),
+    }
+
+
+def _probe_toonflow_balance(credential, website):
+    origin = origin_of(credential.get("website_url") or website)
+    parsed_origin = urlsplit(origin)
+    if parsed_origin.scheme != "https":
+        raise RuntimeError("refusing Toonflow authentication over non-HTTPS transport")
+    if (parsed_origin.hostname or "").lower() != "api.toonflow.net" or parsed_origin.port not in (
+        None,
+        443,
+    ):
+        raise RuntimeError("refusing to send Toonflow web token to an unapproved host")
+    token = _toonflow_token(credential)
+    rate = safe_float(credential.get("rate"), 1.0) or 1.0
+    session = requests.Session()
+    session.headers.update(
+        {
+            "User-Agent": UA,
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+            "Origin": origin,
+            "Referer": origin + "/",
+            "Authorization": f"Bearer {token}",
+        }
+    )
+    dashboard = _toonflow_json_get(
+        session,
+        origin + "/web/web/pointsPreview/getPreviewData",
+        label="Toonflow points preview",
+    ).get("data") or {}
+    return _balance_probe_result("toonflow_web", dashboard.get("totalPoints"), rate)
+
+
+def probe_balance(slug, credential, website):
+    """Read one current account balance without fetching logs, tasks, or pricing."""
+    if str(slug or "").strip().lower() == "toonflow":
+        return _probe_toonflow_balance(credential, website)
+
+    username = credential.get("username")
+    password = credential.get("password")
+    origin = origin_of(credential.get("website_url") or website)
+    rate = safe_float(credential.get("rate"), 1.0) or 1.0
+    if not username or not password or not origin:
+        raise RuntimeError("missing username/password/website_url")
+    if urlsplit(origin).scheme != "https":
+        raise RuntimeError("refusing to send account credentials over non-HTTPS transport")
+
+    errors = []
+    session = requests.Session()
+    session.headers.update(
+        {"User-Agent": UA, "Accept": "application/json", "Content-Type": "application/json"}
+    )
+    try:
+        standard_login(session, origin, username, password)
+        self_data = standard_self(session, origin)
+        return _balance_probe_result("newapi_classic", q2usd(self_data.get("quota")), rate)
+    except Exception as exc:
+        errors.append(clean_error(exc, (username, password)))
+
+    session = requests.Session()
+    session.headers.update(
+        {
+            "User-Agent": UA,
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+            "Origin": origin,
+            "Referer": origin + "/",
+        }
+    )
+    try:
+        v1_login(session, origin, username, password)
+        self_data = v1_self(session, origin)
+        return _balance_probe_result("usage_v1", self_data.get("balance"), rate)
+    except Exception as exc:
+        errors.append(clean_error(exc, (username, password)))
+    raise RuntimeError("; ".join(errors))
+
+
 def v1_logs(session, origin, day):
     rows = []
     total_pages = None
