@@ -104,6 +104,22 @@ class RefreshVideoProviderAuthTests(unittest.TestCase):
             ["credential_refresh_recovered"],
         )
 
+    def test_legacy_notification_fallback_contains_only_safe_status(self):
+        transport = mock.Mock()
+        transport.AlertEvent.side_effect = lambda **values: values
+        event = module._legacy_notification_event(
+            transport,
+            {
+                "kind": "credential_expiring",
+                "provider_id": "toonflow",
+                "threshold_days": 30,
+                "occurred_at": 100,
+            },
+        )
+        self.assertEqual(event["kind"], "balance_collection_failed")
+        self.assertIn("30", event["name"])
+        self.assertNotIn("token", str(event).lower())
+
 
 if __name__ == "__main__":
     unittest.main()
