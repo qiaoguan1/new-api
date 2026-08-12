@@ -21,6 +21,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--policy", type=pathlib.Path, default=ROOT / "config" / "patrol-repair-policy.json")
     parser.add_argument("--state", type=pathlib.Path, default=ROOT / "data" / "patrol-repair-state.json")
     parser.add_argument("--report", type=pathlib.Path, default=ROOT / "data" / "patrol-repair-latest.json")
+    parser.add_argument("--api-status", type=pathlib.Path)
     parser.add_argument("--dry-run", action="store_true", help="check only; do not repair, notify, or persist")
     parser.add_argument("--no-repair", action="store_true")
     parser.add_argument("--no-notify", action="store_true")
@@ -53,6 +54,8 @@ def main(argv: list[str] | None = None) -> int:
         if not args.dry_run:
             patrol_repair.write_private_json(args.report, report)
             patrol_repair.write_private_json(args.state, updated)
+            if args.api_status:
+                patrol_repair.write_json_mode(args.api_status, patrol_repair.public_status(report), 0o640)
         print(json.dumps({"status": "dry_run" if args.dry_run else "complete", **report["summary"]}, sort_keys=True))
         unresolved = report["summary"]["failed"] + report["summary"]["unknown"]
         return 2 if unresolved or notification_failed else 0

@@ -259,6 +259,64 @@ set +a
   python3 /opt/ai-api-stack/channel-monitor/scripts/patrol-repair.py
 ```
 
+### Loopback API and systemd schedule
+
+The optional control API listens only on `127.0.0.1:8793`. It runs as the
+dedicated `channel-monitor-patrol-api` user, has no Docker group or root
+privileges, and can only read the sanitized status file and atomically update a
+single trigger file. `channel-monitor-patrol-repair.path` converts that trigger
+into the same root oneshot used by the daily timer. The root worker has no
+network listener and all invocations share one flock.
+
+Install the reviewed units and runtime directories:
+
+```bash
+useradd --system --home-dir /nonexistent --shell /usr/sbin/nologin \
+  channel-monitor-patrol-api
+install -o root -g root -m 0644 \
+  ops/channel-monitor/tmpfiles.d/channel-monitor-patrol.conf \
+  /etc/tmpfiles.d/channel-monitor-patrol.conf
+systemd-tmpfiles --create /etc/tmpfiles.d/channel-monitor-patrol.conf
+install -d -o root -g root -m 0755 /usr/local/lib/channel-monitor-patrol
+install -o root -g root -m 0755 \
+  ops/channel-monitor/scripts/patrol_api.py \
+  ops/channel-monitor/scripts/patrol-repair-api.py \
+  /usr/local/lib/channel-monitor-patrol/
+install -o root -g root -m 0644 ops/channel-monitor/systemd/channel-monitor-patrol-* \
+  /etc/systemd/system/
+```
+
+Generate the API credential on the server. Never print or copy the value into
+the repository, logs, issue tracker, or chat. The source remains root-owned
+0600; systemd `LoadCredential` presents a private service-scoped copy to the
+unprivileged API:
+
+```bash
+umask 077
+openssl rand -hex 32 > /etc/channel-monitor-patrol-api.token.new
+chown root:root /etc/channel-monitor-patrol-api.token.new
+chmod 0600 /etc/channel-monitor-patrol-api.token.new
+mv /etc/channel-monitor-patrol-api.token.new /etc/channel-monitor-patrol-api.token
+systemctl daemon-reload
+systemctl enable --now channel-monitor-patrol-repair.path \
+  channel-monitor-patrol-repair.timer channel-monitor-patrol-api.service
+```
+
+Authenticated calls from the server itself use the bundled root-only client so
+the bearer value never appears in process arguments or shell history:
+
+```bash
+python3 /opt/ai-api-stack/channel-monitor/scripts/patrol-api-client.py status
+python3 /opt/ai-api-stack/channel-monitor/scripts/patrol-api-client.py run
+```
+
+`GET /health` is an unauthenticated loopback liveness check. `GET /v1/status`
+returns only counts and bounded incident codes. `POST /v1/run` returns 202 and
+never executes a command in the API process. Rotate the token with the same
+atomic `.new` procedure and restart only `channel-monitor-patrol-api.service`.
+Disable safely by stopping/disabling the API, path and timer; historical private
+reports remain in `data/` and no application traffic depends on the robot.
+
 The monitor does not store SMTP credentials. It calls the RootAuth-protected
 `POST /api/option/upstream_balance_alert` endpoint using the existing NewAPI
 root access-token file. NewAPI constructs the subject and HTML body internally,

@@ -183,6 +183,30 @@ class CheckImplementationTests(unittest.TestCase):
             result = patrol.PatrolChecks(mock.Mock()).evaluate(item, now)
             self.assertEqual((result.status, result.code, result.repair_action), ("failed", "scheduled_run_failed", None))
 
+    def test_newer_successful_artifact_satisfies_pre_morning_expected_day(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = pathlib.Path(directory) / "pricing.json"
+            path.write_text(json.dumps({"runs": [{"date": "2026-08-12", "status": "complete"}]}))
+            item = {
+                "id": "artifact.video_pricing", "kind": "artifact", "path": str(path),
+                "artifact_type": "video_pricing", "severity": "critical",
+            }
+            before_jobs = int(datetime.datetime(2026, 8, 13, 3, tzinfo=BEIJING).timestamp())
+            result = patrol.PatrolChecks(mock.Mock()).evaluate(item, before_jobs)
+            self.assertEqual((result.status, result.code), ("healthy", "ok"))
+
+    def test_audit_channel_failure_is_alert_only_not_repaired(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = pathlib.Path(directory) / "audit.json"
+            path.write_text(json.dumps({"date": "2026-08-12", "channels": [{"scan_status": "failed"}]}))
+            item = {
+                "id": "artifact.daily_audit", "kind": "artifact", "path": str(path),
+                "artifact_type": "audit", "severity": "warning", "repair_action": "run.scan_daily_audit",
+            }
+            now = int(datetime.datetime(2026, 8, 13, 3, tzinfo=BEIJING).timestamp())
+            result = patrol.PatrolChecks(mock.Mock()).evaluate(item, now)
+            self.assertEqual((result.status, result.code, result.repair_action), ("warning", "audit_channels_failed", None))
+
     def test_notification_config_rejects_public_endpoint(self):
         with self.assertRaisesRegex(patrol.PatrolError, "notification_url_invalid"):
             patrol._notify_config({"UPSTREAM_BALANCE_ALERT_NOTIFY_URL": "https://public.example.test"})
