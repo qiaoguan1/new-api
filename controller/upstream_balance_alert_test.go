@@ -105,3 +105,47 @@ func TestSendUpstreamBalanceAlertRequiresConfiguredValidRecipient(t *testing.T) 
 		t.Fatalf("expected 503, got %d: %s", recorder.Code, recorder.Body.String())
 	}
 }
+
+func TestPatrolIncidentAlertUsesBoundedStructuredFields(t *testing.T) {
+	request := upstreamBalanceAlertRequest{
+		Kind:       "patrol_incident_open",
+		Name:       "artifact.generic_pricing",
+		Code:       "scheduled_run_failed",
+		Severity:   "critical",
+		OccurredAt: 1786407600,
+	}
+	if !validUpstreamBalanceAlertRequest(request) {
+		t.Fatal("expected structured patrol incident to be valid")
+	}
+	subject, content := upstreamBalanceAlertContent(request)
+	for _, expected := range []string{"artifact.generic_pricing", "scheduled_run_failed", "critical"} {
+		if !strings.Contains(subject+content, expected) {
+			t.Fatalf("missing patrol field %q: subject=%q content=%q", expected, subject, content)
+		}
+	}
+}
+
+func TestPatrolIncidentRejectsUnboundedCodeAndUnknownSeverity(t *testing.T) {
+	for _, request := range []upstreamBalanceAlertRequest{
+		{Kind: "patrol_incident_open", Name: "x", Code: strings.Repeat("x", 81), Severity: "critical", OccurredAt: 1},
+		{Kind: "patrol_incident_open", Name: "x", Code: "failed", Severity: "emergency-html", OccurredAt: 1},
+	} {
+		if validUpstreamBalanceAlertRequest(request) {
+			t.Fatalf("expected invalid patrol incident: %+v", request)
+		}
+	}
+}
+
+func TestSendUpstreamBalanceAlertRejectsOversizedBody(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	router := gin.New()
+	router.POST("/alert", SendUpstreamBalanceAlert)
+	body := `{"kind":"test","name":"` + strings.Repeat("x", 9*1024) + `","occurred_at":1}`
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPost, "/alert", strings.NewReader(body))
+	request.Header.Set("Content-Type", "application/json")
+	router.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", recorder.Code)
+	}
+}
