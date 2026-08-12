@@ -165,6 +165,7 @@ def parse_newapi_video_task_rows(
     provider_id: str,
     rate: float = 1.0,
     quota_per_usd: float = 500_000.0,
+    request_ledgers: dict[str, dict[str, Any]] | None = None,
     fetched_at: int | None = None,
 ) -> list[dict[str, Any]]:
     """Parse authenticated NewAPI video task rows into task-level cost evidence."""
@@ -198,11 +199,32 @@ def parse_newapi_video_task_rows(
         else:
             state = "unknown"
         task_id = str(source.get("task_id") or "").strip()
-        quota = _finite_float(source.get("quota"))
-        if task_id and state == "completed" and quota is not None and quota >= 0:
-            actual_cost = round(quota / quota_divisor * exchange_rate, 8)
+        # NewAPI video-task `quota` may be a 0/1 task count. Monetary evidence
+        # must come from the exact request-scoped authenticated log ledger.
+        ledger = (request_ledgers or {}).get(task_id) if task_id else None
+        ledger_cost = _finite_float(ledger.get("actual_cost_cny")) if isinstance(ledger, dict) else None
+        ledger_valid = bool(ledger.get("valid")) if isinstance(ledger, dict) else False
+        completed_markers = int(ledger.get("completed") or 0) if isinstance(ledger, dict) else 0
+        refund_markers = int(ledger.get("refunded") or 0) if isinstance(ledger, dict) else 0
+        if (
+            task_id
+            and state == "completed"
+            and ledger_valid
+            and ledger_cost is not None
+            and ledger_cost >= 0
+            and completed_markers == 1
+            and refund_markers == 0
+        ):
+            actual_cost = round(ledger_cost, 8)
             cost_status = "actual" if actual_cost > 0 else "zero_verified"
-        elif task_id and state == "failed":
+        elif (
+            task_id
+            and state == "failed"
+            and ledger_valid
+            and ledger_cost is not None
+            and abs(ledger_cost) <= 0.000001
+            and refund_markers >= 1
+        ):
             actual_cost = 0.0
             cost_status = "zero_verified"
         else:

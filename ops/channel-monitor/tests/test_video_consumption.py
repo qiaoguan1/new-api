@@ -114,7 +114,7 @@ class ToonflowParsingTests(unittest.TestCase):
 
 
 class PaisioTaskParsingTests(unittest.TestCase):
-    def test_authenticated_video_tasks_use_task_id_and_quota(self):
+    def test_authenticated_video_tasks_use_request_ledger_not_task_count_quota(self):
         payload = {
             "data": {
                 "items": [
@@ -146,7 +146,26 @@ class PaisioTaskParsingTests(unittest.TestCase):
             }
         }
 
-        rows = parse_newapi_video_task_rows(payload, DAY, provider_id="paisio", rate=1.0)
+        rows = parse_newapi_video_task_rows(
+            payload,
+            DAY,
+            provider_id="paisio",
+            rate=1.0,
+            request_ledgers={
+                "paisio-1": {
+                    "actual_cost_cny": 1.25,
+                    "completed": 1,
+                    "refunded": 0,
+                    "valid": True,
+                },
+                "paisio-2": {
+                    "actual_cost_cny": 0,
+                    "completed": 0,
+                    "refunded": 1,
+                    "valid": True,
+                },
+            },
+        )
 
         by_task = {row["provider_task_id"]: row for row in rows}
         self.assertEqual(set(by_task), {"paisio-1", "paisio-2"})
@@ -156,6 +175,23 @@ class PaisioTaskParsingTests(unittest.TestCase):
         self.assertEqual(by_task["paisio-2"]["actual_cost_status"], "zero_verified")
         self.assertNotIn("result_url", by_task["paisio-1"])
         self.assertNotIn("fail_reason", by_task["paisio-2"])
+
+    def test_task_count_quota_without_request_ledger_is_unknown(self):
+        payload = {
+            "data": {"items": [{
+                "task_id": "paisio-count-only",
+                "action": "videoGenerate",
+                "status": "SUCCESS",
+                "quota": 1,
+                "created_at": 1786291199,
+                "finish_time": 1786291201,
+            }]}
+        }
+
+        rows = parse_newapi_video_task_rows(payload, DAY, provider_id="paisio", rate=1.0)
+
+        self.assertEqual(rows[0]["actual_cost_status"], "unknown")
+        self.assertIsNone(rows[0]["actual_cost_cny"])
 
 
 class GatewayReaderTests(unittest.TestCase):

@@ -661,10 +661,6 @@ def main(argv=None):
         video_policy = read_json(VIDEO_POLICY_PATH, required=True)
         credentials = read_json(CREDENTIALS_PATH, required=True)
         incomplete_credentials = incomplete_credential_sources(ledger, day, credentials)
-        if incomplete_credentials:
-            raise PricingError(
-                "upstream collection incomplete: " + ", ".join(incomplete_credentials)
-            )
         current = {key: get_option(key) for key in OPTION_KEYS + ("GroupRatio",)}
         max_change_ratio = float(
             os.environ.get("CHANNEL_MONITOR_MAX_CHANGE_RATIO", DEFAULT_MAX_CHANGE_RATIO)
@@ -685,6 +681,8 @@ def main(argv=None):
             "dry_run": args.dry_run,
             "generated_at": generated_at,
             "max_change_ratio": max_change_ratio,
+            "status": "complete",
+            "incomplete_credentials": incomplete_credentials,
         }
         if not args.dry_run and any(
             item.get("action") == "apply" for item in plan["decisions"]

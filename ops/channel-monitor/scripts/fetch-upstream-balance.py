@@ -267,6 +267,7 @@ def standard_logs(session, origin, day):
                     "model_price": safe_float(other.get("model_price"), 0.0),
                     "price_per_call": safe_float(other.get("price_per_call"), 0.0),
                     "price_per_sec": safe_float(other.get("price_per_sec"), 0.0),
+                    "request_id": str(item.get("request_id") or "").strip(),
                     "quota": quota,
                 }
             )
@@ -278,7 +279,7 @@ def standard_logs(session, origin, day):
     return rows, total_quota, per_model, details
 
 
-def standard_video_tasks(session, origin, day, provider_id, rate):
+def standard_video_tasks(session, origin, day, provider_id, rate, request_ledgers=None):
     """Fetch a complete authenticated NewAPI video-task set for one Beijing day."""
     result = []
     completed = False
@@ -303,6 +304,7 @@ def standard_video_tasks(session, origin, day, provider_id, rate):
                 provider_id=provider_id,
                 rate=rate,
                 quota_per_usd=QUOTA_PER_USD,
+                request_ledgers=request_ledgers,
             )
         )
         total = int(data.get("total") or 0)
@@ -320,6 +322,48 @@ def standard_video_tasks(session, origin, day, provider_id, rate):
     if not completed:
         raise RuntimeError(f"video tasks exceed safety limit ({MAX_PAGES * PAGE_SIZE} rows)")
     return dedupe_provider_usage(result)
+
+
+def newapi_request_ledgers(details, rate):
+    """Build exact, request-scoped net billing evidence from complete log rows."""
+    ledgers = {}
+    for detail in (details or {}).values():
+        for sample in detail.get("pricing_samples") or []:
+            task_id = str(sample.get("request_id") or "").strip()
+            if not task_id:
+                continue
+            record = ledgers.setdefault(
+                task_id,
+                {"net_quota": 0.0, "completed": 0, "refunded": 0, "valid": True},
+            )
+            quota = safe_float(sample.get("quota"))
+            billing_type = str(sample.get("billing_type") or "").strip()
+            if quota is None:
+                record["valid"] = False
+                continue
+            record["net_quota"] += quota
+            if billing_type in {"per_sec", "per_call"}:
+                record["valid"] = record["valid"] and quota > 0
+            elif billing_type == "completed":
+                record["completed"] += 1
+                record["valid"] = record["valid"] and quota == 0
+            elif billing_type == "generation_failed_refund":
+                record["refunded"] += 1
+                record["valid"] = record["valid"] and quota < 0
+            else:
+                record["valid"] = False
+    result = {}
+    for task_id, record in ledgers.items():
+        net_quota = safe_float(record.get("net_quota"))
+        if net_quota is None:
+            continue
+        result[task_id] = {
+            "actual_cost_cny": round(net_quota / QUOTA_PER_USD * rate, 8),
+            "completed": int(record.get("completed") or 0),
+            "refunded": int(record.get("refunded") or 0),
+            "valid": bool(record.get("valid")),
+        }
+    return result
 
 
 def validate_video_task_evidence(rows, expected_cost_cny):
@@ -1017,7 +1061,14 @@ def collect_one(slug, credential, website, ledger, day):
                 "fetched_at": int(time.time()),
             }
         try:
-            video_task_evidence = standard_video_tasks(session, origin, day, slug, rate)
+            video_task_evidence = standard_video_tasks(
+                session,
+                origin,
+                day,
+                slug,
+                rate,
+                request_ledgers=newapi_request_ledgers(details, rate),
+            )
         except Exception as exc:
             video_task_evidence = []
             pricing_metadata["video_task_evidence_status"] = "unavailable"

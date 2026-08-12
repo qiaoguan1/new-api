@@ -75,7 +75,8 @@ class FakeOpener:
         self.requests.append((request, timeout))
         if self.error:
             raise self.error
-        return FakeResponse(self.payload)
+        payload = self.payload(request) if callable(self.payload) else self.payload
+        return FakeResponse(payload)
 
 
 class ToonflowCollectorTests(unittest.TestCase):
@@ -199,8 +200,21 @@ class ToonflowCollectorTests(unittest.TestCase):
 
 
 class NewAPITaskBillingCollectorTests(unittest.TestCase):
-    def collector(self, payload, *, provider="paisio"):
-        opener = FakeOpener(payload)
+    def collector(self, task_payload, *, ledger_payload=None, provider="paisio"):
+        task_data = task_payload.get("data") if isinstance(task_payload, dict) else None
+        if isinstance(task_data, dict) and "total" not in task_data:
+            task_payload = dict(task_payload)
+            task_payload["data"] = dict(task_data)
+            task_payload["data"]["total"] = len(task_data.get("items") or [])
+
+        def response_for(request):
+            if "/api/log/self" in request.full_url:
+                if ledger_payload is None:
+                    raise AssertionError("unexpected billing-ledger request")
+                return ledger_payload
+            return task_payload
+
+        opener = FakeOpener(response_for)
         return NewAPITaskBillingCollector(
             provider,
             f"https://{provider}.example/api/task/self",
@@ -210,7 +224,7 @@ class NewAPITaskBillingCollectorTests(unittest.TestCase):
             opener=opener,
         ), opener
 
-    def test_collects_one_terminal_task_quota_as_exact_cost(self):
+    def test_paisio_uses_exact_request_ledger_and_never_task_count_as_cost(self):
         collector, opener = self.collector(
             {
                 "success": True,
@@ -220,22 +234,122 @@ class NewAPITaskBillingCollectorTests(unittest.TestCase):
                             "task_id": "task-1",
                             "action": "generate_video",
                             "status": "SUCCESS",
-                            "quota": 256757.05,
+                            "quota": 1,
                             "finish_time": "2026-08-12T02:46:30Z",
                         }
                     ]
                 },
-            }
+            },
+            ledger_payload={
+                "success": True,
+                "data": {
+                    "total": 2,
+                    "items": [
+                        {
+                            "id": 11,
+                            "type": 2,
+                            "request_id": "task-1",
+                            "quota": 256757.05,
+                            "other": json.dumps({"billing_type": "per_sec"}),
+                        },
+                        {
+                            "id": 12,
+                            "type": 2,
+                            "request_id": "task-1",
+                            "quota": 0,
+                            "other": json.dumps({"billing_type": "completed"}),
+                        },
+                    ],
+                },
+            },
         )
 
         record = collector.collect("task-1")
 
         self.assertEqual(record.actual_cost_cny_exact, "0.513515")
-        self.assertEqual(record.evidence_source, "paisio_authenticated_video_task")
-        request, _ = opener.requests[0]
-        self.assertIn("task_id=task-1", request.full_url)
-        self.assertEqual(request.get_header("Authorization"), "Bearer account-read-only-token")
-        self.assertEqual(request.get_header("New-api-user"), "42")
+        self.assertEqual(record.evidence_source, "paisio_authenticated_request_ledger")
+        task_request, _ = opener.requests[0]
+        ledger_request, _ = opener.requests[1]
+        self.assertIn("task_id=task-1", task_request.full_url)
+        self.assertIn("request_id=task-1", ledger_request.full_url)
+        self.assertEqual(ledger_request.get_header("Authorization"), "Bearer account-read-only-token")
+        self.assertEqual(ledger_request.get_header("New-api-user"), "42")
+
+    def test_paisio_request_ledger_fails_closed_when_filter_is_ignored_or_refunded(self):
+        task = {
+            "success": True,
+            "data": {"items": [{
+                "task_id": "task-1",
+                "action": "videoGenerate",
+                "status": "SUCCESS",
+                "quota": 1,
+                "finish_time": 1786502790,
+            }]},
+        }
+        cases = (
+            (
+                {"success": True, "data": {"total": 2, "items": [{
+                    "type": 2,
+                    "request_id": "another-task",
+                    "quota": 500000,
+                    "other": '{"billing_type":"per_sec"}',
+                }]}},
+                "provider_billing_ledger_incomplete",
+            ),
+            (
+                {"success": True, "data": {"total": 2, "items": [
+                    {"type": 2, "request_id": "task-1", "quota": 500000,
+                     "other": '{"billing_type":"per_sec"}'},
+                    {"type": 2, "request_id": "task-1", "quota": -500000,
+                     "other": '{"billing_type":"generation_failed_refund"}'},
+                ]}},
+                "provider_billing_record_state_mismatch",
+            ),
+            (
+                {"success": True, "data": {"total": 1, "items": [
+                    {"type": 2, "request_id": "task-1", "quota": 500000,
+                     "other": '{"billing_type":"per_sec"}'},
+                ]}},
+                "provider_billing_record_not_final",
+            ),
+            (
+                {"success": True, "data": {"total": 2, "items": [
+                    {"type": "invalid", "request_id": "task-1", "quota": 500000,
+                     "other": '{"billing_type":"per_sec"}'},
+                    {"type": 2, "request_id": "task-1", "quota": 0,
+                     "other": '{"billing_type":"completed"}'},
+                ]}},
+                "provider_billing_response_invalid",
+            ),
+        )
+        for ledger, code in cases:
+            with self.subTest(code=code):
+                collector, _ = self.collector(task, ledger_payload=ledger)
+                with self.assertRaises(BillingCollectionError) as failure:
+                    collector.collect("task-1")
+                self.assertEqual(failure.exception.code, code)
+
+    def test_paisio_task_lookup_must_be_an_exact_filtered_singleton(self):
+        task = {
+            "success": True,
+            "data": {
+                "total": 2,
+                "items": [{
+                    "task_id": "task-1",
+                    "action": "videoGenerate",
+                    "status": "SUCCESS",
+                    "quota": 1,
+                    "finish_time": 1786502790,
+                }],
+            },
+        }
+        collector, opener = self.collector(task)
+
+        with self.assertRaises(BillingCollectionError) as failure:
+            collector.collect("task-1")
+
+        self.assertEqual(failure.exception.code, "provider_billing_ledger_incomplete")
+        self.assertEqual(len(opener.requests), 1)
 
     def test_session_header_injection_is_rejected_before_network(self):
         collector = NewAPITaskBillingCollector(
@@ -276,21 +390,34 @@ class NewAPITaskBillingCollectorTests(unittest.TestCase):
             path.write_text(json.dumps(payload), encoding="utf-8")
             if os.name == "posix":
                 path.chmod(0o600)
-            opener = FakeOpener(
-                {
+            task_response = {
                     "success": True,
                     "data": {
+                        "total": 1,
                         "items": [
                             {
                                 "task_id": "task-1",
                                 "action": "generate_video",
                                 "status": "SUCCESS",
-                                "quota": 500000,
+                                "quota": 1,
                                 "finish_time": 1786502790,
                             }
                         ]
                     },
                 }
+            ledger_response = {
+                "success": True,
+                "data": {"total": 2, "items": [
+                    {"type": 2, "request_id": "task-1", "quota": 500000,
+                     "other": '{"billing_type":"per_sec"}'},
+                    {"type": 2, "request_id": "task-1", "quota": 0,
+                     "other": '{"billing_type":"completed"}'},
+                ]},
+            }
+            opener = FakeOpener(
+                lambda request: ledger_response
+                if "/api/log/self" in request.full_url
+                else task_response
             )
             collector = NewAPITaskBillingCollector(
                 "paisio", "https://paisio.example/api/task/self", credential_file=path, opener=opener

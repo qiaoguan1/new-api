@@ -117,6 +117,10 @@ class ConfigurationAndNotificationTests(unittest.TestCase):
             'optionRoute.POST("/upstream_balance_alert", middleware.CriticalRateLimit(), controller.SendUpstreamBalanceAlert)',
             option_block,
         )
+        self.assertIn(
+            'optionRoute.POST("/upstream_ops_digest", middleware.CriticalRateLimit(), controller.SendUpstreamOpsDigest)',
+            option_block,
+        )
 
     def test_only_enabled_credentialed_upstreams_are_selected(self):
         selected = monitor.select_targets(

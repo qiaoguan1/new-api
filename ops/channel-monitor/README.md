@@ -12,6 +12,7 @@ Production schedule:
 - 08:30: audit channel availability, price metadata, and actual-cost coverage.
 - 08:35: apply video prices from the reviewed official catalog at exactly 1.5x.
 - 08:40: calculate and atomically apply eligible model prices.
+- 09:12-12:12: retry the prior-day operations digest until one delivery succeeds.
 
 Before installing a crontab copied through Windows tooling, normalize it with:
 
@@ -28,8 +29,11 @@ that can prevent the final cron command from reaching the pricing worker.
 The fetch worker supports classic NewAPI billing logs and the newer `/api/v1`
 auth/usage API. Every credential gets a dated `complete` or `incomplete` ledger
 entry. A zero cost is trusted only after all log pages were fetched successfully.
-The generic pricing worker refuses all database writes while any configured credential
-lacks a complete collection for that Beijing business date.
+The generic pricing worker isolates incomplete collection by expected channel and
+model. An incomplete account preserves only the models that depend on that
+account; unrelated text/image models with trusted evidence continue in the same
+atomic run. A shared model remains protected if any expected enabled source is
+incomplete.
 
 Video pricing is intentionally separate. `apply-official-video-pricing.py`
 uses only the versioned official catalog and reviewed raw-model mappings for
@@ -242,4 +246,29 @@ Run once per hour in Beijing time under a non-overlapping lock:
 ```cron
 CRON_TZ=Asia/Shanghai
 2 * * * * cd /opt/ai-api-stack && /usr/bin/flock -n /run/lock/upstream-balance-alert.lock /bin/bash -c 'set -a; . channel-monitor/balance-alert.env; set +a; exec /usr/bin/python3 channel-monitor/scripts/monitor-upstream-balances.py' >> /var/log/upstream-balance-alert.log 2>&1
+```
+
+## Daily operations digest
+
+`scripts/daily-ops-digest.py` combines the prior Beijing business day's private
+ledger, audit, automatic-pricing run and the latest live balance snapshot. The
+fixed-recipient email includes every enabled channel's collection/audit/balance
+state, prior-day and month-to-date call/cost totals, plus pricing apply/skip/block
+counts. Unknown collection stays unknown and is never rendered as zero.
+
+The script sends bounded structured JSON to the RootAuth-protected
+`POST /api/option/upstream_ops_digest` endpoint. NewAPI validates the structure,
+caps the body at 64 KiB, HTML-escapes all names and uses the same fixed
+`UPSTREAM_BALANCE_ALERT_EMAIL` recipient and configured SMTP transport. Delivery
+state is written only after success, so the retry window is idempotent:
+
+```cron
+CRON_TZ=Asia/Shanghai
+12 9-12 * * * cd /opt/ai-api-stack && /usr/bin/flock -n /run/lock/upstream-daily-ops-digest.lock /bin/bash -c 'set -a; . channel-monitor/balance-alert.env; set +a; exec /usr/bin/python3 channel-monitor/scripts/daily-ops-digest.py' >> /var/log/upstream-daily-ops-digest.log 2>&1
+```
+
+Preview without sending or changing delivery state:
+
+```bash
+python3 /opt/ai-api-stack/channel-monitor/scripts/daily-ops-digest.py --dry-run
 ```
