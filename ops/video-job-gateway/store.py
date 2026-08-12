@@ -947,6 +947,42 @@ class Store:
         threshold = max(1, int(failure_threshold))
         return {provider for provider, count in counts.items() if count >= threshold}
 
+    def unhealthy_settlement_providers(
+        self,
+        *,
+        min_age_seconds: int = 30 * 60,
+        min_attempts: int = 3,
+        now: int | None = None,
+    ) -> set[str]:
+        """Return providers whose successful tasks cannot close trusted billing.
+
+        This signal is intentionally independent from submission health.  It is
+        used only to stop new v2.1 work; existing settlement rows remain
+        claimable by the billing monitor and therefore recover automatically.
+        """
+        current = int(time.time()) if now is None else int(now)
+        cutoff = current - max(60, int(min_age_seconds))
+        attempts = max(1, int(min_attempts))
+        with self.connect() as connection:
+            rows = connection.execute(
+                """
+                select distinct provider_id
+                from video_jobs
+                where status='succeeded'
+                  and billing_status='settlement_pending'
+                  and finished_at>0
+                  and finished_at<=?
+                  and settlement_query_attempts>=?
+                  and provider_id<>''
+                """,
+                (cutoff, attempts),
+            ).fetchall()
+        return {
+            str(row["provider_id"] or "").strip().lower()
+            for row in rows
+            if str(row["provider_id"] or "").strip()
+        }
+
     def recover(self) -> list[str]:
         current = int(time.time())
         restart_error = json.dumps(
