@@ -77,18 +77,11 @@ def build_official_routes(mapping_report, daily_audit, policy, *, expected_day):
             key = (channel_id, source, raw_model)
             mapping = mappings.get(key)
             if mapping is None:
-                unavailable = (channel.get("unavailable_models") or {}).get(raw_model)
-                unavailable_reason = (
-                    unavailable.get("reason") if isinstance(unavailable, dict) else None
-                )
-                if (
-                    current.get("match_type") in {"source_exact", "global_exact"}
-                    and unavailable_reason == "not_in_upstream_pricing_catalog"
-                ):
-                    # The discovery report intentionally contains only models still
-                    # advertised upstream. Keep explicitly reviewed exact aliases on
-                    # official pricing when an upstream removes them from its catalog;
-                    # heuristic/parser matches still fail closed below.
+                if current.get("match_type") in {"source_exact", "global_exact"}:
+                    # Approved exact rules are the durable pricing identity. The
+                    # discovery report is intentionally volatile and can omit an
+                    # enabled alias between upstream catalog refreshes. Parser and
+                    # heuristic matches still require an exact report row below.
                     mapping = current
                 else:
                     raise OfficialVideoPricingError(
