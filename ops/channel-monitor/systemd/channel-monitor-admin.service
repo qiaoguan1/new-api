@@ -1,0 +1,46 @@
+[Unit]
+Description=Channel Monitor Administration API
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=channel-monitor-admin
+Group=channel-monitor-admin
+WorkingDirectory=/opt/ai-api-stack
+EnvironmentFile=/etc/channel-monitor-admin.env
+Environment=PYTHONDONTWRITEBYTECODE=1
+ExecStart=/usr/bin/python3 /opt/ai-api-stack/channel-monitor/scripts/admin-server.py
+Restart=on-failure
+RestartSec=5s
+UMask=0022
+
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+ProtectProc=invisible
+ProcSubset=pid
+LockPersonality=true
+MemoryDenyWriteExecute=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+RestrictAddressFamilies=AF_INET AF_INET6
+SystemCallArchitectures=native
+CapabilityBoundingSet=
+AmbientCapabilities=
+
+ReadWritePaths=/opt/ai-api-stack/channel-monitor/data
+ReadWritePaths=/opt/ai-api-stack/channel-monitor/upstreams.json
+ReadWritePaths=/opt/ai-api-stack/channel-monitor/report-baseline.json
+ReadWritePaths=/opt/ai-api-stack/channel-monitor/upstream-credentials.json
+
+[Install]
+WantedBy=multi-user.target

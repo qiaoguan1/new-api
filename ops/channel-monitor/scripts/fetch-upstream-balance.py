@@ -74,6 +74,10 @@ def write_json(path, value):
     temporary.parent.mkdir(parents=True, exist_ok=True)
     with open(temporary, "w", encoding="utf-8") as handle:
         json.dump(value, handle, ensure_ascii=False, indent=2, sort_keys=True)
+    os.chmod(temporary, 0o600)
+    if hasattr(os, "geteuid") and os.geteuid() == 0 and pathlib.Path(path).exists():
+        current = pathlib.Path(path).stat()
+        os.chown(temporary, current.st_uid, current.st_gid)
     os.replace(temporary, path)
 
 

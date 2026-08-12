@@ -1,6 +1,7 @@
 import importlib.util
 import pathlib
 import sys
+import tempfile
 import unittest
 from unittest import mock
 
@@ -15,6 +16,20 @@ SPEC.loader.exec_module(collector)
 
 
 class UsageV1AggregationTests(unittest.TestCase):
+    def test_ledger_writer_marks_temporary_file_private_before_replace(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = pathlib.Path(directory) / "ledger.json"
+            path.write_text("{}", encoding="utf-8")
+            with (
+                mock.patch.object(collector.os, "chmod") as chmod,
+                mock.patch.object(collector.os, "geteuid", return_value=0, create=True),
+                mock.patch.object(collector.os, "chown", create=True) as chown,
+            ):
+                collector.write_json(path, {"days": {}})
+
+        chmod.assert_called_once_with(pathlib.Path(str(path) + ".tmp"), 0o600)
+        chown.assert_called_once()
+
     def test_balance_probe_reads_classic_self_without_logs_or_pricing(self):
         with (
             mock.patch.object(collector.requests, "Session"),
