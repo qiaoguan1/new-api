@@ -269,17 +269,41 @@ def deliver_events(events: list[dict], environ) -> None:
     spec.loader.exec_module(transport)
     notify = transport.load_notify_config(environ)
     for value in events:
-        transport.send_event(
-            notify,
-            transport.AlertEvent(
-                kind=value["kind"],
-                slug=value["provider_id"],
-                name=value["provider_id"],
-                balance=None,
-                threshold=float(value.get("threshold_days") or 0),
-                occurred_at=int(value["occurred_at"]),
-            ),
+        event = transport.AlertEvent(
+            kind=value["kind"],
+            slug=value["provider_id"],
+            name=value["provider_id"],
+            balance=None,
+            threshold=float(value.get("threshold_days") or 0),
+            occurred_at=int(value["occurred_at"]),
         )
+        try:
+            transport.send_event(notify, event)
+        except urllib.error.HTTPError as error:
+            if int(error.code or 0) != 400:
+                raise
+            transport.send_event(notify, _legacy_notification_event(transport, value))
+
+
+def _legacy_notification_event(transport, value: dict):
+    kind = str(value.get("kind") or "")
+    provider = str(value.get("provider_id") or "provider")
+    threshold = float(value.get("threshold_days") or 0)
+    labels = {
+        "credential_expiring": f"{provider} 账单授权将在 {threshold:.0f} 天内到期",
+        "credential_expired": f"{provider} 账单授权已到期",
+        "credential_refresh_failed": f"{provider} 账单授权刷新失败",
+        "credential_refresh_recovered": f"{provider} 账单授权刷新已恢复",
+    }
+    recovered = kind == "credential_refresh_recovered"
+    return transport.AlertEvent(
+        kind="balance_collection_recovered" if recovered else "balance_collection_failed",
+        slug=provider,
+        name=labels.get(kind, f"{provider} 账单授权状态异常")[:80],
+        balance=None,
+        threshold=threshold,
+        occurred_at=int(value["occurred_at"]),
+    )
 
 
 def build_parser():
