@@ -213,6 +213,52 @@ creates a separate monitor-failure notification. Depletion and monitor-failure
 events are deduplicated across restarts; depletion reminders default to 24
 hours, and recovery is sent once after a previously delivered alert.
 
+## Daily patrol and bounded self-healing
+
+`scripts/patrol-repair.py` evaluates the complete relay chain from the private,
+root-owned `config/patrol-repair-policy.json`. Checks include Docker and systemd
+state, the public NewAPI status endpoint, root-disk capacity, verified daily
+backup freshness, upstream collection/audit, generic and official-video pricing,
+live balances, derived monitor data, video settlement age, and Webhook backlog.
+
+Automatic actions are compiled into `scripts/patrol_repair.py`; the policy file
+can enable only those fixed action IDs and cannot supply shell commands. A run
+has a persistent six-hour cooldown, a maximum action budget, and exactly one
+post-repair verification. Current automatic actions are limited to approved
+stateless service/container restart, derived monitor regeneration, and bounded
+reruns of collection, audit, balance probe, or verified backup. The robot never:
+
+- creates paid tasks or changes CLR;
+- invents or writes prices, balances, provider cost, settlement evidence, or
+  database rows;
+- refreshes CAPTCHA-bound credentials or prunes Docker/storage;
+- treats missing/malformed evidence as healthy or zero.
+
+Pricing, credential, data-store, settlement-evidence, capacity and otherwise
+unknown faults remain unresolved and are escalated. Incident open, daily
+reminder, and recovery messages reuse the fixed-recipient NewAPI mail transport;
+the robot does not store SMTP credentials and callers cannot choose email body
+or recipient. Private mode-0600 files are:
+
+- `data/patrol-repair-latest.json` — latest sanitized check/action report;
+- `data/patrol-repair-state.json` — cooldown and notification lifecycle state.
+
+Check without repair, notification, or state mutation:
+
+```bash
+python3 /opt/ai-api-stack/channel-monitor/scripts/patrol-repair.py --dry-run
+```
+
+Run normally (the production systemd unit also loads `balance-alert.env`):
+
+```bash
+set -a
+. /opt/ai-api-stack/channel-monitor/balance-alert.env
+set +a
+/usr/bin/flock -n /run/lock/channel-monitor-patrol-repair.lock \
+  python3 /opt/ai-api-stack/channel-monitor/scripts/patrol-repair.py
+```
+
 The monitor does not store SMTP credentials. It calls the RootAuth-protected
 `POST /api/option/upstream_balance_alert` endpoint using the existing NewAPI
 root access-token file. NewAPI constructs the subject and HTML body internally,

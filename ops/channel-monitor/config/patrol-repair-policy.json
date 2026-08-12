@@ -1,0 +1,28 @@
+{
+  "schema_version": 1,
+  "max_actions_per_run": 3,
+  "repair_cooldown_seconds": 21600,
+  "post_repair_delay_seconds": 5,
+  "incident_reminder_seconds": 86400,
+  "checks": [
+    {"id": "systemd.docker", "kind": "systemd", "target": "docker.service", "severity": "critical", "repair_action": "start.docker"},
+    {"id": "systemd.admin", "kind": "systemd", "target": "channel-monitor-admin.service", "severity": "warning", "repair_action": "restart.admin"},
+    {"id": "systemd.regenerate_path", "kind": "systemd", "target": "channel-monitor-regenerate.path", "severity": "warning", "repair_action": "start.regenerate_path"},
+    {"id": "docker.new_api", "kind": "docker", "target": "ai-api-stack-new-api-1", "severity": "critical", "repair_action": "restart.new_api"},
+    {"id": "docker.nginx", "kind": "docker", "target": "ai-api-stack-nginx-1", "severity": "critical", "repair_action": "restart.nginx"},
+    {"id": "docker.postgres", "kind": "docker", "target": "ai-api-stack-postgres-1", "severity": "critical"},
+    {"id": "docker.redis", "kind": "docker", "target": "ai-api-stack-redis-1", "severity": "critical"},
+    {"id": "docker.video_gateway", "kind": "docker", "target": "xtai-video-job-gateway-v2-production", "severity": "critical", "repair_action": "restart.video_gateway"},
+    {"id": "http.new_api", "kind": "http", "url": "https://api.aixingtuyun.com/api/status", "timeout_seconds": 10, "severity": "critical"},
+    {"id": "disk.root", "kind": "disk", "path": "/", "warning_percent": 75, "critical_percent": 85, "severity": "critical"},
+    {"id": "backup.daily", "kind": "backup", "root": "/opt/ai-api-stack/backups/daily-newapi", "glob": "*/SHA256SUMS", "max_age_seconds": 129600, "severity": "critical", "repair_action": "run.backup"},
+    {"id": "artifact.upstream_ledger", "kind": "artifact", "path": "/opt/ai-api-stack/channel-monitor/data/upstream-balance-ledger.json", "artifact_type": "ledger", "severity": "critical", "repair_action": "run.fetch_upstream_balance"},
+    {"id": "artifact.daily_audit", "kind": "artifact", "path": "/opt/ai-api-stack/channel-monitor/data/daily-upstream-audit.json", "artifact_type": "audit", "severity": "warning", "repair_action": "run.scan_daily_audit"},
+    {"id": "artifact.generic_pricing", "kind": "artifact", "path": "/opt/ai-api-stack/channel-monitor/data/auto-pricing-log.json", "artifact_type": "generic_pricing", "severity": "critical"},
+    {"id": "artifact.video_pricing", "kind": "artifact", "path": "/opt/ai-api-stack/channel-monitor/data/official-video-pricing-log.json", "artifact_type": "video_pricing", "severity": "critical"},
+    {"id": "artifact.balance_live", "kind": "artifact", "path": "/opt/ai-api-stack/channel-monitor/data/upstream-balance-live.json", "artifact_type": "freshness", "max_age_seconds": 7200, "severity": "warning", "repair_action": "run.balance_monitor"},
+    {"id": "artifact.monitor_data", "kind": "artifact", "path": "/opt/ai-api-stack/channel-monitor/data/monitor-data.json", "artifact_type": "freshness", "max_age_seconds": 7200, "severity": "warning", "repair_action": "run.generate_monitor"},
+    {"id": "video.settlement_pending", "kind": "video_sqlite", "path": "/opt/xtai/state/video-billing-v2-production/data/video-jobs.sqlite3", "query": "settlement_pending", "max_age_seconds": 1800, "severity": "critical"},
+    {"id": "video.webhook_backlog", "kind": "video_sqlite", "path": "/opt/xtai/state/video-billing-v2-production/data/video-jobs.sqlite3", "query": "webhook_backlog", "max_count": 0, "severity": "critical"}
+  ]
+}
