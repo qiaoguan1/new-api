@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "providers": [
+    {
+      "provider_id": "paisio",
+      "enabled": true,
+      "refresh_mode": "scheduled_login",
+      "credential_source_slug": "paisio",
+      "base_url": "https://api.paisio.online",
+      "output_file": "/opt/xtai/secrets/video-billing/paisio-session.json",
+      "lease_seconds": 7200
+    },
+    {
+      "provider_id": "rolldek",
+      "enabled": true,
+      "refresh_mode": "scheduled_login",
+      "credential_source_slug": "rolldek",
+      "base_url": "https://rolldek.com",
+      "output_file": "/opt/xtai/secrets/video-billing/rolldek-session.json",
+      "lease_seconds": 7200
+    },
+    {
+      "provider_id": "toonflow",
+      "enabled": true,
+      "refresh_mode": "captcha_bound",
+      "token_file": "/opt/xtai/secrets/video-billing/toonflow.token",
+      "warning_days": [30, 14, 7, 3, 1]
+    }
+  ]
+}

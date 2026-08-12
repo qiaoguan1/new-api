@@ -9,7 +9,7 @@ import sqlite3
 import time
 import uuid
 from collections import Counter
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation, ROUND_CEILING
 from pathlib import Path
 from typing import Any
@@ -19,10 +19,7 @@ ACTIVE_STATUSES = {"queued", "submitting", "running"}
 TERMINAL_STATUSES = {"succeeded", "failed", "uncertain", "pending_review"}
 BILLING_CONTRACT_LEGACY = "xtai-video-billing-v2"
 BILLING_CONTRACT_VERSION = "xtai-video-billing-v2.1"
-SUPPORTED_BILLING_CONTRACT_VERSIONS = {
-    BILLING_CONTRACT_LEGACY,
-    BILLING_CONTRACT_VERSION,
-}
+BILLING_CONTRACT_VERSIONS = frozenset({BILLING_CONTRACT_LEGACY, BILLING_CONTRACT_VERSION})
 PRICE_CONTRACT_VERSION = "xtai-video-pricing-v1"
 MONEY_QUANTUM = Decimal("0.000001")
 MONEY_LIMIT = Decimal("100000")
@@ -80,7 +77,7 @@ class Store:
                     missing_count integer not null default 0,
                     missing_last_at integer not null default 0,
                     next_poll_at integer not null default 0,
-                    billing_contract_version text not null default 'xtai-video-billing-v2.1',
+                    billing_contract_version text not null default '',
                     billing_status text not null default 'unavailable',
                     reserved_cny_exact text not null default '',
                     charged_cny_exact text not null default '',
@@ -91,6 +88,10 @@ class Store:
                     billing_markup_exact text not null default '1.5',
                     settlement_revision integer not null default 0,
                     settlement_fingerprint text not null default '',
+                    settlement_query_attempts integer not null default 0,
+                    settlement_next_query_at integer not null default 0,
+                    settlement_query_started_at integer not null default 0,
+                    settlement_query_last_error text not null default '',
                     created_at integer not null,
                     updated_at integer not null,
                     finished_at integer not null default 0
@@ -121,6 +122,24 @@ class Store:
                 );
                 create index if not exists idx_video_settlements_job
                     on video_settlements(job_id, revision);
+                create table if not exists video_webhook_outbox (
+                    event_id text primary key,
+                    job_id text not null,
+                    event_type text not null,
+                    event_revision integer not null,
+                    payload_json text not null,
+                    status text not null default 'pending',
+                    attempts integer not null default 0,
+                    next_attempt_at integer not null default 0,
+                    last_error text not null default '',
+                    created_at integer not null,
+                    updated_at integer not null,
+                    delivered_at integer not null default 0,
+                    unique(job_id, event_type, event_revision),
+                    foreign key(job_id) references video_jobs(job_id)
+                );
+                create index if not exists idx_video_webhook_due
+                    on video_webhook_outbox(status, next_attempt_at, created_at);
                 """
             )
             existing_columns = {
@@ -131,7 +150,7 @@ class Store:
                 "route_index": "integer not null default 0",
                 "selection_reason": "text not null default ''",
                 "route_history_json": "text not null default '[]'",
-                "billing_contract_version": "text not null default 'xtai-video-billing-v2.1'",
+                "billing_contract_version": "text not null default ''",
                 "billing_status": "text not null default 'unavailable'",
                 "reserved_cny_exact": "text not null default ''",
                 "charged_cny_exact": "text not null default ''",
@@ -142,10 +161,29 @@ class Store:
                 "billing_markup_exact": "text not null default '1.5'",
                 "settlement_revision": "integer not null default 0",
                 "settlement_fingerprint": "text not null default ''",
+                "settlement_query_attempts": "integer not null default 0",
+                "settlement_next_query_at": "integer not null default 0",
+                "settlement_query_started_at": "integer not null default 0",
+                "settlement_query_last_error": "text not null default ''",
             }
             for name, definition in migrations.items():
                 if name not in existing_columns:
                     connection.execute(f"alter table video_jobs add column {name} {definition}")
+            connection.execute(
+                """
+                create index if not exists idx_video_jobs_settlement_query
+                on video_jobs(billing_status,provider_id,settlement_next_query_at,settlement_query_started_at)
+                """
+            )
+            connection.execute(
+                """
+                update video_jobs
+                set billing_contract_version=''
+                where billing_status='unavailable'
+                  and reserved_cny_exact=''
+                  and official_cost_cny_exact=''
+                """
+            )
 
     @staticmethod
     def snapshot(row: sqlite3.Row | dict[str, Any], *, include_result: bool = True) -> dict[str, Any]:
@@ -153,8 +191,6 @@ class Store:
         result: dict[str, Any] | None = None
         error: dict[str, Any] | None = None
         billing_status = str(source.get("billing_status") or "unavailable")
-        if billing_status == "settled_with_debt":
-            billing_status = "payment_required"
         result_ready = billing_status in {"settled", "unavailable"}
         if (
             include_result
@@ -166,9 +202,7 @@ class Store:
         if source.get("error_json"):
             error = _json_object(str(source.get("error_json") or ""))
         billing = {
-            "contract_version": str(
-                source.get("billing_contract_version") or BILLING_CONTRACT_VERSION
-            ),
+            "contract_version": str(source.get("billing_contract_version") or ""),
             "status": billing_status,
             "currency": "CNY",
             "reserved_amount": _public_money(source.get("reserved_cny_exact")),
@@ -176,6 +210,7 @@ class Store:
             "refund_amount": _public_money(source.get("refund_cny_exact")),
             "supplement_amount": _public_money(source.get("supplement_cny_exact")),
             "settlement_revision": int(source.get("settlement_revision") or 0),
+            "pricing_revision": str(source.get("official_pricing_revision") or ""),
         }
         status = str(source.get("status") or "")
         if status == "succeeded":
@@ -249,9 +284,9 @@ class Store:
                     job_id,request_id,fingerprint,protocol_version,catalog_revision,
                     stable_model,provider_id,upstream_model,adapter_revision,
                     route_plan_json,route_index,selection_reason,route_history_json,status,
-                    payload_json,billing_status,reserved_cny_exact,official_cost_cny_exact,
+                    payload_json,billing_contract_version,billing_status,reserved_cny_exact,official_cost_cny_exact,
                     official_pricing_revision,billing_markup_exact,created_at,updated_at
-                ) values(?,?,?,?,?,?,?,?,?,?,0,?,'[]','queued',?,?,?,?,?,?,?,?)
+                ) values(?,?,?,?,?,?,?,?,?,?,0,?,'[]','queued',?,?,?,?,?,?,?,?,?)
                 """,
                 (
                     job_id,
@@ -266,6 +301,7 @@ class Store:
                     route_plan_json,
                     str(selection_reason or "")[:120],
                     payload_json,
+                    reservation["contract_version"] if reservation["status"] == "reserved" else "",
                     reservation["status"],
                     reservation["reserved"],
                     reservation["official"],
@@ -432,6 +468,8 @@ class Store:
                     set status=?,result_json=?,error_json=?,upstream_task_id=?,upstream_status=?,
                         billing_status=?,charged_cny_exact=?,refund_cny_exact=?,
                         supplement_cny_exact='',
+                        settlement_next_query_at=?,settlement_query_started_at=0,
+                        settlement_query_last_error='',
                         next_poll_at=0,updated_at=?,finished_at=?
                     where job_id=?
                     """,
@@ -444,11 +482,23 @@ class Store:
                         billing_status,
                         charged,
                         refund,
+                        current if billing_status == "settlement_pending" else 0,
                         current,
                         current,
                         job_id,
                     ),
                 )
+                updated = connection.execute(
+                    "select * from video_jobs where job_id=?", (job_id,)
+                ).fetchone()
+                if updated and reserved:
+                    event_type = {
+                        "succeeded": "video.task.succeeded",
+                        "failed": "video.task.failed",
+                        "uncertain": "video.billing.pending_review",
+                        "pending_review": "video.billing.pending_review",
+                    }[status]
+                    self._enqueue_webhook(connection, updated, event_type, 1)
             connection.commit()
 
     def apply_settlement(self, payload: Any) -> tuple[dict[str, Any], bool]:
@@ -484,12 +534,12 @@ class Store:
             if str(row["status"]) != "succeeded":
                 connection.rollback()
                 raise StoreConflict("only a succeeded video job can be settled")
-            if str(row["billing_contract_version"]) != evidence["contract_version"]:
-                connection.rollback()
-                raise StoreConflict("settlement contract does not match the video job")
             if str(row["billing_status"]) not in {"settlement_pending", "settled"}:
                 connection.rollback()
                 raise StoreConflict("video job has no settleable reservation")
+            if str(row["billing_contract_version"] or "") != evidence["contract_version"]:
+                connection.rollback()
+                raise StoreConflict("settlement contract does not match the video job")
             if str(row["upstream_task_id"]) != evidence["provider_task_id"]:
                 connection.rollback()
                 raise StoreConflict("provider task identity does not match the video job")
@@ -545,6 +595,8 @@ class Store:
                 update video_jobs
                 set billing_status='settled',charged_cny_exact=?,refund_cny_exact=?,
                     supplement_cny_exact=?,settlement_revision=?,settlement_fingerprint=?,
+                    settlement_next_query_at=0,settlement_query_started_at=0,
+                    settlement_query_last_error='',
                     updated_at=?
                 where job_id=? and status='succeeded'
                 """,
@@ -561,8 +613,197 @@ class Store:
             updated = connection.execute(
                 "select * from video_jobs where job_id=?", (evidence["job_id"],)
             ).fetchone()
+            self._enqueue_webhook(
+                connection,
+                updated,
+                "video.billing.settled",
+                int(evidence["revision"]),
+            )
             connection.commit()
             return self.snapshot(updated), False
+
+    def due_settlement_jobs(
+        self,
+        provider_ids: set[str],
+        *,
+        limit: int = 4,
+        lease_seconds: int = 30,
+    ) -> list[dict[str, Any]]:
+        providers = sorted({str(value or "").strip().lower() for value in provider_ids if value})
+        if not providers:
+            return []
+        current = int(time.time())
+        lease = max(15, min(int(lease_seconds), 300))
+        placeholders = ",".join("?" for _ in providers)
+        with self.connect() as connection:
+            connection.execute("begin immediate")
+            rows = connection.execute(
+                f"""
+                select * from video_jobs
+                where status='succeeded'
+                  and billing_status='settlement_pending'
+                  and upstream_task_id<>''
+                  and provider_id in ({placeholders})
+                  and settlement_next_query_at<=?
+                  and (settlement_query_started_at=0 or settlement_query_started_at<=?)
+                order by settlement_next_query_at,finished_at
+                limit ?
+                """,
+                (*providers, current, current - lease, max(1, min(int(limit), 50))),
+            ).fetchall()
+            if rows:
+                connection.executemany(
+                    """
+                    update video_jobs
+                    set settlement_query_attempts=settlement_query_attempts+1,
+                        settlement_next_query_at=?,settlement_query_started_at=?
+                    where job_id=? and billing_status='settlement_pending'
+                    """,
+                    [(current + lease, current, str(row["job_id"])) for row in rows],
+                )
+                job_ids = [str(row["job_id"]) for row in rows]
+                selected = ",".join("?" for _ in job_ids)
+                rows = connection.execute(
+                    f"select * from video_jobs where job_id in ({selected}) order by finished_at",
+                    job_ids,
+                ).fetchall()
+            connection.commit()
+        return [dict(row) for row in rows]
+
+    def retry_settlement_collection(self, job_id: str, *, delay_seconds: int, error_code: str) -> None:
+        current = int(time.time())
+        safe_code = str(error_code or "provider_billing_query_failed")[:120]
+        with self.connect() as connection:
+            connection.execute(
+                """
+                update video_jobs
+                set settlement_next_query_at=?,settlement_query_started_at=0,
+                    settlement_query_last_error=?,updated_at=?
+                where job_id=? and status='succeeded' and billing_status='settlement_pending'
+                """,
+                (
+                    current + max(15, min(int(delay_seconds), 3600)),
+                    safe_code,
+                    current,
+                    job_id,
+                ),
+            )
+
+    def _enqueue_webhook(
+        self,
+        connection: sqlite3.Connection,
+        row: sqlite3.Row,
+        event_type: str,
+        revision: int,
+    ) -> None:
+        job_id = str(row["job_id"])
+        contract_version = str(row["billing_contract_version"] or "")
+        if contract_version not in BILLING_CONTRACT_VERSIONS:
+            raise StoreConflict("video webhook contract version is invalid")
+        material = "\0".join((contract_version, job_id, event_type, str(revision)))
+        event_id = "evt_" + hashlib.sha256(material.encode("utf-8")).hexdigest()[:32]
+        occurred_at = datetime.now(timezone(timedelta(hours=8))).isoformat(timespec="seconds")
+        snapshot = self.snapshot(row)
+        data = {
+            "id": snapshot["job_id"],
+            "request_id": snapshot["request_id"],
+            "object": "video",
+            "model": snapshot["model"],
+            "status": snapshot["status"],
+            "progress": 100 if snapshot["status"] in {"succeeded", "failed"} else 0,
+            "result_delivery": snapshot["result_delivery"],
+            "result_url": None,
+            "billing": snapshot["billing"],
+            "usage": None,
+        }
+        payload = {
+            "event_id": event_id,
+            "event_version": 1,
+            "event_type": event_type,
+            "occurred_at": occurred_at,
+            "data": data,
+        }
+        current = int(time.time())
+        connection.execute(
+            """
+            insert or ignore into video_webhook_outbox(
+                event_id,job_id,event_type,event_revision,payload_json,status,
+                attempts,next_attempt_at,created_at,updated_at
+            ) values(?,?,?,?,?,'pending',0,?,?,?)
+            """,
+            (
+                event_id,
+                job_id,
+                event_type,
+                int(revision),
+                json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
+                current,
+                current,
+                current,
+            ),
+        )
+
+    def due_webhook_events(self, *, limit: int = 20, lease_seconds: int = 30) -> list[dict[str, Any]]:
+        current = int(time.time())
+        with self.connect() as connection:
+            connection.execute("begin immediate")
+            rows = connection.execute(
+                """
+                select * from video_webhook_outbox
+                where status in ('pending','retry','sending') and next_attempt_at<=?
+                order by next_attempt_at,created_at limit ?
+                """,
+                (current, max(1, min(int(limit), 100))),
+            ).fetchall()
+            if rows:
+                connection.executemany(
+                    """
+                    update video_webhook_outbox
+                    set status='sending',attempts=attempts+1,next_attempt_at=?,updated_at=?
+                    where event_id=? and status in ('pending','retry','sending')
+                    """,
+                    [
+                        (current + max(10, int(lease_seconds)), current, str(row["event_id"]))
+                        for row in rows
+                    ],
+                )
+                event_ids = [str(row["event_id"]) for row in rows]
+                placeholders = ",".join("?" for _ in event_ids)
+                rows = connection.execute(
+                    f"select * from video_webhook_outbox where event_id in ({placeholders}) order by created_at",
+                    event_ids,
+                ).fetchall()
+            connection.commit()
+        return [dict(row) for row in rows]
+
+    def mark_webhook_delivered(self, event_id: str) -> None:
+        current = int(time.time())
+        with self.connect() as connection:
+            connection.execute(
+                """
+                update video_webhook_outbox
+                set status='delivered',last_error='',updated_at=?,delivered_at=?
+                where event_id=? and status='sending'
+                """,
+                (current, current, event_id),
+            )
+
+    def retry_webhook(self, event_id: str, *, delay_seconds: int, error: str) -> None:
+        current = int(time.time())
+        with self.connect() as connection:
+            connection.execute(
+                """
+                update video_webhook_outbox
+                set status='retry',next_attempt_at=?,last_error=?,updated_at=?
+                where event_id=? and status='sending'
+                """,
+                (
+                    current + max(5, min(int(delay_seconds), 3600)),
+                    str(error or "webhook delivery failed")[:200],
+                    current,
+                    event_id,
+                ),
+            )
 
     def due_poll_jobs(self, *, limit: int = 50, lease_seconds: int = 30) -> list[dict[str, Any]]:
         current = int(time.time())
@@ -761,6 +1002,27 @@ class Store:
                 """,
                 (result_cutoff,),
             )
+            expired_job_ids = [
+                str(row[0])
+                for row in connection.execute(
+                    """
+                    select job_id from video_jobs
+                    where status in ('succeeded','failed','uncertain','pending_review')
+                      and finished_at>0 and finished_at<?
+                    """,
+                    (metadata_cutoff,),
+                ).fetchall()
+            ]
+            if expired_job_ids:
+                placeholders = ",".join("?" for _ in expired_job_ids)
+                connection.execute(
+                    f"delete from video_webhook_outbox where job_id in ({placeholders})",
+                    expired_job_ids,
+                )
+                connection.execute(
+                    f"delete from video_settlements where job_id in ({placeholders})",
+                    expired_job_ids,
+                )
             cursor = connection.execute(
                 """
                 delete from video_jobs
@@ -815,10 +1077,21 @@ def _public_money(value: Any) -> str | None:
 
 
 def _reservation_from_payload(payload_json: str) -> dict[str, str]:
-    unavailable = {"status": "unavailable", "reserved": "", "official": "", "revision": ""}
+    unavailable = {
+        "status": "unavailable",
+        "reserved": "",
+        "official": "",
+        "revision": "",
+        "contract_version": "",
+    }
     try:
         payload = json.loads(payload_json or "{}")
     except json.JSONDecodeError:
+        return unavailable
+    if not isinstance(payload, dict) or payload.get("_billing_v2") is not True:
+        return unavailable
+    contract_version = str(payload.get("_billing_contract_version") or "")
+    if contract_version not in BILLING_CONTRACT_VERSIONS:
         return unavailable
     quote = payload.get("_relay_price") if isinstance(payload, dict) else None
     if not isinstance(quote, dict):
@@ -849,6 +1122,7 @@ def _reservation_from_payload(payload_json: str) -> dict[str, str]:
         "reserved": _quantize_money(reserved),
         "official": _quantize_money(official),
         "revision": revision,
+        "contract_version": contract_version,
     }
 
 
@@ -875,11 +1149,41 @@ def _settlement_id(job_id: str, revision: int, fingerprint: str) -> str:
     return hashlib.sha256(material.encode("utf-8")).hexdigest()
 
 
+def build_settlement_evidence(
+    *,
+    job_id: str,
+    revision: int,
+    provider_task_id: str,
+    actual_cost_status: str,
+    actual_cost_cny_exact: str,
+    evidence_source: str,
+    evidence_id: str,
+    observed_at: str,
+    contract_version: str = BILLING_CONTRACT_VERSION,
+) -> dict[str, Any]:
+    evidence = {
+        "contract_version": str(contract_version or "").strip(),
+        "job_id": str(job_id or "").strip(),
+        "revision": int(revision),
+        "provider_task_id": str(provider_task_id or "").strip(),
+        "actual_cost_status": str(actual_cost_status or "").strip(),
+        "actual_cost_cny_exact": str(actual_cost_cny_exact or "").strip(),
+        "evidence_source": str(evidence_source or "").strip(),
+        "evidence_id": str(evidence_id or "").strip(),
+        "observed_at": str(observed_at or "").strip(),
+    }
+    evidence["evidence_fingerprint"] = _evidence_fingerprint(evidence)
+    evidence["settlement_id"] = _settlement_id(
+        evidence["job_id"], evidence["revision"], evidence["evidence_fingerprint"]
+    )
+    return _validated_settlement(evidence)
+
+
 def _validated_settlement(payload: Any) -> dict[str, Any]:
     if not isinstance(payload, dict):
         raise StoreConflict("settlement payload must be an object")
-    contract_version = str(payload.get("contract_version") or "")
-    if contract_version not in SUPPORTED_BILLING_CONTRACT_VERSIONS:
+    contract_version = str(payload.get("contract_version") or "").strip()
+    if contract_version not in BILLING_CONTRACT_VERSIONS:
         raise StoreConflict("settlement contract version is invalid")
     job_id = str(payload.get("job_id") or "").strip()
     provider_task_id = str(payload.get("provider_task_id") or "").strip()

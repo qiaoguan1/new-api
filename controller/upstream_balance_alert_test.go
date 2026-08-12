@@ -60,6 +60,27 @@ func TestSendUpstreamBalanceAlertRejectsArbitraryKind(t *testing.T) {
 	}
 }
 
+func TestCredentialExpiryAlertNeedsNoBalanceAndContainsNoCredential(t *testing.T) {
+	request := upstreamBalanceAlertRequest{
+		Kind:       "credential_expiring",
+		Name:       "Toonflow",
+		Threshold:  7,
+		OccurredAt: 1786407600,
+	}
+	if !validUpstreamBalanceAlertRequest(request) {
+		t.Fatal("expected credential expiry alert to be valid without a balance")
+	}
+	subject, content := upstreamBalanceAlertContent(request)
+	if !strings.Contains(subject, "Toonflow") || !strings.Contains(content, "7") {
+		t.Fatalf("missing safe credential lifecycle fields: subject=%q content=%q", subject, content)
+	}
+	for _, forbidden := range []string{"password", "Bearer", "api.toonflow.net"} {
+		if strings.Contains(content, forbidden) {
+			t.Fatalf("credential alert leaked forbidden value %q", forbidden)
+		}
+	}
+}
+
 func TestSendUpstreamBalanceAlertRequiresConfiguredValidRecipient(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	previous, existed := os.LookupEnv("UPSTREAM_BALANCE_ALERT_EMAIL")

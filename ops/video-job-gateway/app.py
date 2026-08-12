@@ -21,17 +21,29 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from decimal import Decimal, InvalidOperation
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Mapping
 
 from adapters import AdapterError, PaisioAdapter, ProviderConfig, RollDekAdapter, ToonflowAdapter, VideoAdapter
+from billing_collectors import (
+    BillingCollectionError,
+    NewAPITaskBillingCollector,
+    ToonflowBillingCollector,
+)
 from catalog import Catalog, CatalogError, Model, Route
-from relay_pricing import RelayPricing, RelayPricingError
+from relay_pricing import PRICE_CONTRACT_VERSION, RelayPricing, RelayPricingError
 from routing import RoutePlanError, build_route_plan
-from store import BILLING_CONTRACT_VERSION, Store, StoreConflict
+from store import (
+    BILLING_CONTRACT_VERSION,
+    BILLING_CONTRACT_VERSIONS,
+    Store,
+    StoreConflict,
+    build_settlement_evidence,
+)
 
 
 REQUEST_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
@@ -40,6 +52,7 @@ DURABLE_REQUEST_ID_SUBMIT_CONTRACT = "durable-request-id-submit-v1"
 ALLOWED_MODES = {"text", "first_frame", "first_last_frame", "reference", "all_reference"}
 ALLOWED_IMAGE_ROLES = {"reference", "first", "last", "style"}
 ALLOWED_VIDEO_ROLES = {"reference", "camera_motion"}
+VIDEO_BILLING_V2_CONTRACT = BILLING_CONTRACT_VERSION
 
 
 @dataclass(frozen=True, slots=True)
@@ -48,7 +61,16 @@ class Config:
     data_dir: Path
     catalog_file: Path
     providers: dict[str, ProviderConfig]
+    pricing_url: str = ""
     pricing_file: Path | None = None
+    pricing_group: str = "视频"
+    pricing_timeout_seconds: int = 5
+    pricing_cache_seconds: int = 30
+    public_base_url: str = ""
+    webhook_enabled: bool = False
+    webhook_url: str = ""
+    webhook_secret: str = ""
+    webhook_timeout_seconds: int = 10
     listen_host: str = "0.0.0.0"
     listen_port: int = 8091
     max_request_bytes: int = 256 * 1024
@@ -66,6 +88,19 @@ class Config:
     result_ttl_seconds: int = 3 * 24 * 60 * 60
     metadata_ttl_seconds: int = 30 * 24 * 60 * 60
     max_stream_bytes: int = 512 * 1024 * 1024
+    toonflow_billing_enabled: bool = False
+    toonflow_billing_log_url: str = "https://api.toonflow.net/web/web/operationLog/getOperationLog"
+    toonflow_billing_token: str = field(default="", repr=False)
+    toonflow_billing_token_file: Path | None = field(default=None, repr=False)
+    toonflow_billing_timeout_seconds: int = 10
+    newapi_billing_enabled_providers: frozenset[str] = field(default_factory=frozenset)
+    newapi_billing_credential_files: dict[str, Path] = field(default_factory=dict, repr=False)
+    newapi_billing_rates_cny_per_usd: dict[str, str] = field(default_factory=dict)
+    v21_approved_providers: frozenset[str] = field(
+        default_factory=lambda: frozenset({"toonflow"})
+    )
+    settlement_query_concurrency: int = 2
+    settlement_query_interval_seconds: int = 60
 
     @classmethod
     def from_env(cls) -> "Config":
@@ -111,14 +146,78 @@ class Config:
         drain_file_name = (os.getenv("VIDEO_JOB_GATEWAY_DRAIN_FILE_NAME", "DRAIN").strip() or "DRAIN")[:80]
         if Path(drain_file_name).name != drain_file_name or drain_file_name in {".", ".."}:
             raise RuntimeError("VIDEO_JOB_GATEWAY_DRAIN_FILE_NAME must be a plain file name")
+        webhook_enabled = _env_bool("VIDEO_JOB_GATEWAY_WEBHOOK_ENABLED", False)
+        webhook_url = _validated_webhook_url(os.getenv("VIDEO_JOB_GATEWAY_WEBHOOK_URL", ""))
+        webhook_secret = os.getenv("VIDEO_JOB_GATEWAY_WEBHOOK_SECRET", "").strip()
+        if webhook_enabled and (not webhook_url or len(webhook_secret.encode("utf-8")) < 32):
+            raise RuntimeError("enabled video webhook requires a safe HTTPS URL and at least 32 secret bytes")
+        toonflow_billing_enabled = _env_bool("VIDEO_JOB_TOONFLOW_BILLING_ENABLED", False)
+        toonflow_billing_log_url = _validated_provider_billing_url(
+            os.getenv(
+                "VIDEO_JOB_TOONFLOW_BILLING_LOG_URL",
+                "https://api.toonflow.net/web/web/operationLog/getOperationLog",
+            ),
+            providers["toonflow"].base_url,
+        )
+        toonflow_billing_token = os.getenv("VIDEO_JOB_TOONFLOW_BILLING_TOKEN", "").strip()
+        toonflow_billing_token_file_raw = os.getenv("VIDEO_JOB_TOONFLOW_BILLING_TOKEN_FILE", "").strip()
+        toonflow_billing_token_file = (
+            Path(os.path.abspath(toonflow_billing_token_file_raw))
+            if toonflow_billing_token_file_raw
+            else None
+        )
+        if (
+            toonflow_billing_enabled
+            and len(toonflow_billing_token.encode("utf-8")) < 20
+            and toonflow_billing_token_file is None
+        ):
+            raise RuntimeError("enabled Toonflow billing collection requires a separate service token")
+        newapi_billing_enabled = frozenset(
+            provider_id
+            for provider_id in ("paisio", "rolldek")
+            if _env_bool(f"VIDEO_JOB_{provider_id.upper()}_BILLING_ENABLED", False)
+        )
+        v21_approved_providers = frozenset(
+            value.strip().lower()
+            for value in os.getenv("VIDEO_JOB_GATEWAY_V21_APPROVED_PROVIDERS", "toonflow").split(",")
+            if value.strip().lower() in {"paisio", "rolldek", "toonflow"}
+        )
+        newapi_billing_files: dict[str, Path] = {}
+        newapi_billing_rates: dict[str, str] = {}
+        for provider_id in newapi_billing_enabled:
+            prefix = f"VIDEO_JOB_{provider_id.upper()}"
+            billing_origin = urllib.parse.urlsplit(providers[provider_id].base_url)
+            if billing_origin.scheme != "https" or not billing_origin.hostname:
+                raise RuntimeError(f"{prefix}_BASE_URL must be an HTTPS URL for billing collection")
+            raw_path = os.getenv(f"{prefix}_BILLING_CREDENTIAL_FILE", "").strip()
+            if not raw_path:
+                raise RuntimeError(f"enabled {provider_id} billing collection requires a credential file")
+            newapi_billing_files[provider_id] = Path(os.path.abspath(raw_path))
+            raw_rate = os.getenv(f"{prefix}_BILLING_RATE_CNY_PER_USD", "1").strip()
+            try:
+                rate = Decimal(raw_rate)
+            except InvalidOperation as error:
+                raise RuntimeError(f"{prefix}_BILLING_RATE_CNY_PER_USD must be positive") from error
+            if not rate.is_finite() or rate <= 0:
+                raise RuntimeError(f"{prefix}_BILLING_RATE_CNY_PER_USD must be positive")
+            newapi_billing_rates[provider_id] = format(rate, "f")
         return cls(
             token=token,
             data_dir=data_dir,
             catalog_file=catalog_file,
             providers=providers,
+            pricing_url=os.getenv("VIDEO_JOB_GATEWAY_PRICING_URL", "http://new-api:3000/api/pricing").strip(),
             pricing_file=Path(
                 os.getenv("VIDEO_JOB_GATEWAY_PRICING_FILE", str(Path(__file__).with_name("relay-pricing.json")))
             ).resolve(),
+            pricing_group=os.getenv("VIDEO_JOB_GATEWAY_PRICING_GROUP", "视频").strip() or "视频",
+            pricing_timeout_seconds=_env_int("VIDEO_JOB_GATEWAY_PRICING_TIMEOUT_SECONDS", 5, 1, 20),
+            pricing_cache_seconds=_env_int("VIDEO_JOB_GATEWAY_PRICING_CACHE_SECONDS", 30, 5, 300),
+            public_base_url=_validated_public_base_url(os.getenv("VIDEO_JOB_GATEWAY_PUBLIC_BASE_URL", "")),
+            webhook_enabled=webhook_enabled,
+            webhook_url=webhook_url,
+            webhook_secret=webhook_secret,
+            webhook_timeout_seconds=_env_int("VIDEO_JOB_GATEWAY_WEBHOOK_TIMEOUT_SECONDS", 10, 3, 30),
             listen_host=os.getenv("VIDEO_JOB_GATEWAY_HOST", "0.0.0.0").strip() or "0.0.0.0",
             listen_port=_env_int("VIDEO_JOB_GATEWAY_PORT", 8091, 1, 65535),
             max_request_bytes=_env_int("VIDEO_JOB_GATEWAY_MAX_REQUEST_BYTES", 256 * 1024, 16 * 1024, 2 * 1024 * 1024),
@@ -136,6 +235,17 @@ class Config:
             result_ttl_seconds=result_ttl,
             metadata_ttl_seconds=metadata_ttl,
             max_stream_bytes=_env_int("VIDEO_JOB_GATEWAY_MAX_STREAM_BYTES", 512 * 1024 * 1024, 20 * 1024 * 1024, 2 * 1024 * 1024 * 1024),
+            toonflow_billing_enabled=toonflow_billing_enabled,
+            toonflow_billing_log_url=toonflow_billing_log_url,
+            toonflow_billing_token=toonflow_billing_token,
+            toonflow_billing_token_file=toonflow_billing_token_file,
+            toonflow_billing_timeout_seconds=_env_int("VIDEO_JOB_TOONFLOW_BILLING_TIMEOUT_SECONDS", 10, 3, 30),
+            newapi_billing_enabled_providers=newapi_billing_enabled,
+            newapi_billing_credential_files=newapi_billing_files,
+            newapi_billing_rates_cny_per_usd=newapi_billing_rates,
+            v21_approved_providers=v21_approved_providers,
+            settlement_query_concurrency=_env_int("VIDEO_JOB_GATEWAY_SETTLEMENT_QUERY_CONCURRENCY", 2, 1, 10),
+            settlement_query_interval_seconds=_env_int("VIDEO_JOB_GATEWAY_SETTLEMENT_QUERY_INTERVAL_SECONDS", 60, 15, 3600),
         )
 
 
@@ -165,6 +275,7 @@ class Gateway:
         *,
         catalog: Catalog | None = None,
         adapters: dict[str, VideoAdapter] | None = None,
+        billing_collectors: dict[str, Any] | None = None,
         pricing: RelayPricing | None = None,
         start_monitor: bool = True,
     ) -> None:
@@ -174,6 +285,7 @@ class Gateway:
         self.submit_slots = threading.BoundedSemaphore(config.submit_concurrency)
         self.poll_slots = threading.BoundedSemaphore(config.poll_concurrency)
         self.stream_slots = threading.BoundedSemaphore(config.stream_concurrency)
+        self.settlement_slots = threading.BoundedSemaphore(config.settlement_query_concurrency)
         self.stream_lock = threading.Lock()
         self.stream_active = 0
         self.stream_completed = 0
@@ -184,8 +296,32 @@ class Gateway:
             "rolldek": RollDekAdapter(config.providers["rolldek"]),
             "toonflow": ToonflowAdapter(config.providers["toonflow"]),
         }
+        if billing_collectors is not None:
+            self.billing_collectors = dict(billing_collectors)
+        else:
+            self.billing_collectors = {}
+            if config.toonflow_billing_enabled:
+                self.billing_collectors["toonflow"] = ToonflowBillingCollector(
+                    config.toonflow_billing_log_url,
+                    config.toonflow_billing_token,
+                    token_file=config.toonflow_billing_token_file,
+                    timeout_seconds=config.toonflow_billing_timeout_seconds,
+                )
+            for provider_id in sorted(config.newapi_billing_enabled_providers):
+                provider = config.providers[provider_id]
+                self.billing_collectors[provider_id] = NewAPITaskBillingCollector(
+                    provider_id,
+                    f"{provider.base_url}/api/task/self",
+                    credential_file=config.newapi_billing_credential_files[provider_id],
+                    rate_cny_per_usd=config.newapi_billing_rates_cny_per_usd.get(provider_id, "1"),
+                    timeout_seconds=provider.poll_timeout_seconds,
+                )
         self.pricing = pricing or RelayPricing(
             config.pricing_file or Path(__file__).with_name("relay-pricing.json"),
+            pricing_url=config.pricing_url,
+            group_name=config.pricing_group,
+            timeout_seconds=config.pricing_timeout_seconds,
+            cache_seconds=config.pricing_cache_seconds,
         )
         self.stop_event = threading.Event()
         self.store.cleanup_expired(
@@ -205,6 +341,7 @@ class Gateway:
 
     @property
     def configured_providers(self) -> set[str]:
+        """Providers with generation credentials that may serve legacy/replay work."""
         ready = {
             provider_id
             for provider_id, adapter in self.adapters.items()
@@ -214,6 +351,23 @@ class Gateway:
         if store is None:
             return ready
         return ready - store.unhealthy_providers()
+
+    @property
+    def eligible_v2_providers(self) -> set[str]:
+        """Providers safe for a new actual-cost-settled v2.1 task."""
+        billing_ready = {
+            provider_id
+            for provider_id, collector in self.billing_collectors.items()
+            if bool(getattr(collector, "ready", False))
+        }
+        approved = set(
+            getattr(
+                getattr(self, "config", None),
+                "v21_approved_providers",
+                frozenset(billing_ready),
+            )
+        )
+        return self.configured_providers & billing_ready & approved
 
     def circuit_snapshot(self) -> dict[str, Any]:
         snapshot = self.store.uncertainty_snapshot(self.config.uncertainty_window_seconds)
@@ -233,7 +387,7 @@ class Gateway:
     def readiness(self) -> tuple[bool, dict[str, Any]]:
         circuit = self.circuit_snapshot()
         draining = self.drain_file.exists()
-        providers = sorted(self.configured_providers)
+        providers = sorted(self.eligible_v2_providers)
         ready = bool(providers) and not draining and not circuit["open"]
         return ready, {
             "ok": ready,
@@ -255,12 +409,37 @@ class Gateway:
         unhealthy = self.store.unhealthy_providers()
         rows = []
         for provider_id, adapter in sorted(self.adapters.items()):
-            configured = bool(adapter.ready_for_new_jobs)
+            generation_ready = bool(adapter.ready_for_new_jobs)
+            collector = self.billing_collectors.get(provider_id)
+            billing_ready = bool(collector is not None and getattr(collector, "ready", False))
+            approved = provider_id in set(
+                getattr(
+                    getattr(self, "config", None),
+                    "v21_approved_providers",
+                    frozenset(self.billing_collectors),
+                )
+            )
+            eligible = generation_ready and billing_ready and approved and provider_id not in unhealthy
+            if not generation_ready:
+                exclusion_reason = "generation_not_ready"
+            elif not billing_ready:
+                exclusion_reason = "billing_not_ready"
+            elif not approved:
+                exclusion_reason = "billing_not_approved"
+            elif provider_id in unhealthy:
+                exclusion_reason = "provider_temporarily_unhealthy"
+            else:
+                exclusion_reason = ""
             rows.append(
                 {
                     "provider_id": provider_id,
-                    "configured": configured,
-                    "eligible_for_new_jobs": configured and provider_id not in unhealthy,
+                    "configured": generation_ready,
+                    "generation_ready": generation_ready,
+                    "billing_ready": billing_ready,
+                    "billing_approved": approved,
+                    "eligible_for_new_jobs": eligible,
+                    "eligible_for_new_v21_jobs": eligible,
+                    "exclusion_reason": exclusion_reason,
                     "recent_definite_failure_threshold_reached": provider_id in unhealthy,
                 }
             )
@@ -273,22 +452,23 @@ class Gateway:
         }
 
     def capabilities(self) -> dict[str, Any]:
-        snapshot = self.catalog.public_snapshot(self.configured_providers)
+        snapshot = self.catalog.public_snapshot(self.eligible_v2_providers)
         ready, _ = self.readiness()
         capabilities = snapshot.get("capabilities") if isinstance(snapshot.get("capabilities"), dict) else {}
         video = capabilities.get("video") if isinstance(capabilities.get("video"), dict) else {}
         video["traffic_enabled"] = ready
-        video["billing_contract_version"] = BILLING_CONTRACT_VERSION
+        video["billing_contract_version"] = VIDEO_BILLING_V2_CONTRACT
+        video["generate_audio"] = bool(video.get("generate_audio"))
         video["settlement_capabilities"] = [
             DURABLE_REQUEST_ID_SUBMIT_CONTRACT,
             "provider-actual-cost-settlement-v1",
             "authenticated-billing-evidence-v1",
         ]
-        snapshot["billing_contract_version"] = BILLING_CONTRACT_VERSION
+        snapshot["billing_contract_version"] = VIDEO_BILLING_V2_CONTRACT
         return snapshot
 
     def price_pairs(self) -> list[tuple[str, str]]:
-        snapshot = self.catalog.public_snapshot(self.configured_providers)
+        snapshot = self.catalog.public_snapshot(self.eligible_v2_providers)
         capabilities = snapshot.get("capabilities") if isinstance(snapshot.get("capabilities"), dict) else {}
         video = capabilities.get("video") if isinstance(capabilities.get("video"), dict) else {}
         pairs: list[tuple[str, str]] = []
@@ -308,6 +488,7 @@ class Gateway:
             "protocol_version": self.catalog.protocol_version,
             "catalog_revision": self.catalog.revision,
             "pricing": self.pricing.snapshot(self.price_pairs()),
+            "billing_v2_pricing": self.pricing.official_snapshot(self.price_pairs()),
         }
 
     def stream_snapshot(self) -> dict[str, int]:
@@ -333,7 +514,7 @@ class Gateway:
             else:
                 self.stream_failed += 1
 
-    def submit(self, raw: Any) -> tuple[dict[str, Any], bool]:
+    def submit(self, raw: Any, *, billing_v2: bool = False) -> tuple[dict[str, Any], bool]:
         request_id_hint = str(raw.get("request_id") or "").strip() if isinstance(raw, dict) else ""
         existing_internal = (
             self.store.get(request_id=request_id_hint, internal=True)
@@ -353,6 +534,7 @@ class Gateway:
         request_id, fingerprint, normalized, model, routes = self.validate_payload(
             raw,
             configured_providers=replay_providers,
+            billing_v2=billing_v2,
         )
         route = routes[0]
         selection_reason = (
@@ -418,6 +600,7 @@ class Gateway:
         raw: Any,
         *,
         configured_providers: set[str] | None = None,
+        billing_v2: bool = False,
     ) -> tuple[str, str, dict[str, Any], Model, tuple[Route, ...]]:
         if not isinstance(raw, dict):
             raise GatewayError(HTTPStatus.BAD_REQUEST, "payload_invalid", "请求体必须是JSON对象。")
@@ -437,7 +620,13 @@ class Gateway:
             model, candidate_routes, resolution, legacy_alias = self.catalog.resolve_routes(
                 stable_model,
                 requested_resolution,
-                self.configured_providers if configured_providers is None else configured_providers,
+                (
+                    self.eligible_v2_providers
+                    if billing_v2 and configured_providers is None
+                    else self.configured_providers
+                    if configured_providers is None
+                    else configured_providers
+                ),
             )
             route = candidate_routes[0]
         except CatalogError as error:
@@ -459,6 +648,21 @@ class Gateway:
         aspect_ratio = str(parameters.get("aspect_ratio") or raw.get("aspect_ratio") or "16:9").strip()
         if model.aspect_ratios and aspect_ratio not in model.aspect_ratios:
             raise GatewayError(HTTPStatus.BAD_REQUEST, "video_aspect_ratio_unsupported", "当前星途模型不支持所选画面比例。")
+        generate_audio = parameters.get("generate_audio") if "generate_audio" in parameters else None
+        if generate_audio is True and not billing_v2:
+            raise GatewayError(
+                HTTPStatus.BAD_REQUEST,
+                "video_generate_audio_not_enabled",
+                "The legacy video relay contract does not enable generated audio.",
+            )
+        if generate_audio is True:
+            candidate_routes = tuple(candidate for candidate in candidate_routes if candidate.supports_generate_audio)
+            if not candidate_routes:
+                raise GatewayError(
+                    HTTPStatus.CONFLICT,
+                    "video_generate_audio_route_unavailable",
+                    "No configured video upstream can preserve the requested generated audio.",
+                )
         candidate_routes = tuple(
             candidate
             for candidate in candidate_routes
@@ -515,16 +719,37 @@ class Gateway:
             "negative_prompt": str(parameters.get("negative_prompt") or "").strip()[:2000],
             "delivery": {"prefer_direct_url": True},
         }
+        if billing_v2:
+            normalized["_billing_v2"] = True
+            normalized["_billing_contract_version"] = VIDEO_BILLING_V2_CONTRACT
         if resolution and (not legacy_alias or requested_resolution):
             normalized["resolution"] = resolution
-        canonical = json.dumps(normalized, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        fingerprint_payload = normalized
+        if billing_v2:
+            fingerprint_payload = dict(normalized)
+            fingerprint_payload["images"] = [
+                {
+                    "role": str(item.get("role") or "reference"),
+                    **(
+                        {"identity": str(item.get("identity") or "")}
+                        if str(item.get("identity") or "")
+                        else {"url": str(item.get("url") or "")}
+                    ),
+                }
+                for item in images
+            ]
+        canonical = json.dumps(fingerprint_payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
         fingerprint = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
         normalized["_route"] = {
             "resolution": resolution,
             "send_resolution": route.send_resolution,
         }
         try:
-            normalized["_relay_price"] = self.pricing.quote(model.id, resolution, duration)
+            normalized["_relay_price"] = (
+                self.pricing.official_quote(model.id, resolution, duration)
+                if billing_v2
+                else self.pricing.quote(model.id, resolution, duration)
+            )
         except RelayPricingError as error:
             raise GatewayError(
                 HTTPStatus.SERVICE_UNAVAILABLE,
@@ -536,12 +761,104 @@ class Gateway:
             routes = build_route_plan(
                 request_id=request_id,
                 stable_model=model.id,
-                resolution=resolution,
+                resolution=resolution or "default",
                 routes=candidate_routes,
             )
         except RoutePlanError as error:
             raise GatewayError(HTTPStatus.CONFLICT, "video_model_unavailable", str(error)) from error
         return request_id, fingerprint, normalized, model, routes
+
+    def submit_v2(self, raw: Any, *, idempotency_key: str) -> tuple[dict[str, Any], bool]:
+        if not self.config.public_base_url:
+            raise GatewayError(
+                HTTPStatus.SERVICE_UNAVAILABLE,
+                "video_public_base_url_missing",
+                "视频计费v2公网地址尚未安全配置。",
+                category="service_unavailable",
+            )
+        if not isinstance(raw, dict):
+            raise GatewayError(HTTPStatus.BAD_REQUEST, "payload_invalid", "请求体必须是JSON对象。")
+        request_id = str(raw.get("request_id") or "").strip()
+        if not request_id or not hmac.compare_digest(request_id, str(idempotency_key or "").strip()):
+            raise GatewayError(
+                HTTPStatus.CONFLICT,
+                "video_idempotency_key_mismatch",
+                "Idempotency-Key必须与request_id完全一致。",
+            )
+        if str(raw.get("provider_id") or "") != "video-aixingtu-api":
+            raise GatewayError(HTTPStatus.BAD_REQUEST, "video_provider_invalid", "provider_id无效。")
+        if "generate_audio" not in raw:
+            raise GatewayError(HTTPStatus.BAD_REQUEST, "missing_generate_audio", "generate_audio必须明确传布尔值。")
+        if not isinstance(raw.get("generate_audio"), bool):
+            raise GatewayError(HTTPStatus.BAD_REQUEST, "invalid_generate_audio", "generate_audio必须是布尔值。")
+        if raw.get("video") or raw.get("videos") or raw.get("audio") or raw.get("audios"):
+            raise GatewayError(HTTPStatus.BAD_REQUEST, "video_reference_unsupported", "计费v2尚未定义视频或音频参考。")
+        image_values: list[str] = []
+        if raw.get("image"):
+            image_values.append(str(raw.get("image") or "").strip())
+        if isinstance(raw.get("images"), list):
+            image_values.extend(str(item or "").strip() for item in raw["images"] if str(item or "").strip())
+        if len(image_values) > 9:
+            raise GatewayError(HTTPStatus.BAD_REQUEST, "video_reference_limit", "参考图片数量超过限制。")
+        image_identities = raw.get("image_identities")
+        if image_identities is None:
+            identities: list[str] = []
+        elif isinstance(image_identities, list):
+            identities = [str(item or "").strip().lower() for item in image_identities]
+        else:
+            raise GatewayError(HTTPStatus.BAD_REQUEST, "video_image_identity_invalid", "参考图片身份必须是数组。")
+        if identities and (
+            len(identities) != len(image_values)
+            or any(not re.fullmatch(r"[0-9a-f]{64}", item) for item in identities)
+        ):
+            raise GatewayError(HTTPStatus.BAD_REQUEST, "video_image_identity_invalid", "参考图片身份与素材不匹配。")
+        mode = "text"
+        images: list[dict[str, str]] = []
+        if image_values:
+            mode = "first_frame" if len(image_values) == 1 else "all_reference"
+            images = [
+                {
+                    "url": value,
+                    "role": "first" if len(image_values) == 1 else "reference",
+                    **({"identity": identities[index]} if identities else {}),
+                }
+                for index, value in enumerate(image_values)
+            ]
+        translated = {
+            "protocol_version": self.catalog.protocol_version,
+            "request_id": request_id,
+            "model": str(raw.get("model") or "").strip(),
+            "input": {"prompt": str(raw.get("prompt") or "").strip(), "images": images, "videos": []},
+            "parameters": {
+                "resolution": str(raw.get("resolution") or "").strip().lower(),
+                "duration": raw.get("duration"),
+                "aspect_ratio": str(raw.get("aspect_ratio") or "16:9").strip(),
+                "mode": mode,
+                "generate_audio": raw["generate_audio"],
+            },
+        }
+        return self.submit(translated, billing_v2=True)
+
+    def public_v2_snapshot(self, snapshot: Mapping[str, Any]) -> dict[str, Any]:
+        task_id = str(snapshot.get("job_id") or "")
+        delivery = str(snapshot.get("result_delivery") or "unavailable")
+        result_url = ""
+        if delivery == "ready" and self.config.public_base_url:
+            result_url = f"{self.config.public_base_url}/v1/videos/{urllib.parse.quote(task_id, safe='')}/content"
+        billing = dict(snapshot.get("billing") or {})
+        return {
+            "id": task_id,
+            "request_id": str(snapshot.get("request_id") or ""),
+            "object": "video",
+            "model": str(snapshot.get("model") or ""),
+            "status": str(snapshot.get("status") or ""),
+            "progress": 100 if str(snapshot.get("status") or "") in {"succeeded", "failed"} else 0,
+            "result_delivery": delivery,
+            "result": {"type": "url", "url": result_url} if result_url else None,
+            "result_url": result_url or None,
+            "billing": billing,
+            "usage": None,
+        }
 
     def start_submit(self, job_id: str) -> None:
         threading.Thread(target=self._submit_one, args=(job_id,), daemon=True, name=f"video-submit-{job_id[-8:]}").start()
@@ -572,6 +889,22 @@ class Gateway:
                 return
             try:
                 payload = json.loads(str(job.get("payload_json") or "{}"))
+                if bool(payload.get("_billing_v2")):
+                    collector = self.billing_collectors.get(str(job.get("provider_id") or ""))
+                    if collector is None or not bool(getattr(collector, "ready", False)):
+                        error = _error(
+                            "provider_billing_not_ready",
+                            "service_unavailable",
+                            "The selected video provider cannot prove exact task-level cost.",
+                            503,
+                            True,
+                            False,
+                            "validate",
+                        )
+                        if self.store.advance_route(job_id, error=error):
+                            continue
+                        self.store.finish(job_id, "failed", error=error)
+                        return
                 route_plan = json.loads(str(job.get("route_plan_json") or "[]"))
                 route_index = int(job.get("route_index") or 0)
                 route_settings = (
@@ -661,6 +994,126 @@ class Gateway:
                 last_cleanup = current
             for job in self.store.due_poll_jobs(limit=self.config.poll_concurrency, lease_seconds=30):
                 threading.Thread(target=self._poll_one, args=(job,), daemon=True, name=f"video-poll-{str(job['job_id'])[-8:]}").start()
+            for job in self.store.due_settlement_jobs(
+                set(self.billing_collectors),
+                limit=self.config.settlement_query_concurrency,
+                lease_seconds=max(30, self.config.toonflow_billing_timeout_seconds + 10),
+            ):
+                threading.Thread(
+                    target=self._collect_settlement_one,
+                    args=(job,),
+                    daemon=True,
+                    name=f"video-settle-{str(job['job_id'])[-8:]}",
+                ).start()
+            if self.config.webhook_enabled:
+                for event in self.store.due_webhook_events(limit=20, lease_seconds=30):
+                    threading.Thread(
+                        target=self._deliver_webhook,
+                        args=(event,),
+                        daemon=True,
+                        name=f"video-webhook-{str(event['event_id'])[-8:]}",
+                    ).start()
+
+    def _collect_settlement_one(self, job: dict[str, Any]) -> None:
+        with self.settlement_slots:
+            job_id = str(job.get("job_id") or "")
+            provider_id = str(job.get("provider_id") or "").strip().lower()
+            collector = self.billing_collectors.get(provider_id)
+            if collector is None:
+                self.store.retry_settlement_collection(
+                    job_id,
+                    delay_seconds=3600,
+                    error_code="provider_billing_collector_not_configured",
+                )
+                return
+            try:
+                record = collector.collect(str(job.get("upstream_task_id") or ""))
+                current = self.store.get(job_id=job_id, internal=True)
+                if not current or str(current.get("billing_status") or "") != "settlement_pending":
+                    return
+                evidence = build_settlement_evidence(
+                    job_id=job_id,
+                    revision=int(current.get("settlement_revision") or 0) + 1,
+                    provider_task_id=record.provider_task_id,
+                    actual_cost_status=record.actual_cost_status,
+                    actual_cost_cny_exact=record.actual_cost_cny_exact,
+                    evidence_source=record.evidence_source,
+                    evidence_id=record.evidence_id,
+                    observed_at=record.observed_at,
+                    contract_version=str(current.get("billing_contract_version") or ""),
+                )
+                self.store.apply_settlement(evidence)
+            except BillingCollectionError as error:
+                attempts = max(1, int(job.get("settlement_query_attempts") or 1))
+                backoff = self.config.settlement_query_interval_seconds * (2 ** min(attempts - 1, 5))
+                self.store.retry_settlement_collection(
+                    job_id,
+                    delay_seconds=max(error.retry_after_seconds, min(backoff, 3600)),
+                    error_code=error.code,
+                )
+            except StoreConflict:
+                current = self.store.get(job_id=job_id, internal=True) or {}
+                if str(current.get("billing_status") or "") == "settlement_pending":
+                    self.store.retry_settlement_collection(
+                        job_id,
+                        delay_seconds=900,
+                        error_code="provider_billing_settlement_conflict",
+                    )
+            except Exception:
+                self.store.retry_settlement_collection(
+                    job_id,
+                    delay_seconds=900,
+                    error_code="provider_billing_collection_internal_error",
+                )
+
+    def _deliver_webhook(self, event: Mapping[str, Any]) -> None:
+        event_id = str(event.get("event_id") or "")
+        attempt = max(1, int(event.get("attempts") or 1))
+        body = str(event.get("payload_json") or "").encode("utf-8")
+        try:
+            event_payload = json.loads(body.decode("utf-8"))
+            contract_version = str((((event_payload.get("data") or {}).get("billing") or {}).get("contract_version") or ""))
+        except (UnicodeDecodeError, json.JSONDecodeError, AttributeError):
+            contract_version = ""
+        if contract_version not in BILLING_CONTRACT_VERSIONS:
+            self.store.retry_webhook(event_id, delay_seconds=3600, error="invalid persisted contract")
+            return
+        timestamp = str(int(time.time()))
+        signature = "v1=" + hmac.new(
+            self.config.webhook_secret.encode("utf-8"),
+            timestamp.encode("ascii") + b"." + body,
+            hashlib.sha256,
+        ).hexdigest()
+        request = urllib.request.Request(
+            self.config.webhook_url,
+            data=body,
+            method="POST",
+            headers={
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+                "X-XingTu-Contract-Version": contract_version,
+                "X-XingTu-Event-Id": event_id,
+                "X-XingTu-Timestamp": timestamp,
+                "X-XingTu-Delivery-Attempt": str(attempt),
+                "X-XingTu-Signature": signature,
+                "User-Agent": "XingTuVideoWebhook/1",
+            },
+        )
+        try:
+            with urllib.request.build_opener(_NoRedirect()).open(
+                request,
+                timeout=self.config.webhook_timeout_seconds,
+            ) as response:
+                status = int(getattr(response, "status", 0) or 0)
+                response.read(4096)
+            if not 200 <= status < 300:
+                raise OSError(f"webhook returned HTTP {status}")
+            self.store.mark_webhook_delivered(event_id)
+        except (OSError, urllib.error.URLError, urllib.error.HTTPError, TimeoutError) as error:
+            delay = min(3600, 5 * (2 ** min(attempt - 1, 9)))
+            status = int(getattr(error, "code", 0) or 0)
+            label = f"HTTP {status}" if status else type(error).__name__
+            self.store.retry_webhook(event_id, delay_seconds=delay, error=label)
 
     def _poll_one(self, job: dict[str, Any]) -> None:
         with self.poll_slots:
@@ -747,13 +1200,66 @@ class Gateway:
         source_url: str,
         requires_auth: bool,
     ) -> dict[str, Any]:
-        return {
+        result = {
             "type": "url",
             "delivery_mode": "direct_url",
             "source_url": source_url,
             "content_type": "video/mp4",
             "requires_auth": bool(requires_auth),
         }
+        try:
+            payload = json.loads(str(job.get("payload_json") or "{}"))
+        except json.JSONDecodeError:
+            payload = {}
+        relay_price = payload.get("_relay_price") if isinstance(payload, dict) and isinstance(payload.get("_relay_price"), dict) else {}
+        if relay_price:
+            try:
+                amount = Decimal(str(relay_price.get("amount_cny_exact") or ""))
+                observed_at = int(time.time())
+            except (InvalidOperation, TypeError, ValueError) as error:
+                raise ValueError("relay job contains invalid frozen price evidence") from error
+            if (
+                relay_price.get("contract_version") != PRICE_CONTRACT_VERSION
+                or not amount.is_finite()
+                or amount <= 0
+                or amount > Decimal("100000")
+            ):
+                raise ValueError("relay job contains invalid frozen price evidence")
+            amount_exact = format(amount, "f")
+            issuer = "xtai-video-relay"
+            gateway_job_id = str(job.get("job_id") or "")
+            gateway_request_id = str(job.get("request_id") or "")
+            material = "\0".join((
+                "xtai-video-actual-cost-v1",
+                issuer,
+                gateway_job_id,
+                gateway_request_id,
+                amount_exact,
+                "CNY",
+                "request",
+                "final",
+                str(observed_at),
+            ))
+            result["billing"] = {
+                "contract_version": "xtai-video-actual-cost-v1",
+                "issuer": issuer,
+                "gateway_job_id": gateway_job_id,
+                "gateway_request_id": gateway_request_id,
+                "currency": "CNY",
+                "amount_cny_exact": amount_exact,
+                "billing_unit": "request",
+                "status": "final",
+                "observed_at": observed_at,
+                "pricing_contract_version": PRICE_CONTRACT_VERSION,
+                "pricing_revision": str(relay_price.get("pricing_revision") or "")[:160],
+                "price_source": str(relay_price.get("price_source") or "")[:80],
+                "evidence_hash": hmac.new(
+                    self.config.token.encode("utf-8"),
+                    material.encode("utf-8"),
+                    hashlib.sha256,
+                ).hexdigest(),
+            }
+        return result
 
     def apply_settlement(self, raw: Any) -> tuple[dict[str, Any], bool]:
         try:
@@ -766,9 +1272,11 @@ class Gateway:
                 category="billing",
             ) from error
 
-    def result_source(self, job_id: str) -> tuple[str, ProviderConfig] | None:
+    def result_source(self, job_id: str, *, require_settled: bool = False) -> tuple[str, ProviderConfig] | None:
         job = self.store.get(job_id=job_id, internal=True)
         if not job or job.get("status") != "succeeded" or not job.get("result_json"):
+            return None
+        if require_settled and str(job.get("billing_status") or "") != "settled":
             return None
         try:
             result = json.loads(str(job["result_json"]))
@@ -820,6 +1328,40 @@ def handler_class(gateway: Gateway) -> type[BaseHTTPRequestHandler]:
             if not self.authorized():
                 self.json_response(HTTPStatus.UNAUTHORIZED, {"error": _error("unauthorized", "authentication", "未授权。", 401, False, False, "validate")})
                 return
+            v2_content_match = re.fullmatch(r"/v1/videos/(vjob_[0-9a-f]{32})/content", parsed.path)
+            if v2_content_match:
+                if not self.v2_contract_supported():
+                    self.json_response(HTTPStatus.BAD_REQUEST, {"error": _error("video_contract_invalid", "validation", "视频计费协议版本无效。", 400, False, False, "validate")})
+                    return
+                snapshot = gateway.store.get(job_id=v2_content_match.group(1))
+                if snapshot is None:
+                    self.json_response(HTTPStatus.NOT_FOUND, {"error": _error("job_not_found", "validation", "视频任务不存在。", 404, False, False, "poll")})
+                    return
+                if str((snapshot.get("billing") or {}).get("contract_version") or "") != self.v2_contract_version():
+                    self.json_response(HTTPStatus.CONFLICT, {"error": _error("task_contract_mismatch", "validation", "任务合同版本不匹配。", 409, False, False, "poll")})
+                    return
+                try:
+                    _stream_result(self, gateway, v2_content_match.group(1), head_only=self.command == "HEAD", require_settled=True)
+                except GatewayError as error:
+                    self.json_response(error.status, {"error": error.contract()})
+                return
+            v2_task_match = re.fullmatch(r"/v1/videos/(vjob_[0-9a-f]{32})", parsed.path)
+            if v2_task_match:
+                if not self.v2_contract_supported():
+                    self.json_response(HTTPStatus.BAD_REQUEST, {"error": _error("video_contract_invalid", "validation", "视频计费协议版本无效。", 400, False, False, "validate")})
+                    return
+                snapshot = gateway.store.get(job_id=v2_task_match.group(1))
+                if snapshot is None:
+                    self.json_response(HTTPStatus.NOT_FOUND, {"error": _error("job_not_found", "validation", "视频任务不存在。", 404, False, False, "poll")})
+                    return
+                if str((snapshot.get("billing") or {}).get("contract_version") or "") != self.v2_contract_version():
+                    self.json_response(
+                        HTTPStatus.CONFLICT,
+                        {"error": _error("task_contract_mismatch", "validation", "任务合同版本不匹配。", 409, False, False, "poll")},
+                    )
+                    return
+                self.json_response(HTTPStatus.OK, gateway.public_v2_snapshot(snapshot))
+                return
             if parsed.path == "/v1/capabilities":
                 self.json_response(HTTPStatus.OK, {"ok": True, **gateway.capabilities()})
                 return
@@ -858,7 +1400,7 @@ def handler_class(gateway: Gateway) -> type[BaseHTTPRequestHandler]:
 
         def do_POST(self) -> None:
             path = urllib.parse.urlsplit(self.path).path
-            if path not in {"/v1/video-jobs", "/v1/operations/video-settlements"}:
+            if path not in {"/v1/video-jobs", "/v1/videos", "/v1/operations/video-settlements"}:
                 self.json_response(HTTPStatus.NOT_FOUND, {"error": _error("not_found", "validation", "接口不存在。", 404, False, False, "validate")})
                 return
             if not self.authorized():
@@ -875,6 +1417,15 @@ def handler_class(gateway: Gateway) -> type[BaseHTTPRequestHandler]:
                 raw = json.loads(self.rfile.read(length).decode("utf-8"))
                 if path == "/v1/operations/video-settlements":
                     snapshot, reused = gateway.apply_settlement(raw)
+                elif path == "/v1/videos":
+                    if not self.v2_contract_current():
+                        raise GatewayError(HTTPStatus.BAD_REQUEST, "unsupported_contract_version", "新视频任务必须使用xtai-video-billing-v2.1。")
+                    snapshot, reused = gateway.submit_v2(
+                        raw,
+                        idempotency_key=str(self.headers.get("Idempotency-Key") or ""),
+                    )
+                    self.json_response(HTTPStatus.OK if reused else HTTPStatus.ACCEPTED, gateway.public_v2_snapshot(snapshot))
+                    return
                 else:
                     snapshot, reused = gateway.submit(raw)
                 self.json_response(HTTPStatus.ACCEPTED, {"ok": True, "reused": reused, "job": snapshot})
@@ -883,17 +1434,34 @@ def handler_class(gateway: Gateway) -> type[BaseHTTPRequestHandler]:
             except (UnicodeDecodeError, json.JSONDecodeError):
                 self.json_response(HTTPStatus.BAD_REQUEST, {"error": _error("json_invalid", "validation", "请求体不是有效JSON。", 400, False, False, "validate")})
 
+        def v2_contract_version(self) -> str:
+            return str(self.headers.get("X-XingTu-Contract-Version") or "").strip()
+
+        def v2_contract_supported(self) -> bool:
+            return self.v2_contract_version() in BILLING_CONTRACT_VERSIONS
+
+        def v2_contract_current(self) -> bool:
+            supplied = self.v2_contract_version()
+            return bool(supplied) and hmac.compare_digest(supplied, VIDEO_BILLING_V2_CONTRACT)
+
     return Handler
 
 
-def _stream_result(handler: BaseHTTPRequestHandler, gateway: Gateway, job_id: str, *, head_only: bool) -> None:
+def _stream_result(
+    handler: BaseHTTPRequestHandler,
+    gateway: Gateway,
+    job_id: str,
+    *,
+    head_only: bool,
+    require_settled: bool = False,
+) -> None:
     if not gateway.stream_slots.acquire(blocking=False):
         raise GatewayError(HTTPStatus.SERVICE_UNAVAILABLE, "result_stream_busy", "视频中转流式并发已满。", category="service_unavailable")
     gateway.stream_started()
     transferred = 0
     succeeded = False
     try:
-        source = gateway.result_source(job_id)
+        source = gateway.result_source(job_id, require_settled=require_settled)
         if not source:
             raise GatewayError(HTTPStatus.NOT_FOUND, "result_not_found", "视频结果不存在或已过期。")
         url, provider = source
@@ -1011,6 +1579,7 @@ def _normalize_assets(raw: Any, kind: str, allowed_roles: set[str]) -> list[dict
         source = item if isinstance(item, dict) else {"url": item}
         url = str(source.get("url") or "").strip()
         role = str(source.get("role") or "reference").strip().lower()
+        identity = str(source.get("identity") or "").strip().lower()
         parsed = urllib.parse.urlsplit(url)
         if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password or parsed.fragment or len(url) > 4096:
             raise GatewayError(HTTPStatus.BAD_REQUEST, f"video_{kind}_url_invalid", "参考素材必须使用安全的HTTPS地址。")
@@ -1022,7 +1591,13 @@ def _normalize_assets(raw: Any, kind: str, allowed_roles: set[str]) -> list[dict
             raise GatewayError(HTTPStatus.BAD_REQUEST, f"video_{kind}_url_invalid", "参考素材地址不能指向私有网络。")
         if role not in allowed_roles:
             raise GatewayError(HTTPStatus.BAD_REQUEST, f"video_{kind}_role_invalid", "参考素材角色无效。")
-        result.append({"url": url, "role": role})
+        if identity and not re.fullmatch(r"[0-9a-f]{64}", identity):
+            raise GatewayError(HTTPStatus.BAD_REQUEST, f"video_{kind}_identity_invalid", "Reference material identity is invalid.")
+        result.append({
+            "url": url,
+            "role": role,
+            **({"identity": identity} if identity else {}),
+        })
     return result
 
 
@@ -1055,6 +1630,72 @@ def _host_list(raw: str, base_host: str) -> tuple[str, ...]:
     return tuple(values)
 
 
+def _validated_public_base_url(raw: str) -> str:
+    value = str(raw or "").strip().rstrip("/")
+    if not value:
+        return ""
+    parsed = urllib.parse.urlsplit(value)
+    if (
+        parsed.scheme != "https"
+        or not parsed.hostname
+        or parsed.username
+        or parsed.password
+        or parsed.port not in {None, 443}
+        or parsed.path not in {"", "/"}
+        or parsed.query
+        or parsed.fragment
+    ):
+        raise RuntimeError("VIDEO_JOB_GATEWAY_PUBLIC_BASE_URL must be an HTTPS origin on port 443")
+    return urllib.parse.urlunsplit(("https", parsed.netloc, "", "", ""))
+
+
+def _validated_webhook_url(raw: str) -> str:
+    value = str(raw or "").strip()
+    if not value:
+        return ""
+    parsed = urllib.parse.urlsplit(value)
+    try:
+        literal = ipaddress.ip_address(parsed.hostname or "")
+    except ValueError:
+        literal = None
+    if (
+        parsed.scheme != "https"
+        or not parsed.hostname
+        or literal is not None
+        or parsed.username
+        or parsed.password
+        or parsed.port not in {None, 443}
+        or parsed.query
+        or parsed.fragment
+    ):
+        raise RuntimeError("VIDEO_JOB_GATEWAY_WEBHOOK_URL must use an HTTPS domain on port 443 without query parameters")
+    return urllib.parse.urlunsplit(("https", parsed.netloc, parsed.path or "/", "", ""))
+
+
+def _validated_provider_billing_url(raw: str, provider_base_url: str) -> str:
+    value = str(raw or "").strip()
+    parsed = urllib.parse.urlsplit(value)
+    provider = urllib.parse.urlsplit(str(provider_base_url or "").strip())
+    try:
+        literal = ipaddress.ip_address(parsed.hostname or "")
+    except ValueError:
+        literal = None
+    if (
+        parsed.scheme != "https"
+        or not parsed.hostname
+        or literal is not None
+        or parsed.username
+        or parsed.password
+        or parsed.port not in {None, 443}
+        or parsed.query
+        or parsed.fragment
+        or not parsed.path.startswith("/")
+        or parsed.hostname.lower().rstrip(".") != str(provider.hostname or "").lower().rstrip(".")
+    ):
+        raise RuntimeError("Toonflow billing URL must use the configured provider HTTPS domain on port 443")
+    return urllib.parse.urlunsplit(("https", parsed.netloc, parsed.path, "", ""))
+
+
 def _env_int(name: str, default: int, minimum: int, maximum: int) -> int:
     try:
         value = int(os.getenv(name, str(default)) or default)
@@ -1069,6 +1710,11 @@ def _env_float(name: str, default: float, minimum: float, maximum: float) -> flo
     except (TypeError, ValueError):
         value = default
     return max(minimum, min(value, maximum))
+
+
+def _env_bool(name: str, default: bool) -> bool:
+    value = str(os.getenv(name, "1" if default else "0") or "").strip().lower()
+    return value in {"1", "true", "yes", "on"}
 
 
 def main() -> None:

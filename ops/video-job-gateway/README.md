@@ -43,9 +43,33 @@ create paid upstream tasks.
 
 ## Configuration
 
-Copy `env.example` to the deployment environment and inject secrets outside Git. For dual-provider
-traffic set `VIDEO_JOB_GATEWAY_ENABLED_PROVIDERS=toonflow,paisio` and provide both API keys. Never
-commit `.env`, API keys, authenticated response bodies, or copied production databases.
+Copy `env.example` to the deployment environment and inject secrets outside Git. All reviewed video
+providers may be registered, but registration alone does not make a provider eligible for a new
+v2.1 task. Eligibility requires a reviewed catalog route, generation credentials, healthy state and
+a ready exact task-level billing collector. A provider missing any one of these remains visible only
+on the authenticated health endpoint and is excluded from new routing.
+
+`VIDEO_JOB_GATEWAY_V21_APPROVED_PROVIDERS` is the final independent audit gate. Keep it at
+`toonflow` while Paisio reports `cost_mismatch` and RollDek lacks terminal task evidence. Registering
+or refreshing those channels does not silently approve them for traffic.
+
+Paisio and RollDek use short-lived, read-only NewAPI account session files refreshed by
+`ops/channel-monitor/scripts/refresh-video-provider-auth.py`. Toonflow's console token is mounted as
+a root-owned 0600 file and reloaded for each settlement query, so an operator-approved replacement
+does not require a gateway restart. Toonflow currently has no verified server refresh API and its
+login is CAPTCHA-bound; the scheduled lifecycle check warns at 30/14/7/3/1 days and fails closed at
+expiry instead of bypassing CAPTCHA. Never commit `.env`, API keys, session files, console tokens,
+authenticated response bodies, or copied production databases.
+
+Run the auth lifecycle command hourly under `flock`. Use the checked-in example config, keep the
+real config/state and upstream credentials at mode 0600, and install a Toonflow replacement from a
+private file rather than a command-line token:
+
+```bash
+python3 channel-monitor/scripts/refresh-video-provider-auth.py
+python3 channel-monitor/scripts/refresh-video-provider-auth.py \
+  --install-provider toonflow --replacement-token-file /root/private/toonflow.token.new
+```
 
 ## Deployment and rollback
 
