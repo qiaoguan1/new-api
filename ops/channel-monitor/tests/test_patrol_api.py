@@ -19,6 +19,9 @@ SPEC.loader.exec_module(api)
 
 
 class PatrolApiSecurityTests(unittest.TestCase):
+    def test_supervised_server_can_rebind_after_clean_restart(self):
+        self.assertTrue(api.PatrolHttpServer.allow_reuse_address)
+
     def test_bind_is_restricted_to_ipv4_loopback_and_bounded_port(self):
         self.assertEqual(api.validate_bind("127.0.0.1", 8793), ("127.0.0.1", 8793))
         for host in ("0.0.0.0", "::", "localhost", "10.0.0.1"):

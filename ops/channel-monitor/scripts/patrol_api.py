@@ -142,7 +142,9 @@ def write_trigger(path: pathlib.Path, *, now: int | None = None) -> None:
 
 class PatrolHttpServer(ThreadingHTTPServer):
     daemon_threads = True
-    allow_reuse_address = False
+    # Loopback-only SO_REUSEADDR permits immediate supervised restart after a
+    # clean stop while still preventing a second live listener from binding.
+    allow_reuse_address = True
     request_queue_size = 8
 
 
