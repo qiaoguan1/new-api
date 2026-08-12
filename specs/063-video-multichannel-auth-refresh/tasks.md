@@ -25,6 +25,6 @@
 
 - [x] T013 Run complete gateway/channel-monitor tests and compilation checks.
 - [x] T014 Complete comprehensive and security reviews; address every finding.
-- [ ] T015 Commit, push, open PR, verify CI and merge to the active production base.
-- [ ] T016 Back up and deploy gateway/refresh schedule with only fully eligible providers enabled.
-- [ ] T017 Run ten read-only production verification rounds and record results in `verification.md`.
+- [x] T015 Commit, push, open PR, verify available repository gates and merge to the active production base.
+- [x] T016 Back up and deploy gateway/refresh schedule with only fully eligible providers enabled.
+- [x] T017 Run ten read-only production verification rounds and record results in `verification.md`.
