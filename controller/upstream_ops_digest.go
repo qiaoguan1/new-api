@@ -137,22 +137,22 @@ func digestNumber(value *float64) string {
 func upstreamOpsDigestContent(request upstreamOpsDigestRequest) (string, string) {
 	subject := fmt.Sprintf("[星途监控] 每日运营报告 %s", request.Date)
 	var body strings.Builder
-	body.WriteString("<h2>星途上游每日运营报告</h2>")
-	body.WriteString("<p>业务日期（北京时间）：" + html.EscapeString(request.Date) + "</p>")
-	body.WriteString("<table border=\"1\" cellpadding=\"5\" cellspacing=\"0\"><thead><tr>")
-	body.WriteString("<th>渠道</th><th>采集</th><th>审计</th><th>余额状态</th><th>余额</th><th>昨日调用</th><th>昨日成本(CNY)</th><th>本月调用</th><th>本月成本(CNY)</th></tr></thead><tbody>")
+	body.WriteString("<h2>星途上游每日运营报告</h2>\n")
+	body.WriteString("<p>业务日期（北京时间）：" + html.EscapeString(request.Date) + "</p>\n")
+	body.WriteString("<table border=\"1\" cellpadding=\"5\" cellspacing=\"0\">\n<thead>\n<tr>\n")
+	body.WriteString("<th>渠道</th><th>采集</th><th>审计</th><th>余额状态</th><th>余额</th><th>昨日调用</th><th>昨日成本(CNY)</th><th>本月调用</th><th>本月成本(CNY)</th>\n</tr>\n</thead>\n<tbody>\n")
 	for _, channel := range request.Channels {
 		body.WriteString("<tr><td>" + html.EscapeString(strings.TrimSpace(channel.Name)) + "</td>")
 		body.WriteString("<td>" + html.EscapeString(channel.CollectionStatus) + "</td>")
 		body.WriteString("<td>" + html.EscapeString(channel.AuditStatus) + "</td>")
 		body.WriteString("<td>" + html.EscapeString(channel.BalanceStatus) + "</td>")
 		body.WriteString("<td>" + digestNumber(channel.Balance) + "</td>")
-		body.WriteString(fmt.Sprintf("<td>%d</td><td>%s</td><td>%d</td><td>%.6f</td></tr>",
+		body.WriteString(fmt.Sprintf("<td>%d</td><td>%s</td><td>%d</td><td>%.6f</td></tr>\n",
 			channel.DailyCalls, digestNumber(channel.DailyCostCNY), channel.MonthCalls, channel.MonthCostCNY))
 	}
-	body.WriteString("</tbody></table>")
+	body.WriteString("</tbody>\n</table>\n")
 	body.WriteString(fmt.Sprintf(
-		"<h3>自动改价</h3><p>状态：%s；发现模型：%d；已改价：%d；保持原价：%d；安全阻断：%d；视频官方价保护：%d。</p>",
+		"<h3>自动改价</h3>\n<p>状态：%s；发现模型：%d；已改价：%d；保持原价：%d；安全阻断：%d；视频官方价保护：%d。</p>\n",
 		html.EscapeString(request.Pricing.Status), request.Pricing.Discovered,
 		request.Pricing.Applied, request.Pricing.Skipped, request.Pricing.Blocked,
 		request.Pricing.ProtectedVideo,
@@ -170,13 +170,13 @@ func upstreamOpsDigestContent(request upstreamOpsDigestRequest) (string, string)
 			}
 			body.WriteString(html.EscapeString(reason) + fmt.Sprintf("=%d", request.Pricing.Reasons[reason]))
 		}
-		body.WriteString("。</p>")
+		body.WriteString("。</p>\n")
 	}
 	body.WriteString(fmt.Sprintf(
-		"<h3>渠道审计</h3><p>正常：%d；异常：%d；告警：%d。</p>",
+		"<h3>渠道审计</h3>\n<p>正常：%d；异常：%d；告警：%d。</p>\n",
 		request.Audit.OKChannels, request.Audit.FailedChannels, request.Audit.Alerts,
 	))
-	body.WriteString("<p>本报告不包含账号、密码、Token、接口地址、提示词或生成结果。</p>")
+	body.WriteString("<p>本报告不包含账号、密码、Token、接口地址、提示词或生成结果。</p>\n")
 	return subject, body.String()
 }
 
