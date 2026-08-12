@@ -18,7 +18,7 @@
 
 - [x] T009 Run focused and complete Python/Go tests, compilation, vet, and diff checks.
 - [x] T010 Complete comprehensive and security review; address every finding.
-- [ ] T011 Commit, push, review, merge to the active production base, and record verification.
-- [ ] T012 Back up and deploy the gateway, monitor scripts, NewAPI image, and schedules.
-- [ ] T013 Reconcile Paisio read-only evidence before approval and verify route order/fallback.
-- [ ] T014 Send one test digest and run ten read-only production verification rounds.
+- [x] T011 Commit, push, review, merge to the active production base, and record verification.
+- [x] T012 Back up and deploy the gateway, monitor scripts, NewAPI image, and schedules.
+- [x] T013 Reconcile Paisio read-only evidence before approval and verify route order/fallback.
+- [x] T014 Send one production digest and run ten read-only production verification rounds.
