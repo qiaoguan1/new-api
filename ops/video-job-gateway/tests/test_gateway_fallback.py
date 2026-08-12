@@ -84,6 +84,38 @@ class GatewayFallbackTests(unittest.TestCase):
             self.assertTrue(rows["paisio"]["billing_ready"])
             self.assertEqual(rows["paisio"]["exclusion_reason"], "billing_not_approved")
             self.assertNotIn("token", str(rows).lower())
+
+    def test_settlement_backlog_quarantines_new_jobs_but_not_provider_configuration(self):
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as directory:
+            gateway = Gateway.__new__(Gateway)
+            gateway.store = Store(pathlib.Path(directory))
+            gateway.adapters = {
+                "toonflow": FakeAdapter("toonflow", Observation(status="running")),
+                "paisio": FakeAdapter("paisio", Observation(status="running")),
+            }
+            gateway.billing_collectors = {
+                "toonflow": FakeBillingCollector(True),
+                "paisio": FakeBillingCollector(True),
+            }
+            gateway.config = types.SimpleNamespace(
+                v21_approved_providers=frozenset({"toonflow", "paisio"}),
+                settlement_provider_quarantine_age_seconds=1800,
+                settlement_provider_quarantine_attempts=3,
+            )
+
+            with mock.patch.object(
+                gateway.store,
+                "unhealthy_settlement_providers",
+                return_value={"paisio"},
+            ):
+                self.assertEqual(gateway.configured_providers, {"paisio", "toonflow"})
+                self.assertEqual(gateway.eligible_v2_providers, {"toonflow"})
+                rows = {row["provider_id"]: row for row in gateway.provider_health()["providers"]}
+
+            self.assertEqual(rows["paisio"]["exclusion_reason"], "billing_settlement_backlog")
+            self.assertTrue(rows["paisio"]["settlement_backlog_threshold_reached"])
+            self.assertFalse(rows["toonflow"]["settlement_backlog_threshold_reached"])
+            self.assertNotIn("token", str(rows).lower())
     def test_toonflow_result_allowlist_accepts_tos_subdomain_only(self):
         allowed = ("api.toonflow.net", "tos-cn-beijing.volces.com")
         with mock.patch("app.socket.getaddrinfo", return_value=[(2, 1, 6, "", ("8.8.8.8", 443))]):

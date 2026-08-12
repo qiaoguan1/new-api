@@ -101,6 +101,8 @@ class Config:
     )
     settlement_query_concurrency: int = 2
     settlement_query_interval_seconds: int = 60
+    settlement_provider_quarantine_age_seconds: int = 30 * 60
+    settlement_provider_quarantine_attempts: int = 3
 
     @classmethod
     def from_env(cls) -> "Config":
@@ -246,6 +248,18 @@ class Config:
             v21_approved_providers=v21_approved_providers,
             settlement_query_concurrency=_env_int("VIDEO_JOB_GATEWAY_SETTLEMENT_QUERY_CONCURRENCY", 2, 1, 10),
             settlement_query_interval_seconds=_env_int("VIDEO_JOB_GATEWAY_SETTLEMENT_QUERY_INTERVAL_SECONDS", 60, 15, 3600),
+            settlement_provider_quarantine_age_seconds=_env_int(
+                "VIDEO_JOB_GATEWAY_SETTLEMENT_PROVIDER_QUARANTINE_AGE_SECONDS",
+                30 * 60,
+                5 * 60,
+                24 * 60 * 60,
+            ),
+            settlement_provider_quarantine_attempts=_env_int(
+                "VIDEO_JOB_GATEWAY_SETTLEMENT_PROVIDER_QUARANTINE_ATTEMPTS",
+                3,
+                1,
+                100,
+            ),
         )
 
 
@@ -367,7 +381,19 @@ class Gateway:
                 frozenset(billing_ready),
             )
         )
-        return self.configured_providers & billing_ready & approved
+        settlement_unhealthy = self.store.unhealthy_settlement_providers(
+            min_age_seconds=getattr(
+                self.config,
+                "settlement_provider_quarantine_age_seconds",
+                30 * 60,
+            ),
+            min_attempts=getattr(
+                self.config,
+                "settlement_provider_quarantine_attempts",
+                3,
+            ),
+        )
+        return (self.configured_providers & billing_ready & approved) - settlement_unhealthy
 
     def circuit_snapshot(self) -> dict[str, Any]:
         snapshot = self.store.uncertainty_snapshot(self.config.uncertainty_window_seconds)
@@ -407,6 +433,18 @@ class Gateway:
 
     def provider_health(self) -> dict[str, Any]:
         unhealthy = self.store.unhealthy_providers()
+        settlement_unhealthy = self.store.unhealthy_settlement_providers(
+            min_age_seconds=getattr(
+                self.config,
+                "settlement_provider_quarantine_age_seconds",
+                30 * 60,
+            ),
+            min_attempts=getattr(
+                self.config,
+                "settlement_provider_quarantine_attempts",
+                3,
+            ),
+        )
         rows = []
         for provider_id, adapter in sorted(self.adapters.items()):
             generation_ready = bool(adapter.ready_for_new_jobs)
@@ -419,13 +457,21 @@ class Gateway:
                     frozenset(self.billing_collectors),
                 )
             )
-            eligible = generation_ready and billing_ready and approved and provider_id not in unhealthy
+            eligible = (
+                generation_ready
+                and billing_ready
+                and approved
+                and provider_id not in unhealthy
+                and provider_id not in settlement_unhealthy
+            )
             if not generation_ready:
                 exclusion_reason = "generation_not_ready"
             elif not billing_ready:
                 exclusion_reason = "billing_not_ready"
             elif not approved:
                 exclusion_reason = "billing_not_approved"
+            elif provider_id in settlement_unhealthy:
+                exclusion_reason = "billing_settlement_backlog"
             elif provider_id in unhealthy:
                 exclusion_reason = "provider_temporarily_unhealthy"
             else:
@@ -441,6 +487,7 @@ class Gateway:
                     "eligible_for_new_v21_jobs": eligible,
                     "exclusion_reason": exclusion_reason,
                     "recent_definite_failure_threshold_reached": provider_id in unhealthy,
+                    "settlement_backlog_threshold_reached": provider_id in settlement_unhealthy,
                 }
             )
         return {

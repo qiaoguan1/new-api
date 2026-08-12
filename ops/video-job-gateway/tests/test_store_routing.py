@@ -3,6 +3,7 @@ import pathlib
 import sqlite3
 import sys
 import tempfile
+import time
 import unittest
 
 
@@ -146,6 +147,55 @@ class StoreRoutingTests(unittest.TestCase):
                 )
 
             self.assertEqual(store.unhealthy_providers(), {"toonflow"})
+
+    def test_aged_settlement_backlog_excludes_only_affected_provider(self):
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as directory:
+            store = Store(pathlib.Path(directory))
+            current = int(time.time())
+            with store.connect() as connection:
+                for provider, age, attempts, billing_status in (
+                    ("paisio", 3600, 5, "settlement_pending"),
+                    ("toonflow", 60, 5, "settlement_pending"),
+                    ("rolldek", 3600, 5, "settled"),
+                    ("lowattempts", 3600, 2, "settlement_pending"),
+                ):
+                    connection.execute(
+                        """
+                        insert into video_jobs (
+                            job_id,request_id,fingerprint,protocol_version,catalog_revision,
+                            stable_model,provider_id,upstream_model,adapter_revision,status,
+                            payload_json,created_at,updated_at,finished_at,billing_status,
+                            settlement_query_attempts,settlement_query_last_error
+                        ) values (?,?,?,?,?,?,?,?,?,'succeeded','{}',?,?,?,?,?,?)
+                        """,
+                        (
+                            f"vjob_{provider:0<32}"[:38],
+                            f"request-{provider}",
+                            f"fingerprint-{provider}",
+                            "xtai-video-billing-v2.1",
+                            "test",
+                            "seedance-2.0",
+                            provider,
+                            "upstream-model",
+                            f"{provider}-v1",
+                            current - age,
+                            current,
+                            current - age,
+                            billing_status,
+                            attempts,
+                            "provider_billing_record_not_ready",
+                        ),
+                    )
+                connection.commit()
+
+            self.assertEqual(
+                store.unhealthy_settlement_providers(
+                    min_age_seconds=1800,
+                    min_attempts=3,
+                    now=current,
+                ),
+                {"paisio"},
+            )
 
 
 if __name__ == "__main__":
