@@ -1,0 +1,37 @@
+[Unit]
+Description=XingTu Relay Patrol and Bounded Repair
+After=network-online.target docker.service
+Wants=network-online.target docker.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/ai-api-stack
+EnvironmentFile=/opt/ai-api-stack/channel-monitor/balance-alert.env
+ExecStart=/usr/bin/flock -n /run/lock/channel-monitor-patrol-repair.lock /usr/bin/python3 /opt/ai-api-stack/channel-monitor/scripts/patrol-repair.py --api-status /var/lib/channel-monitor-patrol/status.json
+ExecStopPost=/usr/bin/rm -f /run/channel-monitor-patrol-trigger/run.request
+SuccessExitStatus=2
+TimeoutStartSec=30min
+UMask=0027
+
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+LockPersonality=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+SystemCallArchitectures=native
+CapabilityBoundingSet=CAP_CHOWN CAP_DAC_OVERRIDE CAP_FOWNER
+AmbientCapabilities=
+ReadWritePaths=/opt/ai-api-stack/channel-monitor/data
+ReadWritePaths=/opt/ai-api-stack/backups/daily-newapi
+ReadWritePaths=/var/lib/channel-monitor-patrol
+ReadWritePaths=/run/channel-monitor-patrol-trigger

@@ -74,19 +74,27 @@ class IncidentEvent:
 def write_private_json(path: pathlib.Path, value: Any) -> None:
     """Atomically write private state/report JSON with mode 0600."""
 
+    write_json_mode(path, value, 0o600)
+
+
+def write_json_mode(path: pathlib.Path, value: Any, mode: int) -> None:
+    """Atomically write JSON using one explicitly approved filesystem mode."""
+
+    if mode not in {0o600, 0o640}:
+        raise PatrolError("json_mode_not_allowed")
     destination = pathlib.Path(path)
     destination.parent.mkdir(parents=True, exist_ok=True)
     temporary = destination.with_name(destination.name + ".tmp")
     payload = json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
     try:
-        descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, mode)
         with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
             handle.write(payload)
             handle.flush()
             os.fsync(handle.fileno())
-        os.chmod(temporary, 0o600)
+        os.chmod(temporary, mode)
         os.replace(temporary, destination)
-        os.chmod(destination, 0o600)
+        os.chmod(destination, mode)
     finally:
         try:
             temporary.unlink()
@@ -543,3 +551,25 @@ def run_patrol(
     updated["schema_version"] = 1
     updated["last_run_at"] = now
     return report, updated, events
+
+
+def public_status(report: Mapping[str, Any]) -> dict[str, Any]:
+    """Build the API-readable status without evidence, actions, or private errors."""
+
+    incidents = []
+    for row in report.get("checks") or []:
+        if not isinstance(row, dict) or row.get("status") == "healthy":
+            continue
+        incidents.append({
+            "check_id": _safe_identifier(row.get("check_id")),
+            "status": _safe_identifier(row.get("status")),
+            "severity": _safe_identifier(row.get("severity")),
+            "code": _safe_identifier(row.get("code")),
+        })
+    return {
+        "schema_version": 1,
+        "generated_at": int(report.get("generated_at") or 0),
+        "generated_at_iso": str(report.get("generated_at_iso") or "")[:40],
+        "summary": dict(report.get("summary") or {}),
+        "incidents": incidents[:100],
+    }

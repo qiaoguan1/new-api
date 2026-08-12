@@ -1,0 +1,44 @@
+[Unit]
+Description=XingTu Patrol Loopback Control API
+After=network.target channel-monitor-patrol-repair.path
+Wants=channel-monitor-patrol-repair.path
+
+[Service]
+Type=simple
+User=channel-monitor-patrol-api
+Group=channel-monitor-patrol-api
+WorkingDirectory=/opt/ai-api-stack/channel-monitor/scripts
+LoadCredential=api_token:/etc/channel-monitor-patrol-api.token
+ExecStart=/usr/bin/python3 /opt/ai-api-stack/channel-monitor/scripts/patrol-repair-api.py --host 127.0.0.1 --port 8793 --token-file %d/api_token --status /var/lib/channel-monitor-patrol/status.json --trigger /run/channel-monitor-patrol-trigger/run.request
+Restart=on-failure
+RestartSec=5s
+UMask=0077
+
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+ProtectProc=invisible
+ProcSubset=pid
+LockPersonality=true
+MemoryDenyWriteExecute=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+RestrictAddressFamilies=AF_INET
+IPAddressDeny=any
+IPAddressAllow=localhost
+SystemCallArchitectures=native
+CapabilityBoundingSet=
+AmbientCapabilities=
+ReadOnlyPaths=/var/lib/channel-monitor-patrol
+ReadWritePaths=/run/channel-monitor-patrol-trigger
+
+[Install]
+WantedBy=multi-user.target

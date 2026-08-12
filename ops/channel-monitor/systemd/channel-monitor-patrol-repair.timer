@@ -1,0 +1,11 @@
+[Unit]
+Description=Run the XingTu relay patrol every Beijing morning
+
+[Timer]
+OnCalendar=*-*-* 09:15:00 Asia/Shanghai
+Persistent=true
+RandomizedDelaySec=3m
+Unit=channel-monitor-patrol-repair.service
+
+[Install]
+WantedBy=timers.target
