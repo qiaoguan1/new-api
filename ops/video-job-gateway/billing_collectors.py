@@ -165,6 +165,11 @@ class NewAPITaskBillingCollector:
     ) -> None:
         self.provider_id = str(provider_id or "").strip().lower()
         self.endpoint = str(endpoint or "").strip()
+        self.ledger_endpoint = (
+            self.endpoint[: -len("/api/task/self")] + "/api/log/self"
+            if self.endpoint.endswith("/api/task/self")
+            else ""
+        )
         self.credential_file = (
             Path(os.path.abspath(os.fspath(credential_file))) if credential_file else None
         )
@@ -206,8 +211,35 @@ class NewAPITaskBillingCollector:
             raise BillingCollectionError("provider_billing_task_id_invalid", retry_after_seconds=900)
         headers = {"Accept": "application/json", "User-Agent": "XingTuVideoBillingCollector/1"}
         headers.update(self._auth_headers())
-        query = urllib.parse.urlencode({"p": 1, "page_size": 10, "task_id": task_id})
-        request = urllib.request.Request(f"{self.endpoint}?{query}", method="GET", headers=headers)
+        raw = self._request_json(
+            self.endpoint,
+            {"p": 1, "page_size": 10, "task_id": task_id},
+            headers,
+        )
+        if self.provider_id == "paisio":
+            # Do not touch the billing ledger until the authoritative task row
+            # proves this gateway-success job is uniquely terminal and successful.
+            self._terminal_task_row(raw, task_id, require_exact_filter=True)
+            if not self.ledger_endpoint:
+                raise BillingCollectionError(
+                    "provider_billing_collector_not_configured", retry_after_seconds=3600
+                )
+            ledger = self._request_json(
+                self.ledger_endpoint,
+                {"p": 1, "page_size": 100, "request_id": task_id},
+                headers,
+            )
+            return self._parse_paisio_record(raw, ledger, task_id)
+        return self._parse_newapi_record(raw, task_id)
+
+    def _request_json(
+        self,
+        endpoint: str,
+        query_values: dict[str, Any],
+        headers: dict[str, str],
+    ) -> Any:
+        query = urllib.parse.urlencode(query_values)
+        request = urllib.request.Request(f"{endpoint}?{query}", method="GET", headers=headers)
         try:
             with self._opener.open(request, timeout=self.timeout_seconds) as response:
                 status = int(getattr(response, "status", 0) or 0)
@@ -227,9 +259,15 @@ class NewAPITaskBillingCollector:
             raise BillingCollectionError("provider_billing_unavailable", retry_after_seconds=60) from error
         except (UnicodeDecodeError, json.JSONDecodeError) as error:
             raise BillingCollectionError("provider_billing_response_invalid", retry_after_seconds=900) from error
-        return self._parse_newapi_record(raw, task_id)
+        return raw
 
-    def _parse_newapi_record(self, raw: Any, provider_task_id: str) -> BillingRecord:
+    def _terminal_task_row(
+        self,
+        raw: Any,
+        provider_task_id: str,
+        *,
+        require_exact_filter: bool = False,
+    ) -> dict[str, Any]:
         if not isinstance(raw, dict) or raw.get("success") is not True:
             raise BillingCollectionError("provider_billing_response_rejected", retry_after_seconds=300)
         data = raw.get("data") if isinstance(raw.get("data"), dict) else {}
@@ -245,20 +283,124 @@ class NewAPITaskBillingCollector:
             raise BillingCollectionError("provider_billing_record_not_ready", retry_after_seconds=60)
         if len(matches) != 1:
             raise BillingCollectionError("provider_billing_record_ambiguous", retry_after_seconds=900)
+        if require_exact_filter:
+            try:
+                total = int(data.get("total"))
+            except (TypeError, ValueError) as error:
+                raise BillingCollectionError(
+                    "provider_billing_ledger_incomplete", retry_after_seconds=900
+                ) from error
+            if isinstance(data.get("total"), bool) or total != 1 or len(items) != 1:
+                raise BillingCollectionError(
+                    "provider_billing_ledger_incomplete", retry_after_seconds=900
+                )
         row = matches[0]
         state = str(row.get("status") or "").strip().upper()
-        if state in {"SUCCESS", "SUCCEEDED", "COMPLETED"}:
-            quota = _nonnegative_decimal(row.get("quota"), "provider_billing_amount_invalid")
-            amount_value = (quota / self.quota_per_usd * self.rate_cny_per_usd).quantize(
-                MONEY_QUANTUM, rounding=ROUND_CEILING
-            )
-            if amount_value > MONEY_LIMIT:
-                raise BillingCollectionError("provider_billing_amount_invalid", retry_after_seconds=900)
-            amount = format(amount_value, "f")
-        elif state in {"FAILURE", "FAILED", "ERROR", "CANCELLED", "CANCELED"}:
+        if state in {"FAILURE", "FAILED", "ERROR", "CANCELLED", "CANCELED"}:
             raise BillingCollectionError("provider_billing_record_state_mismatch", retry_after_seconds=900)
-        else:
+        if state not in {"SUCCESS", "SUCCEEDED", "COMPLETED"}:
             raise BillingCollectionError("provider_billing_record_not_final", retry_after_seconds=60)
+        return row
+
+    def _parse_paisio_record(
+        self,
+        task_raw: Any,
+        ledger_raw: Any,
+        provider_task_id: str,
+    ) -> BillingRecord:
+        """Use Paisio's request ledger; task `quota` is a count, never money."""
+        task = self._terminal_task_row(task_raw, provider_task_id, require_exact_filter=True)
+        if not isinstance(ledger_raw, dict) or ledger_raw.get("success") is not True:
+            raise BillingCollectionError("provider_billing_response_rejected", retry_after_seconds=300)
+        data = ledger_raw.get("data") if isinstance(ledger_raw.get("data"), dict) else {}
+        items = data.get("items") if isinstance(data.get("items"), list) else None
+        if items is None:
+            raise BillingCollectionError("provider_billing_response_invalid", retry_after_seconds=900)
+        try:
+            total = int(data.get("total"))
+        except (TypeError, ValueError) as error:
+            raise BillingCollectionError("provider_billing_ledger_incomplete", retry_after_seconds=900) from error
+        if total != len(items) or total <= 0 or total > 100:
+            raise BillingCollectionError("provider_billing_ledger_incomplete", retry_after_seconds=900)
+
+        quotas: list[Decimal] = []
+        fingerprints: list[str] = []
+        completed = 0
+        refunded = 0
+        for row in items:
+            try:
+                row_type = int(row.get("type") or 0) if isinstance(row, dict) else 0
+            except (TypeError, ValueError) as error:
+                raise BillingCollectionError(
+                    "provider_billing_response_invalid", retry_after_seconds=900
+                ) from error
+            if (
+                not isinstance(row, dict)
+                or row_type != 2
+                or str(row.get("request_id") or "").strip() != provider_task_id
+            ):
+                raise BillingCollectionError("provider_billing_ledger_incomplete", retry_after_seconds=900)
+            quota = _signed_decimal(row.get("quota"), "provider_billing_amount_invalid")
+            try:
+                other = json.loads(row.get("other") or "{}")
+            except (TypeError, json.JSONDecodeError) as error:
+                raise BillingCollectionError("provider_billing_response_invalid", retry_after_seconds=900) from error
+            if not isinstance(other, dict):
+                raise BillingCollectionError("provider_billing_response_invalid", retry_after_seconds=900)
+            billing_type = str(other.get("billing_type") or "").strip()
+            if billing_type in {"per_sec", "per_call"}:
+                if quota <= 0:
+                    raise BillingCollectionError("provider_billing_amount_invalid", retry_after_seconds=900)
+            elif billing_type == "completed":
+                if quota != 0:
+                    raise BillingCollectionError("provider_billing_amount_invalid", retry_after_seconds=900)
+                completed += 1
+            elif billing_type == "generation_failed_refund":
+                if quota >= 0:
+                    raise BillingCollectionError("provider_billing_amount_invalid", retry_after_seconds=900)
+                refunded += 1
+            else:
+                raise BillingCollectionError("provider_billing_response_invalid", retry_after_seconds=900)
+            quotas.append(quota)
+            fingerprints.append(f"{row.get('id')}:{billing_type}:{quota}")
+
+        if refunded:
+            raise BillingCollectionError("provider_billing_record_state_mismatch", retry_after_seconds=900)
+        if completed != 1:
+            raise BillingCollectionError("provider_billing_record_not_final", retry_after_seconds=60)
+        net_quota = sum(quotas, Decimal("0"))
+        if net_quota < 0:
+            raise BillingCollectionError("provider_billing_amount_invalid", retry_after_seconds=900)
+        amount_value = (net_quota / self.quota_per_usd * self.rate_cny_per_usd).quantize(
+            MONEY_QUANTUM, rounding=ROUND_CEILING
+        )
+        if amount_value > MONEY_LIMIT:
+            raise BillingCollectionError("provider_billing_amount_invalid", retry_after_seconds=900)
+        amount = format(amount_value, "f")
+        observed_at = _observed_at(task.get("finish_time") or task.get("updated_at"))
+        digest = hashlib.sha256(
+            "\0".join(
+                (self.provider_id, provider_task_id, amount, observed_at, *sorted(fingerprints))
+            ).encode("utf-8")
+        ).hexdigest()
+        return BillingRecord(
+            provider_task_id=provider_task_id,
+            actual_cost_status="zero_verified" if amount_value == 0 else "actual",
+            actual_cost_cny_exact=amount,
+            evidence_source="paisio_authenticated_request_ledger",
+            evidence_id=f"paisio-request-ledger:{digest}",
+            observed_at=observed_at,
+        )
+
+    def _parse_newapi_record(self, raw: Any, provider_task_id: str) -> BillingRecord:
+        row = self._terminal_task_row(raw, provider_task_id)
+        quota = _nonnegative_decimal(row.get("quota"), "provider_billing_amount_invalid")
+        amount_value = (quota / self.quota_per_usd * self.rate_cny_per_usd).quantize(
+            MONEY_QUANTUM, rounding=ROUND_CEILING
+        )
+        if amount_value > MONEY_LIMIT:
+            raise BillingCollectionError("provider_billing_amount_invalid", retry_after_seconds=900)
+        amount = format(amount_value, "f")
         observed_at = _observed_at(row.get("finish_time") or row.get("updated_at"))
         digest = hashlib.sha256(
             "\0".join((self.provider_id, provider_task_id, amount, observed_at)).encode("utf-8")
@@ -345,6 +487,16 @@ def _nonnegative_decimal(raw: Any, code: str) -> Decimal:
     except (InvalidOperation, TypeError, ValueError) as error:
         raise BillingCollectionError(code, retry_after_seconds=900) from error
     if not value.is_finite() or value < 0 or value > Decimal("1000000000000000"):
+        raise BillingCollectionError(code, retry_after_seconds=900)
+    return value
+
+
+def _signed_decimal(raw: Any, code: str) -> Decimal:
+    try:
+        value = Decimal(str(raw))
+    except (InvalidOperation, TypeError, ValueError) as error:
+        raise BillingCollectionError(code, retry_after_seconds=900) from error
+    if not value.is_finite() or abs(value) > Decimal("1000000000000000"):
         raise BillingCollectionError(code, retry_after_seconds=900)
     return value
 

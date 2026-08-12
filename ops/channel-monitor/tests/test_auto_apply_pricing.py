@@ -299,6 +299,40 @@ class PricingPlanTests(unittest.TestCase):
             ["bad"],
         )
 
+    def test_main_continues_to_model_plan_when_an_unrelated_credential_is_incomplete(self):
+        daily_ledger = ledger(
+            good=source(model=text_cost(1.0, 2.0)),
+            bad={"collection_status": "incomplete", "actual_log_complete": False},
+        )
+        daily_audit = audit(channel(1, "good", ["model"]))
+        paths = {
+            pricing.LEDGER_PATH: daily_ledger,
+            pricing.AUDIT_PATH: daily_audit,
+            pricing.VIDEO_POLICY_PATH: {},
+            pricing.CREDENTIALS_PATH: {"good": {}, "bad": {}},
+        }
+        options = self.current_options()
+        plan = {
+            "date": DAY,
+            "group_ratio": 0.15,
+            "markup": 1.5,
+            "decisions": [{"model": "model", "action": "apply", "reason": "ok"}],
+            "options": {key: options[key] for key in pricing.OPTION_KEYS},
+        }
+
+        with (
+            mock.patch.object(pricing, "target_beijing_day", return_value=DAY),
+            mock.patch.object(pricing, "read_json", side_effect=lambda path, *a, **k: paths[path]),
+            mock.patch.object(pricing, "get_option", side_effect=lambda key: options[key]),
+            mock.patch.object(pricing, "protected_video_models", return_value=set()),
+            mock.patch.object(pricing, "build_pricing_plan", return_value=plan) as build,
+            mock.patch.object(pricing, "append_run_log"),
+        ):
+            code = pricing.main(["--dry-run"])
+
+        self.assertEqual(code, 0)
+        build.assert_called_once()
+
     def test_stale_audit_and_group_ratio_mismatch_fail_closed(self):
         stale = audit(channel(1, "healthy", ["model"]))
         stale["date"] = "2026-07-21"

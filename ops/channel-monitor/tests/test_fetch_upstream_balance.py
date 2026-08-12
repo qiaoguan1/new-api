@@ -306,7 +306,7 @@ class UsageV1AggregationTests(unittest.TestCase):
                 "2026-08-09",
             )
 
-    def test_newapi_task_api_preserves_video_task_evidence(self):
+    def test_newapi_task_api_joins_exact_request_ledger_evidence(self):
         response = mock.Mock(status_code=200)
         response.json.return_value = {
             "success": True,
@@ -316,7 +316,7 @@ class UsageV1AggregationTests(unittest.TestCase):
                         "task_id": "paisio-task",
                         "action": "videoGenerate",
                         "status": "SUCCESS",
-                        "quota": 500000,
+                        "quota": 1,
                         "created_at": 1786291199,
                     }
                 ],
@@ -327,7 +327,19 @@ class UsageV1AggregationTests(unittest.TestCase):
         session.get.return_value = response
 
         rows = collector.standard_video_tasks(
-            session, "https://example.test", "2026-08-09", "paisio", 1.0
+            session,
+            "https://example.test",
+            "2026-08-09",
+            "paisio",
+            1.0,
+            request_ledgers={
+                "paisio-task": {
+                    "actual_cost_cny": 1.0,
+                    "completed": 1,
+                    "refunded": 0,
+                    "valid": True,
+                }
+            },
         )
 
         self.assertEqual(len(rows), 1)
@@ -553,6 +565,26 @@ class UsageV1AggregationTests(unittest.TestCase):
         self.assertEqual(cost["successful_calls"], 2)
         self.assertEqual(cost["net_cost_cny"], 5.0)
         self.assertEqual(cost["cost_cny_per_call"], 2.5)
+
+    def test_request_ledgers_are_grouped_by_exact_task_id(self):
+        details = {
+            "sd2-720p": {
+                "pricing_samples": [
+                    {"request_id": "task-success", "billing_type": "per_sec", "quota": 725000},
+                    {"request_id": "task-success", "billing_type": "completed", "quota": 0},
+                    {"request_id": "task-failed", "billing_type": "per_sec", "quota": 725000},
+                    {"request_id": "task-failed", "billing_type": "generation_failed_refund", "quota": -725000},
+                ]
+            }
+        }
+
+        ledgers = collector.newapi_request_ledgers(details, rate=1)
+
+        self.assertEqual(ledgers["task-success"]["actual_cost_cny"], 1.45)
+        self.assertEqual(ledgers["task-success"]["completed"], 1)
+        self.assertEqual(ledgers["task-success"]["refunded"], 0)
+        self.assertEqual(ledgers["task-failed"]["actual_cost_cny"], 0)
+        self.assertEqual(ledgers["task-failed"]["refunded"], 1)
 
 
 if __name__ == "__main__":
