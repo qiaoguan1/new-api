@@ -25,6 +25,10 @@ var upstreamBalanceAlertTitles = map[string]string{
 	"balance_recovered":            "上游账户余额已恢复",
 	"balance_collection_failed":    "上游余额监控连续采集失败",
 	"balance_collection_recovered": "上游余额监控已恢复",
+	"credential_expiring":          "视频上游账单授权即将到期",
+	"credential_expired":           "视频上游账单授权已到期",
+	"credential_refresh_failed":    "视频上游账单授权刷新失败",
+	"credential_refresh_recovered": "视频上游账单授权刷新已恢复",
 	"test":                         "上游余额监控测试邮件",
 }
 
@@ -70,6 +74,13 @@ func upstreamBalanceAlertContent(request upstreamBalanceAlertRequest) (string, s
 	}
 	timestamp := time.Unix(request.OccurredAt, 0).In(location).Format(time.RFC3339)
 	subject := fmt.Sprintf("[星途监控] %s：%s", title, plainName)
+	if strings.HasPrefix(request.Kind, "credential_") {
+		content := fmt.Sprintf(
+			"<p>%s</p><p>视频上游：%s<br>告警阈值（天）：%.0f<br>北京时间：%s</p><p>账单授权只影响新任务资格；历史任务查询、结算重试和 Webhook 继续运行。本邮件不包含账号、密码、Token 或接口地址。</p>",
+			html.EscapeString(title), name, request.Threshold, html.EscapeString(timestamp),
+		)
+		return subject, content
+	}
 	content := fmt.Sprintf(
 		"<p>%s</p><p>上游渠道：%s<br>账户余额：%s（上游原始计费单位）<br>告警阈值：%.6f<br>北京时间：%s</p><p>本邮件不包含登录账号、密码、Token 或渠道接口地址。</p>",
 		html.EscapeString(title), name, balance, request.Threshold, html.EscapeString(timestamp),

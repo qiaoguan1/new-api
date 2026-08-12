@@ -35,7 +35,55 @@ class FakeAdapter:
         return self.outcome
 
 
+class FakeBillingCollector:
+    def __init__(self, ready=True):
+        self.ready = ready
+
+
 class GatewayFallbackTests(unittest.TestCase):
+    def test_v21_eligibility_requires_generation_billing_and_health(self):
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as directory:
+            gateway = Gateway.__new__(Gateway)
+            gateway.store = Store(pathlib.Path(directory))
+            gateway.adapters = {
+                "toonflow": FakeAdapter("toonflow", Observation(status="running")),
+                "paisio": FakeAdapter("paisio", Observation(status="running")),
+                "rolldek": FakeAdapter("rolldek", Observation(status="running")),
+            }
+            gateway.billing_collectors = {
+                "toonflow": FakeBillingCollector(True),
+                "paisio": FakeBillingCollector(True),
+            }
+            gateway.config = types.SimpleNamespace(v21_approved_providers=frozenset({"toonflow"}))
+
+            self.assertEqual(gateway.configured_providers, {"paisio", "rolldek", "toonflow"})
+            self.assertEqual(gateway.eligible_v2_providers, {"toonflow"})
+
+            with mock.patch.object(gateway.store, "unhealthy_providers", return_value={"toonflow"}):
+                self.assertEqual(gateway.eligible_v2_providers, set())
+
+    def test_provider_health_reports_safe_billing_exclusion_without_secrets(self):
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as directory:
+            gateway = Gateway.__new__(Gateway)
+            gateway.store = Store(pathlib.Path(directory))
+            gateway.adapters = {
+                "toonflow": FakeAdapter("toonflow", Observation(status="running")),
+                "paisio": FakeAdapter("paisio", Observation(status="running")),
+            }
+            gateway.billing_collectors = {
+                "toonflow": FakeBillingCollector(True),
+                "paisio": FakeBillingCollector(True),
+            }
+            gateway.config = types.SimpleNamespace(v21_approved_providers=frozenset({"toonflow"}))
+
+            rows = {row["provider_id"]: row for row in gateway.provider_health()["providers"]}
+
+            self.assertTrue(rows["toonflow"]["eligible_for_new_v21_jobs"])
+            self.assertEqual(rows["toonflow"]["exclusion_reason"], "")
+            self.assertFalse(rows["paisio"]["eligible_for_new_v21_jobs"])
+            self.assertTrue(rows["paisio"]["billing_ready"])
+            self.assertEqual(rows["paisio"]["exclusion_reason"], "billing_not_approved")
+            self.assertNotIn("token", str(rows).lower())
     def test_toonflow_result_allowlist_accepts_tos_subdomain_only(self):
         allowed = ("api.toonflow.net", "tos-cn-beijing.volces.com")
         with mock.patch("app.socket.getaddrinfo", return_value=[(2, 1, 6, "", ("8.8.8.8", 443))]):
@@ -108,6 +156,30 @@ class GatewayFallbackTests(unittest.TestCase):
             self.assertEqual(job["provider_id"], "paisio")
             self.assertEqual(second.calls, 0)
 
+    def test_v21_rechecks_billing_readiness_immediately_before_submit(self):
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as directory:
+            store = Store(pathlib.Path(directory))
+            job_id = self.make_job(store)
+            with store.connect() as connection:
+                connection.execute(
+                    "update video_jobs set payload_json=? where job_id=?",
+                    ('{"_billing_v2":true,"_route":{"resolution":"720p"}}', job_id),
+                )
+            first = FakeAdapter("paisio", Observation(status="running", upstream_task_id="must-not-exist"))
+            second = FakeAdapter("toonflow", Observation(status="running", upstream_task_id="toonflow-1"))
+            gateway = self.gateway(store, second, first)
+            gateway.billing_collectors = {
+                "paisio": FakeBillingCollector(False),
+                "toonflow": FakeBillingCollector(True),
+            }
+
+            gateway._submit_with_fallback(job_id)
+
+            job = store.get(job_id=job_id, internal=True)
+            self.assertEqual(first.calls, 0)
+            self.assertEqual(second.calls, 1)
+            self.assertEqual(job["provider_id"], "toonflow")
+
     def test_failed_observation_with_task_id_never_crosses_provider(self):
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as directory:
             store = Store(pathlib.Path(directory))
@@ -140,6 +212,10 @@ class GatewayFallbackTests(unittest.TestCase):
             gateway.adapters = {
                 "toonflow": FakeAdapter("toonflow", Observation(status="running")),
                 "paisio": FakeAdapter("paisio", Observation(status="running")),
+            }
+            gateway.billing_collectors = {
+                "toonflow": FakeBillingCollector(True),
+                "paisio": FakeBillingCollector(True),
             }
             gateway.config = types.SimpleNamespace(
                 data_dir=pathlib.Path(directory),
@@ -303,6 +379,10 @@ class GatewayFallbackTests(unittest.TestCase):
             gateway.adapters = {
                 "toonflow": FakeAdapter("toonflow", Observation(status="running")),
                 "paisio": FakeAdapter("paisio", Observation(status="running")),
+            }
+            gateway.billing_collectors = {
+                "toonflow": FakeBillingCollector(True),
+                "paisio": FakeBillingCollector(True),
             }
             gateway.config = types.SimpleNamespace(
                 data_dir=pathlib.Path(directory),

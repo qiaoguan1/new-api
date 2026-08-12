@@ -409,8 +409,8 @@ class ToonflowAdapter(VideoAdapter):
             "duration": int(payload.get("duration") or 0),
             "metadata": {
                 "ratio": str(payload.get("aspect_ratio") or "16:9"),
-                # XingTu requires an explicit switch. Preserve true for active
-                # audio generation and false for a deliberately silent request.
+                # Preserve the relay's existing default for callers that omit the switch.
+                # XingTu Cloud explicitly sends false and strips any unexpected audio on delivery.
                 "generate_audio": payload.get("generate_audio") is not False,
                 "watermark": False,
                 "seed": -1,
@@ -431,7 +431,8 @@ class RollDekAdapter(VideoAdapter):
         generate_audio = payload.get("generate_audio")
         if upstream_model.startswith("seedance-"):
             _rolldek_seedance_assets(body, images, videos)
-            # Always preserve the explicit XingTu audio choice.
+            # RollDek defaults Seedance audio generation to true.  The XingTu
+            # protocol defaults it to false, so always make that choice explicit.
             body["generate_audio"] = bool(generate_audio)
         elif upstream_model.startswith("kling-"):
             _rolldek_kling_assets(body, images, videos)

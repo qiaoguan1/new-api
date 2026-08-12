@@ -3,6 +3,11 @@
 from __future__ import annotations
 
 import json
+import threading
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
 from decimal import Decimal, InvalidOperation, ROUND_CEILING
 from pathlib import Path
 from typing import Any, Iterable
@@ -35,9 +40,40 @@ class RelayPricing:
     def __init__(
         self,
         fallback_file: Path,
+        *,
+        pricing_url: str = "",
+        group_name: str = "视频",
+        timeout_seconds: int = 5,
+        cache_seconds: int = 30,
     ) -> None:
         self.fallback_file = Path(fallback_file).resolve()
+        self.pricing_url = self._validated_url(pricing_url)
+        self.group_name = str(group_name or "视频").strip()[:40] or "视频"
+        self.timeout_seconds = max(1, min(int(timeout_seconds), 20))
+        self.cache_seconds = max(5, min(int(cache_seconds), 300))
         self.fallback = self._load_fallback()
+        self.lock = threading.Lock()
+        self.dynamic_expires_at = 0.0
+        self.dynamic_revision = ""
+        self.dynamic_rates: dict[str, Decimal] = {}
+
+    @staticmethod
+    def _validated_url(value: str) -> str:
+        normalized = str(value or "").strip()
+        if not normalized:
+            return ""
+        parsed = urllib.parse.urlsplit(normalized)
+        hostname = (parsed.hostname or "").lower()
+        internal_http = parsed.scheme == "http" and hostname in {"new-api", "localhost", "127.0.0.1"}
+        if (
+            (parsed.scheme != "https" and not internal_http)
+            or not parsed.netloc
+            or parsed.username
+            or parsed.password
+            or parsed.fragment
+        ):
+            raise RelayPricingError("relay pricing URL must be HTTPS or the private new-api service")
+        return normalized
 
     def _load_fallback(self) -> dict[str, Any]:
         try:
@@ -87,20 +123,98 @@ class RelayPricing:
             raise RelayPricingError(f"{label} is invalid")
         return number
 
+    def _fetch_dynamic(self) -> tuple[str, dict[str, Decimal]]:
+        if not self.pricing_url:
+            return "", {}
+        request = urllib.request.Request(
+            self.pricing_url,
+            headers={"Accept": "application/json", "User-Agent": "XingTuVideoJobGateway/1"},
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=self.timeout_seconds) as response:
+                payload = json.loads(response.read() or b"{}")
+        except (OSError, urllib.error.URLError, json.JSONDecodeError):
+            return "", {}
+        if not isinstance(payload, dict) or payload.get("success") is False:
+            return "", {}
+        group_ratios = payload.get("group_ratio") if isinstance(payload.get("group_ratio"), dict) else {}
+        try:
+            group_ratio = self._positive_decimal(group_ratios.get(self.group_name), "relay group ratio")
+        except RelayPricingError:
+            return "", {}
+        rates: dict[str, Decimal] = {}
+        for raw in payload.get("data") or []:
+            if not isinstance(raw, dict):
+                continue
+            name = str(raw.get("model_name") or raw.get("model") or "").strip()
+            try:
+                quota_type = int(raw.get("quota_type"))
+            except (TypeError, ValueError):
+                continue
+            if not name or quota_type != 1:
+                continue
+            try:
+                model_price = self._positive_decimal(raw.get("model_price"), "relay model price")
+            except RelayPricingError:
+                continue
+            rates[name] = model_price * group_ratio
+        return str(payload.get("pricing_version") or "").strip()[:160], rates
+
+    def _dynamic_snapshot(self) -> tuple[str, dict[str, Decimal]]:
+        current = time.monotonic()
+        with self.lock:
+            if self.dynamic_expires_at > current:
+                return self.dynamic_revision, dict(self.dynamic_rates)
+            revision, rates = self._fetch_dynamic()
+            self.dynamic_revision = revision
+            self.dynamic_rates = dict(rates)
+            self.dynamic_expires_at = current + self.cache_seconds
+            return revision, dict(rates)
+
     def rows(self, pairs: Iterable[tuple[str, str]]) -> list[dict[str, Any]]:
+        """Legacy v1 customer pricing; retained unchanged for existing clients."""
+        dynamic_revision, dynamic_rates = self._dynamic_snapshot()
         result: list[dict[str, Any]] = []
         for model, resolution in sorted(set(pairs)):
             row = ((self.fallback.get("models") or {}).get(model) or {}).get(resolution)
             if not isinstance(row, dict):
                 continue
             official = Decimal(str(row["_official"]))
-            rate = official * Decimal("1.5")
+            alias_rates = {
+                dynamic_rates[str(alias).strip()]
+                for alias in row.get("relay_price_aliases") or []
+                if str(alias or "").strip() in dynamic_rates
+            }
+            use_dynamic = len(alias_rates) == 1
+            rate = next(iter(alias_rates)) if use_dynamic else official * Decimal("1.5")
             result.append({
                 "model": model,
                 "resolution": resolution,
                 "currency": "CNY",
                 "billing_unit": "output_second",
-                "cny_per_second_exact": _money_exact(rate),
+                "cny_per_second_exact": format(rate, "f"),
+                "official_cost_cny_per_second_exact": _money_exact(official),
+                "fallback_multiplier_exact": "1.5",
+                "pricing_revision": dynamic_revision if use_dynamic and dynamic_revision else str(self.fallback["revision"]),
+                "price_source": "xingtu_relay_price" if use_dynamic else "official_1_5_fallback",
+                "fallback": not use_dynamic,
+            })
+        return result
+
+    def official_rows(self, pairs: Iterable[tuple[str, str]]) -> list[dict[str, Any]]:
+        """Billing-v2 reservation pricing; never consumes marketplace pricing."""
+        result: list[dict[str, Any]] = []
+        for model, resolution in sorted(set(pairs)):
+            row = ((self.fallback.get("models") or {}).get(model) or {}).get(resolution)
+            if not isinstance(row, dict):
+                continue
+            official = Decimal(str(row["_official"]))
+            result.append({
+                "model": model,
+                "resolution": resolution,
+                "currency": "CNY",
+                "billing_unit": "output_second",
+                "cny_per_second_exact": _money_exact(official * Decimal("1.5")),
                 "official_cost_cny_per_second_exact": _money_exact(official),
                 "fallback_multiplier_exact": "1.5",
                 "pricing_revision": str(self.fallback["revision"]),
@@ -110,12 +224,17 @@ class RelayPricing:
         return result
 
     def snapshot(self, pairs: Iterable[tuple[str, str]]) -> dict[str, Any]:
-        rows = []
-        for private_row in self.rows(pairs):
-            row = dict(private_row)
-            row.pop("official_cost_cny_per_second_exact", None)
-            row.pop("fallback_multiplier_exact", None)
-            rows.append(row)
+        rows = self.rows(pairs)
+        revisions = sorted({str(row.get("pricing_revision") or "") for row in rows})
+        return {
+            "contract_version": PRICE_CONTRACT_VERSION,
+            "currency": "CNY",
+            "revision": "+".join(revisions),
+            "models": rows,
+        }
+
+    def official_snapshot(self, pairs: Iterable[tuple[str, str]]) -> dict[str, Any]:
+        rows = self.official_rows(pairs)
         revisions = sorted({str(row.get("pricing_revision") or "") for row in rows})
         return {
             "contract_version": PRICE_CONTRACT_VERSION,
@@ -130,15 +249,26 @@ class RelayPricing:
             raise RelayPricingError("relay price is unavailable for this model and resolution")
         row = rows[0]
         seconds = max(1, min(int(duration), 3600))
-        source = ((self.fallback.get("models") or {}).get(str(model or "")) or {}).get(
-            str(resolution or "").lower()
-        )
-        if not isinstance(source, dict):
-            raise RelayPricingError("relay official source price is unavailable")
-        official_total = Decimal(str(source["_official"])) * Decimal(seconds)
-        amount = official_total * Decimal("1.5")
+        amount = Decimal(str(row["cny_per_second_exact"])) * Decimal(seconds)
         if not amount.is_finite() or amount <= 0 or amount > MONEY_LIMIT:
             raise RelayPricingError("relay quote amount is invalid")
+        return {
+            **row,
+            "contract_version": PRICE_CONTRACT_VERSION,
+            "output_seconds": seconds,
+            "amount_cny_exact": format(amount, "f"),
+        }
+
+    def official_quote(self, model: str, resolution: str, duration: int) -> dict[str, Any]:
+        rows = self.official_rows([(str(model or ""), str(resolution or "").lower())])
+        if len(rows) != 1:
+            raise RelayPricingError("relay official price is unavailable for this model and resolution")
+        row = rows[0]
+        seconds = max(1, min(int(duration), 3600))
+        official_total = Decimal(str(row["official_cost_cny_per_second_exact"])) * Decimal(seconds)
+        amount = official_total * Decimal("1.5")
+        if not amount.is_finite() or amount <= 0 or amount > MONEY_LIMIT:
+            raise RelayPricingError("relay official quote amount is invalid")
         return {
             **row,
             "contract_version": PRICE_CONTRACT_VERSION,

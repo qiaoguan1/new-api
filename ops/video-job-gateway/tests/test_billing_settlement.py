@@ -11,12 +11,16 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from relay_pricing import RelayPricing
-from store import BILLING_CONTRACT_VERSION, Store, StoreConflict
+from store import BILLING_CONTRACT_LEGACY, BILLING_CONTRACT_VERSION, Store, StoreConflict
 
 
-def priced_payload(amount: str = "5.961600") -> str:
+def priced_payload(
+    amount: str = "5.961600", contract_version: str = BILLING_CONTRACT_VERSION
+) -> str:
     return (
         '{"model":"seedance-2.0","duration":4,'
+        '"_billing_v2":true,'
+        '"_billing_contract_version":"' + contract_version + '",'
         '"_relay_price":{"contract_version":"xtai-video-pricing-v1",'
         '"currency":"CNY","amount_cny_exact":"' + amount + '",'
         '"official_cost_cny_exact":"3.974400",'
@@ -30,12 +34,12 @@ class FixedReservationTests(unittest.TestCase):
     def test_dynamic_marketplace_price_never_overrides_ark_official_times_1_5(self):
         pricing = RelayPricing(ROOT / "relay-pricing.json")
 
-        quote = pricing.quote("seedance-2.0", "720p", 4)
+        quote = pricing.official_quote("seedance-2.0", "720p", 4)
 
         self.assertEqual(quote["amount_cny_exact"], "5.961600")
 
     def test_480p_rounds_once_at_final_amount_boundary(self):
-        quote = RelayPricing(ROOT / "relay-pricing.json").quote(
+        quote = RelayPricing(ROOT / "relay-pricing.json").official_quote(
             "seedance-2.0", "480p", 4
         )
         self.assertEqual(quote["official_cost_cny_exact"], "1.767780")
@@ -52,19 +56,25 @@ class FixedReservationTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "approved Ark revision"):
                 RelayPricing(path)
 
-    def test_public_price_snapshot_exposes_sale_but_not_cost_or_markup(self):
+    def test_private_authenticated_price_snapshot_keeps_v1_evidence_fields(self):
         snapshot = RelayPricing(ROOT / "relay-pricing.json").snapshot(
             [("seedance-2.0", "720p")]
         )
         text = str(snapshot).lower()
         self.assertIn("cny_per_second_exact", text)
-        self.assertNotIn("official_cost", text)
-        self.assertNotIn("multiplier", text)
+        self.assertIn("official_cost_cny_per_second_exact", text)
+        self.assertIn("fallback_multiplier_exact", text)
         self.assertNotIn("markup", text)
 
 
 class StoreSettlementTests(unittest.TestCase):
-    def create_job(self, store: Store, *, request_id: str = "billing-request") -> str:
+    def create_job(
+        self,
+        store: Store,
+        *,
+        request_id: str = "billing-request",
+        contract_version: str = BILLING_CONTRACT_VERSION,
+    ) -> str:
         snapshot, reused = store.create(
             request_id=request_id,
             fingerprint="fingerprint-" + request_id,
@@ -74,7 +84,7 @@ class StoreSettlementTests(unittest.TestCase):
             provider_id="paisio",
             upstream_model="sd2-720p",
             adapter_revision="paisio-v1",
-            payload_json=priced_payload(),
+            payload_json=priced_payload(contract_version=contract_version),
         )
         self.assertFalse(reused)
         self.assertEqual(snapshot["billing"]["status"], "reserved")
@@ -92,9 +102,11 @@ class StoreSettlementTests(unittest.TestCase):
             upstream_status="completed",
         )
 
-    def evidence(self, job_id: str, **overrides):
+    def evidence(
+        self, job_id: str, *, contract_version: str = BILLING_CONTRACT_VERSION, **overrides
+    ):
         value = {
-            "contract_version": BILLING_CONTRACT_VERSION,
+            "contract_version": contract_version,
             "job_id": job_id,
             "revision": 1,
             "provider_task_id": "provider-task-1",
@@ -178,6 +190,26 @@ class StoreSettlementTests(unittest.TestCase):
                 store.apply_settlement(
                     self.evidence(job_id, actual_cost_cny_exact="9.000000")
                 )
+
+    def test_historical_v2_task_settles_only_with_its_persisted_contract(self):
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as directory:
+            store = Store(pathlib.Path(directory))
+            job_id = self.create_job(
+                store,
+                request_id="historical-v2-request",
+                contract_version=BILLING_CONTRACT_LEGACY,
+            )
+            self.finish_success(store, job_id)
+
+            with self.assertRaises(StoreConflict):
+                store.apply_settlement(self.evidence(job_id))
+
+            settled, reused = store.apply_settlement(
+                self.evidence(job_id, contract_version=BILLING_CONTRACT_LEGACY)
+            )
+            self.assertFalse(reused)
+            self.assertEqual(settled["billing"]["contract_version"], BILLING_CONTRACT_LEGACY)
+            self.assertEqual(settled["billing"]["status"], "settled")
             with self.assertRaises(StoreConflict):
                 store.apply_settlement(
                     self.evidence(
@@ -199,28 +231,6 @@ class StoreSettlementTests(unittest.TestCase):
             self.assertEqual(failed["billing"]["charged_amount"], "0.000000")
             self.assertEqual(failed["billing"]["refund_amount"], "5.961600")
             self.assertIsNone(failed["result"])
-
-    def test_legacy_debt_record_is_withheld_as_payment_required(self):
-        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as directory:
-            store = Store(pathlib.Path(directory))
-            job_id = self.create_job(store, request_id="legacy-debt-request")
-            self.finish_success(store, job_id)
-            with store.connect() as connection:
-                connection.execute(
-                    """
-                    update video_jobs
-                    set billing_contract_version = ?, billing_status = ?, charged_cny_exact = ?
-                    where job_id = ?
-                    """,
-                    ("xtai-video-billing-v2", "settled_with_debt", "9.000000", job_id),
-                )
-
-            snapshot = store.get(job_id=job_id)
-
-            self.assertEqual(snapshot["billing"]["contract_version"], "xtai-video-billing-v2")
-            self.assertEqual(snapshot["billing"]["status"], "payment_required")
-            self.assertEqual(snapshot["result_delivery"], "pending_settlement")
-            self.assertIsNone(snapshot["result"])
 
 
 if __name__ == "__main__":

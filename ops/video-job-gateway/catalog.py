@@ -23,6 +23,7 @@ class Route:
     send_resolution: bool = False
     aspect_ratios: tuple[str, ...] = ()
     max_total_assets: int = 0
+    supports_generate_audio: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -124,6 +125,7 @@ class Catalog:
                         send_resolution=bool(route_source.get("send_resolution", False)),
                         aspect_ratios=route_aspect_ratios,
                         max_total_assets=_bounded_int(route_source.get("max_total_assets"), 0, 30),
+                        supports_generate_audio=bool(route_source.get("supports_generate_audio", False)),
                     )
                 )
             routes.sort(key=lambda item: (item.priority, item.provider, item.upstream_model))
@@ -263,15 +265,22 @@ class Catalog:
                     "max_videos": item.max_videos,
                     "max_total_assets": max_total_assets,
                     "resolutions": available_resolutions,
+                    "generate_audio": any(route.supports_generate_audio for route in active_routes),
                 }
             )
+        generate_audio = any(bool(item.get("generate_audio")) for item in rows if item.get("available"))
         return {
             "protocol_version": self.protocol_version,
             "revision": self.revision,
             "capabilities": {
                 "text": {"managed": True, "traffic_enabled": False},
                 "image": {"managed": True, "traffic_enabled": False, "implementation": "image_job_gateway"},
-                "video": {"managed": True, "traffic_enabled": False, "models": rows},
+                "video": {
+                    "managed": True,
+                    "traffic_enabled": False,
+                    "generate_audio": generate_audio,
+                    "models": rows,
+                },
             },
         }
 
