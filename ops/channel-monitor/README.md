@@ -277,6 +277,11 @@ install -o root -g root -m 0644 \
   ops/channel-monitor/tmpfiles.d/channel-monitor-patrol.conf \
   /etc/tmpfiles.d/channel-monitor-patrol.conf
 systemd-tmpfiles --create /etc/tmpfiles.d/channel-monitor-patrol.conf
+install -d -o root -g root -m 0755 /usr/local/lib/channel-monitor-patrol
+install -o root -g root -m 0755 \
+  ops/channel-monitor/scripts/patrol_api.py \
+  ops/channel-monitor/scripts/patrol-repair-api.py \
+  /usr/local/lib/channel-monitor-patrol/
 install -o root -g root -m 0644 ops/channel-monitor/systemd/channel-monitor-patrol-* \
   /etc/systemd/system/
 ```

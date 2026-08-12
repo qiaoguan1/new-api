@@ -13,6 +13,7 @@ class PatrolSystemdTests(unittest.TestCase):
         unit = self.read("channel-monitor-patrol-api.service")
         self.assertIn("User=channel-monitor-patrol-api", unit)
         self.assertIn("LoadCredential=api_token:/etc/channel-monitor-patrol-api.token", unit)
+        self.assertIn("/usr/local/lib/channel-monitor-patrol/patrol-repair-api.py", unit)
         self.assertIn("--host 127.0.0.1", unit)
         self.assertIn("NoNewPrivileges=true", unit)
         self.assertIn("ProtectSystem=strict", unit)

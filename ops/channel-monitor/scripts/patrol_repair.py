@@ -310,18 +310,21 @@ class PatrolChecks:
         artifact_type = item.get("artifact_type")
         day = expected_business_day(datetime.datetime.fromtimestamp(now, BEIJING))
         if artifact_type == "ledger":
-            rows = (document.get("days") or {}).get(day) if isinstance(document, dict) else None
+            days = document.get("days") if isinstance(document, dict) else None
+            eligible = sorted((str(key), value) for key, value in (days or {}).items() if str(key) >= day and isinstance(value, dict))
+            rows = eligible[-1][1] if eligible else None
             healthy = isinstance(rows, dict) and any(isinstance(row, dict) and row.get("collection_status") == "complete" for row in rows.values())
             return self._result(item, "healthy" if healthy else "failed", "ok" if healthy else "ledger_day_missing", {"date": day})
         if artifact_type == "audit":
-            healthy = isinstance(document, dict) and document.get("date") == day
+            healthy = isinstance(document, dict) and str(document.get("date") or "") >= day
             status, code = ("healthy", "ok") if healthy else ("failed", "audit_day_missing")
             if healthy and any(isinstance(row, dict) and row.get("scan_status") != "ok" for row in document.get("channels") or []):
                 status, code = "warning", "audit_channels_failed"
-            return self._result(item, status, code, {"date": day})
+            result = self._result(item, status, code, {"date": day})
+            return dataclasses.replace(result, repair_action=None) if status == "warning" else result
         if artifact_type in {"generic_pricing", "video_pricing"}:
             runs = document.get("runs") if isinstance(document, dict) else None
-            matches = [row for row in runs or [] if isinstance(row, dict) and row.get("date") == day]
+            matches = [row for row in runs or [] if isinstance(row, dict) and str(row.get("date") or "") >= day]
             latest = max(matches, key=lambda row: int(row.get("generated_at") or 0)) if matches else None
             healthy = bool(latest) and not latest.get("error") and latest.get("status", "complete") != "failed"
             return self._result(item, "healthy" if healthy else "failed", "ok" if healthy else "scheduled_run_failed", {"date": day})
