@@ -66,3 +66,28 @@ func TestSendUpstreamOpsDigestRejectsInvalidAndOversizedPayloads(t *testing.T) {
 		})
 	}
 }
+
+func TestUpstreamOpsDigestContentKeepsSMTPBodyLinesBounded(t *testing.T) {
+	name := strings.Repeat("渠", 80)
+	channels := make([]upstreamOpsDigestChannel, 100)
+	for index := range channels {
+		channels[index] = upstreamOpsDigestChannel{
+			Name: name, CollectionStatus: "complete", AuditStatus: "ok",
+			BalanceStatus: "complete", Balance: floatPointer(1.25),
+			DailyCalls: 1, DailyCostCNY: floatPointer(2.5), MonthCalls: 3, MonthCostCNY: 4.75,
+		}
+	}
+	_, content := upstreamOpsDigestContent(upstreamOpsDigestRequest{
+		Date: "2026-08-11", Channels: channels,
+		Pricing: upstreamOpsDigestPricing{Status: "complete"},
+	})
+	for _, line := range strings.Split(content, "\n") {
+		if len([]byte(line)) > 900 {
+			t.Fatalf("SMTP body line is too long: %d bytes", len([]byte(line)))
+		}
+	}
+}
+
+func floatPointer(value float64) *float64 {
+	return &value
+}
