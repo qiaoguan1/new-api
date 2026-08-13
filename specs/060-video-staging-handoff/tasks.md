@@ -6,4 +6,4 @@
 - [x] Upgrade staging to the current v2.1 image with read-only billing credential mounts.
 - [x] Replay one signed, already-delivered staging event and receive HTTP 2xx.
 - [x] Run ten no-cost staging verification rounds.
-- [ ] Complete comprehensive/security review and publish the Issue #60 verification artifact.
+- [x] Complete comprehensive/security review and publish the Issue #60 verification artifact.
