@@ -1118,18 +1118,19 @@ class Gateway:
                         record = collector.collect(str(binding.get("billing_task_id") or ""))
                     else:
                         record = collector.resolve_and_collect(current)
-                        self.store.bind_provider_task(
-                            job_id=job_id,
-                            provider_id=provider_id,
-                            execution_task_id=record.execution_task_id,
-                            billing_task_id=record.provider_task_id,
-                            resolver_version=record.resolver_version,
-                            provider_record_id=record.provider_record_id,
-                            provider_submit_time=record.provider_submit_time,
-                            provider_finish_time=record.provider_finish_time,
-                            media_size_bytes=record.media_size_bytes,
-                            media_sha256=record.media_sha256,
-                        )
+                        if record.execution_task_id != record.provider_task_id:
+                            self.store.bind_provider_task(
+                                job_id=job_id,
+                                provider_id=provider_id,
+                                execution_task_id=record.execution_task_id,
+                                billing_task_id=record.provider_task_id,
+                                resolver_version=record.resolver_version,
+                                provider_record_id=record.provider_record_id,
+                                provider_submit_time=record.provider_submit_time,
+                                provider_finish_time=record.provider_finish_time,
+                                media_size_bytes=record.media_size_bytes,
+                                media_sha256=record.media_sha256,
+                            )
                 else:
                     record = collector.collect(str(current.get("upstream_task_id") or ""))
                 aggregate_cost = self.store.record_success_attempt_cost(job_id, record)

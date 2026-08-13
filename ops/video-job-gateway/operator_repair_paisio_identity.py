@@ -136,7 +136,7 @@ def main(argv: list[str] | None = None) -> int:
             return 0
 
         binding_reused = True
-        if not binding:
+        if not binding and record.execution_task_id != record.provider_task_id:
             binding, binding_reused = store.bind_provider_task(
                 job_id=job_id,
                 provider_id="paisio",

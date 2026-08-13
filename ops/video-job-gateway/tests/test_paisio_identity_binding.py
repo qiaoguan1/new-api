@@ -583,6 +583,42 @@ class ProviderTaskBindingStoreTests(unittest.TestCase):
         self.assertEqual(collector.resolve_calls, 1)
         self.assertEqual(collector.collect_calls, 0)
 
+    def test_gateway_collector_settles_same_execution_and_billing_identity_without_binding(self):
+        job_id = self.succeeded_job("request-same-identity", "task_same_identity")
+        now = int(time.time())
+
+        class Collector:
+            def resolve_and_collect(self, job):
+                return BillingRecord(
+                    provider_task_id="task_same_identity",
+                    actual_cost_status="actual",
+                    actual_cost_cny_exact="1.450000",
+                    evidence_source="paisio_authenticated_request_ledger",
+                    evidence_id="paisio-request-ledger:" + "c" * 64,
+                    observed_at=time.strftime(
+                        "%Y-%m-%dT%H:%M:%S+08:00", time.gmtime(time.time() + 8 * 3600)
+                    ),
+                    execution_task_id="task_same_identity",
+                    resolver_version="paisio-dual-task-id-v1",
+                    provider_record_id="203",
+                    provider_submit_time=now - 100,
+                    provider_finish_time=now - 10,
+                    media_size_bytes=len(MEDIA),
+                    media_sha256=__import__("hashlib").sha256(MEDIA).hexdigest(),
+                )
+
+        gateway = SimpleNamespace(
+            store=self.store,
+            billing_collectors={"paisio": Collector()},
+            settlement_slots=threading.BoundedSemaphore(1),
+            config=SimpleNamespace(settlement_query_interval_seconds=60),
+        )
+        Gateway._collect_settlement_one(
+            gateway, self.store.get(job_id=job_id, internal=True)
+        )
+        self.assertEqual(self.store.get(job_id=job_id, internal=True)["billing_status"], "settled")
+        self.assertIsNone(self.store.get_provider_task_binding(job_id))
+
 
 if __name__ == "__main__":
     unittest.main()
