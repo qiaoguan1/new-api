@@ -82,7 +82,9 @@ restore() {
 }
 trap restore INT TERM HUP
 
-if ! docker run -d --name "$current" --network app-net --restart unless-stopped --user gateway \
+if ! docker run -d --name "$current" --network app-net \
+  --network-alias video-job-gateway-v2-production \
+  --restart unless-stopped --user gateway \
   --env-file "$env_file" \
   -v "$state:/data" \
   -v "$secrets:/run/secrets/video-billing:ro" \
@@ -98,6 +100,11 @@ fi
 rm -f "$state/DRAIN"
 sleep 2
 if ! docker exec "$current" python -c "import json,urllib.request; r=json.loads(urllib.request.urlopen('http://127.0.0.1:8091/ready',timeout=3).read()); assert r['ok'] and r['accepting']; print('ready=ok')"; then
+  restore
+  exit 1
+fi
+if ! docker exec ai-api-stack-nginx-1 getent hosts video-job-gateway-v2-production >/dev/null \
+  || ! docker exec ai-api-stack-nginx-1 nginx -t; then
   restore
   exit 1
 fi

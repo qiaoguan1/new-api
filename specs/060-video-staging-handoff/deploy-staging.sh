@@ -105,7 +105,9 @@ restore() {
 }
 trap 'restore; exit 1' INT TERM HUP
 
-if ! docker run -d --name "$current" --network app-net --restart unless-stopped --user gateway \
+if ! docker run -d --name "$current" --network app-net \
+  --network-alias video-job-gateway-v2-staging \
+  --restart unless-stopped --user gateway \
   --env-file "$env_file" \
   -v "$state:/data" \
   -v "$secrets:/run/secrets/video-billing:ro" \
