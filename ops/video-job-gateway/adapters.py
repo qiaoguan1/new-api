@@ -391,6 +391,7 @@ class ToonflowAdapter(VideoAdapter):
     def request_body(self, upstream_model: str, payload: dict[str, Any]) -> dict[str, Any]:
         images = _assets(payload, "images")
         videos = _assets(payload, "videos")
+        audios = _assets(payload, "audios")
         references: list[dict[str, Any]] = []
         role_map = {
             "first": "first_frame",
@@ -409,6 +410,12 @@ class ToonflowAdapter(VideoAdapter):
                 "type": "video_url",
                 "video_url": {"url": item["url"]},
                 "role": "reference_video",
+            })
+        for item in audios:
+            references.append({
+                "type": "audio_url",
+                "audio_url": {"url": item["url"]},
+                "role": "reference_audio",
             })
         route = payload.get("_route") if isinstance(payload.get("_route"), dict) else {}
         body: dict[str, Any] = {

@@ -36,6 +36,7 @@ from billing_collectors import (
 )
 from catalog import Catalog, CatalogError, Model, Route
 from relay_pricing import PRICE_CONTRACT_VERSION, RelayPricing, RelayPricingError
+from reference_contract import ReferenceContractError, ReferenceMediaVerifier, stable_reference_identity, validate_reference_payload
 from routing import RoutePlanError, build_route_plan
 from store import (
     BILLING_CONTRACT_REFERENCE_VERSION,
@@ -55,6 +56,7 @@ DURABLE_REQUEST_ID_SUBMIT_CONTRACT = "durable-request-id-submit-v1"
 ALLOWED_MODES = {"text", "first_frame", "first_last_frame", "reference", "all_reference"}
 ALLOWED_IMAGE_ROLES = {"reference", "first", "last", "style"}
 ALLOWED_VIDEO_ROLES = {"reference", "camera_motion"}
+ALLOWED_AUDIO_ROLES = {"reference_audio"}
 VIDEO_BILLING_V2_CONTRACT = BILLING_CONTRACT_VERSION
 VIDEO_REFERENCE_V22_CONTRACT = BILLING_CONTRACT_REFERENCE_VERSION
 
@@ -107,6 +109,9 @@ class Config:
     v22_reference_video_enabled: bool = False
     v22_reference_audio_enabled: bool = False
     v22_reference_combined_enabled: bool = False
+    reference_media_hosts: tuple[str, ...] = ()
+    reference_media_timeout_seconds: int = 60
+    reference_verify_concurrency: int = 2
     settlement_query_concurrency: int = 2
     settlement_query_interval_seconds: int = 60
     settlement_provider_quarantine_age_seconds: int = 30 * 60
@@ -211,6 +216,18 @@ class Config:
             if not rate.is_finite() or rate <= 0:
                 raise RuntimeError(f"{prefix}_BILLING_RATE_CNY_PER_USD must be positive")
             newapi_billing_rates[provider_id] = format(rate, "f")
+        reference_media_hosts = _host_list(
+            os.getenv("VIDEO_JOB_GATEWAY_REFERENCE_MEDIA_HOSTS", ""), ""
+        )
+        if any(
+            _env_bool(name, False)
+            for name in (
+                "VIDEO_JOB_GATEWAY_V22_REFERENCE_VIDEO_ENABLED",
+                "VIDEO_JOB_GATEWAY_V22_REFERENCE_AUDIO_ENABLED",
+                "VIDEO_JOB_GATEWAY_V22_REFERENCE_COMBINED_ENABLED",
+            )
+        ) and not reference_media_hosts:
+            raise RuntimeError("enabled v2.2 reference contracts require an explicit media host allowlist")
         return cls(
             token=token,
             data_dir=data_dir,
@@ -260,6 +277,13 @@ class Config:
             v22_reference_video_enabled=_env_bool("VIDEO_JOB_GATEWAY_V22_REFERENCE_VIDEO_ENABLED", False),
             v22_reference_audio_enabled=_env_bool("VIDEO_JOB_GATEWAY_V22_REFERENCE_AUDIO_ENABLED", False),
             v22_reference_combined_enabled=_env_bool("VIDEO_JOB_GATEWAY_V22_REFERENCE_COMBINED_ENABLED", False),
+            reference_media_hosts=reference_media_hosts,
+            reference_media_timeout_seconds=_env_int(
+                "VIDEO_JOB_GATEWAY_REFERENCE_MEDIA_TIMEOUT_SECONDS", 60, 10, 300
+            ),
+            reference_verify_concurrency=_env_int(
+                "VIDEO_JOB_GATEWAY_REFERENCE_VERIFY_CONCURRENCY", 2, 1, 10
+            ),
             settlement_query_concurrency=_env_int("VIDEO_JOB_GATEWAY_SETTLEMENT_QUERY_CONCURRENCY", 2, 1, 10),
             settlement_query_interval_seconds=_env_int("VIDEO_JOB_GATEWAY_SETTLEMENT_QUERY_INTERVAL_SECONDS", 60, 15, 3600),
             settlement_provider_quarantine_age_seconds=_env_int(
@@ -305,15 +329,21 @@ class Gateway:
         adapters: dict[str, VideoAdapter] | None = None,
         billing_collectors: dict[str, Any] | None = None,
         pricing: RelayPricing | None = None,
+        reference_verifier: Any | None = None,
         start_monitor: bool = True,
     ) -> None:
         self.config = config
         self.catalog = catalog or Catalog.load(config.catalog_file)
-        self.store = Store(config.data_dir, max_active_jobs=config.max_active_jobs)
+        self.store = Store(
+            config.data_dir,
+            max_active_jobs=config.max_active_jobs,
+            public_base_url=config.public_base_url,
+        )
         self.submit_slots = threading.BoundedSemaphore(config.submit_concurrency)
         self.poll_slots = threading.BoundedSemaphore(config.poll_concurrency)
         self.stream_slots = threading.BoundedSemaphore(config.stream_concurrency)
         self.settlement_slots = threading.BoundedSemaphore(config.settlement_query_concurrency)
+        self.reference_verify_slots = threading.BoundedSemaphore(config.reference_verify_concurrency)
         self.stream_lock = threading.Lock()
         self.stream_active = 0
         self.stream_completed = 0
@@ -357,6 +387,10 @@ class Gateway:
             group_name=config.pricing_group,
             timeout_seconds=config.pricing_timeout_seconds,
             cache_seconds=config.pricing_cache_seconds,
+        )
+        self.reference_verifier = reference_verifier or ReferenceMediaVerifier(
+            config.reference_media_hosts,
+            timeout_seconds=config.reference_media_timeout_seconds,
         )
         self.stop_event = threading.Event()
         self.store.cleanup_expired(
@@ -541,31 +575,62 @@ class Gateway:
         video["reference_contract_version"] = VIDEO_REFERENCE_V22_CONTRACT
         for row in video.get("models") or []:
             if isinstance(row, dict):
+                model_id = str(row.get("id") or "")
+                resolutions = [str(value) for value in row.get("resolutions") or []]
+                model = self.catalog.model(model_id)
+                reference_video_resolutions = sorted({
+                    route.resolution
+                    for route in model.routes
+                    if route.enabled
+                    and route.provider in self.eligible_v2_providers
+                    and route.supports_reference_video
+                    and route.resolution
+                })
+                reference_audio_resolutions = sorted({
+                    route.resolution
+                    for route in model.routes
+                    if route.enabled
+                    and route.provider in self.eligible_v2_providers
+                    and route.supports_reference_audio
+                    and route.resolution
+                })
+                video_available = bool(self.config.v22_reference_video_enabled and reference_video_resolutions)
+                audio_available = bool(self.config.v22_reference_audio_enabled and reference_audio_resolutions)
+                combined_resolutions = sorted(set(reference_video_resolutions) & set(reference_audio_resolutions))
+                combined_available = bool(self.config.v22_reference_combined_enabled and combined_resolutions)
                 row["reference_video"] = {
                     "supported": True,
-                    "available": False,
-                    "reason": "upstream_adapter_verification_pending",
+                    "available": video_available,
+                    "reason": "" if video_available else "reference_video_route_disabled",
+                    "available_resolutions": [value for value in resolutions if value in reference_video_resolutions],
                     "roles": ["reference_video"],
                     "max_count": 3,
                     "mime_types": ["video/mp4"],
                     "supports_images_with_video": True,
                     "supports_audio_with_video": True,
                     "supports_generate_audio_with_video": True,
-                    "max_total_assets": 15,
+                    "max_total_assets": 12,
                 }
                 row["reference_audio"] = {
                     "supported": True,
-                    "available": False,
-                    "reason": "upstream_adapter_verification_pending",
+                    "available": audio_available,
+                    "reason": "" if audio_available else "reference_audio_route_disabled",
+                    "available_resolutions": [value for value in resolutions if value in reference_audio_resolutions],
                     "roles": ["reference_audio"],
                     "max_count": 3,
-                    "mime_types": ["audio/mpeg", "audio/wav"],
-                    "audio_codecs": ["mp3", "wav"],
-                    "requires_non_audio_input": False,
+                    "mime_types": ["audio/mpeg", "audio/wav", "audio/aac", "audio/mp4"],
+                    "audio_codecs": ["mp3", "wav", "aac", "m4a"],
+                    "requires_non_audio_input": True,
                     "supports_images_with_audio": True,
                     "supports_video_with_audio": True,
                     "supports_generate_audio_with_reference_audio": True,
-                    "max_total_assets": 15,
+                    "max_total_assets": 12,
+                }
+                row["reference_video_audio"] = {
+                    "supported": True,
+                    "available": combined_available,
+                    "reason": "" if combined_available else "reference_combined_route_disabled",
+                    "available_resolutions": [value for value in resolutions if value in combined_resolutions],
                 }
         video["generate_audio"] = bool(video.get("generate_audio"))
         video["settlement_capabilities"] = [
@@ -592,6 +657,35 @@ class Gateway:
         return pairs
 
     def video_prices(self) -> dict[str, Any]:
+        reference_rows = []
+        for model, resolution in self.price_pairs():
+            without_video = self.pricing.official_quote(
+                model, resolution, 1, input_rate_class="without_video_input"
+            )
+            with_video = self.pricing.official_quote(
+                model, resolution, 1, input_rate_class="with_video_input"
+            )
+            reference_rows.append({
+                "model": model,
+                "resolution": resolution,
+                "currency": "CNY",
+                "billing_unit": "output_second",
+                "reference_video": {
+                    "supported": True,
+                    "official_rate_class": "with_video_input",
+                    "cny_per_second_exact": with_video["cny_per_second_exact"],
+                },
+                "reference_audio": {
+                    "supported": True,
+                    "official_rate_class": "without_video_input",
+                    "cny_per_second_exact": without_video["cny_per_second_exact"],
+                },
+                "reference_video_audio": {
+                    "supported": True,
+                    "official_rate_class": "with_video_input",
+                    "cny_per_second_exact": with_video["cny_per_second_exact"],
+                },
+            })
         return {
             "ok": True,
             "protocol_version": self.catalog.protocol_version,
@@ -605,6 +699,7 @@ class Gateway:
                 "reference_video": {"supported": True, "official_rate_class": "with_video_input"},
                 "reference_audio": {"supported": True, "official_rate_class": "without_video_input"},
                 "reference_video_audio": {"supported": True, "official_rate_class": "with_video_input"},
+                "models": reference_rows,
             },
         }
 
@@ -631,7 +726,13 @@ class Gateway:
             else:
                 self.stream_failed += 1
 
-    def submit(self, raw: Any, *, billing_v2: bool = False) -> tuple[dict[str, Any], bool]:
+    def submit(
+        self,
+        raw: Any,
+        *,
+        billing_v2: bool = False,
+        reference_v22: bool = False,
+    ) -> tuple[dict[str, Any], bool]:
         request_id_hint = str(raw.get("request_id") or "").strip() if isinstance(raw, dict) else ""
         existing_internal = (
             self.store.get(request_id=request_id_hint, internal=True)
@@ -652,6 +753,7 @@ class Gateway:
             raw,
             configured_providers=replay_providers,
             billing_v2=billing_v2,
+            reference_v22=reference_v22,
         )
         route = routes[0]
         selection_reason = (
@@ -720,6 +822,7 @@ class Gateway:
         *,
         configured_providers: set[str] | None = None,
         billing_v2: bool = False,
+        reference_v22: bool = False,
     ) -> tuple[str, str, dict[str, Any], Model, tuple[Route, ...]]:
         if not isinstance(raw, dict):
             raise GatewayError(HTTPStatus.BAD_REQUEST, "payload_invalid", "请求体必须是JSON对象。")
@@ -798,14 +901,18 @@ class Gateway:
             raise GatewayError(HTTPStatus.BAD_REQUEST, "video_route_aspect_ratio_unsupported", "当前上游线路不支持所选画面比例。")
         images = _normalize_assets(input_data.get("images") or raw.get("images"), "image", ALLOWED_IMAGE_ROLES)
         videos = _normalize_assets(input_data.get("videos") or raw.get("videos"), "video", ALLOWED_VIDEO_ROLES)
+        audios = _normalize_assets(input_data.get("audios") or raw.get("audios"), "audio", ALLOWED_AUDIO_ROLES)
         candidate_routes = tuple(
             candidate
             for candidate in candidate_routes
             if (not candidate.aspect_ratios or aspect_ratio in candidate.aspect_ratios)
             and (
                 not candidate.max_total_assets
-                or len(images) + len(videos) <= candidate.max_total_assets
+                or len(images) + len(videos) + len(audios) <= candidate.max_total_assets
             )
+            and (not reference_v22 or not videos or candidate.supports_reference_video)
+            and (not reference_v22 or not audios or candidate.supports_reference_audio)
+            and (not audios or not candidate.max_reference_audios or len(audios) <= candidate.max_reference_audios)
         )
         if not candidate_routes:
             raise GatewayError(
@@ -816,7 +923,7 @@ class Gateway:
         route = candidate_routes[0]
         if len(images) > model.max_images or len(videos) > model.max_videos:
             raise GatewayError(HTTPStatus.BAD_REQUEST, "video_reference_limit", "参考素材数量超过当前星途模型限制。")
-        if route.max_total_assets and len(images) + len(videos) > route.max_total_assets:
+        if route.max_total_assets and len(images) + len(videos) + len(audios) > route.max_total_assets:
             raise GatewayError(HTTPStatus.BAD_REQUEST, "video_route_reference_limit", "参考素材总数超过当前上游线路限制。")
         if mode in {"first_frame", "reference"} and not images:
             raise GatewayError(HTTPStatus.BAD_REQUEST, "video_reference_image_required", "当前视频模式至少需要一张参考图片。")
@@ -824,7 +931,7 @@ class Gateway:
             roles = {item["role"] for item in images}
             if not {"first", "last"}.issubset(roles):
                 raise GatewayError(HTTPStatus.BAD_REQUEST, "video_first_last_required", "首尾帧模式需要明确的首帧和尾帧图片。")
-        if mode == "all_reference" and not images and not videos:
+        if mode == "all_reference" and not images and not videos and not audios:
             raise GatewayError(HTTPStatus.BAD_REQUEST, "video_reference_required", "全能参考模式至少需要一个参考素材。")
         normalized = {
             "model": stable_model if legacy_alias else model.id,
@@ -834,29 +941,35 @@ class Gateway:
             "aspect_ratio": aspect_ratio,
             "images": images,
             "videos": videos,
+            "audios": audios,
             "generate_audio": bool(parameters.get("generate_audio")) if "generate_audio" in parameters else None,
             "negative_prompt": str(parameters.get("negative_prompt") or "").strip()[:2000],
             "delivery": {"prefer_direct_url": True},
         }
+        if reference_v22 and isinstance(input_data.get("reference_input"), dict):
+            normalized["reference_input"] = dict(input_data["reference_input"])
         if billing_v2:
             normalized["_billing_v2"] = True
-            normalized["_billing_contract_version"] = VIDEO_BILLING_V2_CONTRACT
+            normalized["_billing_contract_version"] = (
+                VIDEO_REFERENCE_V22_CONTRACT if reference_v22 else VIDEO_BILLING_V2_CONTRACT
+            )
         if resolution and (not legacy_alias or requested_resolution):
             normalized["resolution"] = resolution
         fingerprint_payload = normalized
         if billing_v2:
             fingerprint_payload = dict(normalized)
-            fingerprint_payload["images"] = [
-                {
-                    "role": str(item.get("role") or "reference"),
-                    **(
-                        {"identity": str(item.get("identity") or "")}
-                        if str(item.get("identity") or "")
-                        else {"url": str(item.get("url") or "")}
-                    ),
-                }
-                for item in images
-            ]
+            for name, items in (("images", images), ("videos", videos), ("audios", audios)):
+                fingerprint_payload[name] = [
+                    {
+                        "role": str(item.get("role") or "reference"),
+                        **(
+                            {"identity": str(item.get("identity") or "")}
+                            if str(item.get("identity") or "")
+                            else {"url": str(item.get("url") or "")}
+                        ),
+                    }
+                    for item in items
+                ]
         canonical = json.dumps(fingerprint_payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
         fingerprint = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
         normalized["_route"] = {
@@ -865,7 +978,12 @@ class Gateway:
         }
         try:
             normalized["_relay_price"] = (
-                self.pricing.official_quote(model.id, resolution, duration)
+                self.pricing.official_quote(
+                    model.id,
+                    resolution,
+                    duration,
+                    input_rate_class="with_video_input" if reference_v22 and videos else "without_video_input",
+                )
                 if billing_v2
                 else self.pricing.quote(model.id, resolution, duration)
             )
@@ -964,7 +1082,14 @@ class Gateway:
         return self.submit(translated, billing_v2=True)
 
     def submit_v22(self, raw: Any, *, idempotency_key: str) -> tuple[dict[str, Any], bool]:
-        """Fail closed until exact v2.2 route capabilities and prices are approved."""
+        """Create a durable v2.2 job using only exact reference-capable routes."""
+        if not self.config.public_base_url:
+            raise GatewayError(
+                HTTPStatus.SERVICE_UNAVAILABLE,
+                "video_public_base_url_missing",
+                "视频计费v2.2公网地址尚未安全配置。",
+                category="service_unavailable",
+            )
         if not isinstance(raw, dict):
             raise GatewayError(HTTPStatus.BAD_REQUEST, "payload_invalid", "请求体必须是JSON对象。")
         request_id = str(raw.get("request_id") or "").strip()
@@ -974,6 +1099,12 @@ class Gateway:
                 "video_idempotency_key_mismatch",
                 "Idempotency-Key必须与request_id完全一致。",
             )
+        if str(raw.get("provider_id") or "") != "video-aixingtu-api":
+            raise GatewayError(HTTPStatus.BAD_REQUEST, "video_provider_invalid", "provider_id无效。")
+        if "generate_audio" not in raw:
+            raise GatewayError(HTTPStatus.BAD_REQUEST, "missing_generate_audio", "generate_audio必须明确传布尔值。")
+        if not isinstance(raw.get("generate_audio"), bool):
+            raise GatewayError(HTTPStatus.BAD_REQUEST, "invalid_generate_audio", "generate_audio必须是布尔值。")
         has_video = bool(raw.get("reference_videos"))
         has_audio = bool(raw.get("reference_audios"))
         if not has_video and not has_audio:
@@ -983,9 +1114,8 @@ class Gateway:
                 "v2.2仅用于包含参考视频或参考音频的新任务。",
             )
         try:
-            from reference_contract import ReferenceContractError, validate_reference_payload
-
-            validate_reference_payload(raw)
+            references = validate_reference_payload(raw)
+            reference_identity = stable_reference_identity(raw)
         except ReferenceContractError as error:
             status = HTTPStatus.CONFLICT if error.code.endswith("identity_mismatch") else HTTPStatus.BAD_REQUEST
             raise GatewayError(status, error.code, str(error)) from error
@@ -1000,15 +1130,96 @@ class Gateway:
         message = "当前参考素材合同或精确上游能力尚未发布；任务未冻结、未提交。"
         if not enabled:
             raise GatewayError(HTTPStatus.SERVICE_UNAVAILABLE, code, message, category="service_unavailable")
-        # The switches cannot bypass verified route availability.  The official
-        # capability and base × 1.5 pricing are published independently, while
-        # paid routing remains closed until each adapter passes no-charge probes.
-        raise GatewayError(
-            HTTPStatus.SERVICE_UNAVAILABLE,
-            code,
-            "官方能力已发布，但当前精确上游路由尚未完成无费用验证；任务未冻结、未提交。",
-            category="service_unavailable",
+        image_values: list[str] = []
+        if raw.get("image"):
+            image_values.append(str(raw.get("image") or "").strip())
+        if isinstance(raw.get("images"), list):
+            image_values.extend(str(item or "").strip() for item in raw["images"] if str(item or "").strip())
+        identities_raw = raw.get("image_identities")
+        image_identities = (
+            [str(item or "").strip().lower() for item in identities_raw]
+            if isinstance(identities_raw, list)
+            else []
         )
+        if image_values and (
+            len(image_identities) != len(image_values)
+            or any(not re.fullmatch(r"[0-9a-f]{64}", item) for item in image_identities)
+        ):
+            raise GatewayError(
+                HTTPStatus.BAD_REQUEST,
+                "video_image_identity_invalid",
+                "v2.2参考图片必须逐项提供SHA-256身份。",
+            )
+        if len(image_values) > 9 or len(image_values) + len(references["reference_videos"]) + len(references["reference_audios"]) > 12:
+            raise GatewayError(
+                HTTPStatus.BAD_REQUEST,
+                "video_asset_count_invalid",
+                "v2.2最多接受9张图片，且图片、参考视频、参考音频合计不得超过12项。",
+            )
+        images = [
+            {
+                "url": value,
+                "role": "first" if len(image_values) == 1 else "reference",
+                "identity": image_identities[index],
+            }
+            for index, value in enumerate(image_values)
+        ]
+        videos = [
+            {"url": item["url"], "role": "reference", "identity": item["sha256"]}
+            for item in references["reference_videos"]
+        ]
+        audios = [
+            {"url": item["url"], "role": "reference_audio", "identity": item["sha256"]}
+            for item in references["reference_audios"]
+        ]
+        translated = {
+            "protocol_version": self.catalog.protocol_version,
+            "request_id": request_id,
+            "model": str(raw.get("model") or "").strip(),
+            "input": {
+                "prompt": str(raw.get("prompt") or "").strip(),
+                "images": images,
+                "videos": videos,
+                "audios": audios,
+                "reference_input": reference_identity,
+            },
+            "parameters": {
+                "resolution": str(raw.get("resolution") or "").strip().lower(),
+                "duration": raw.get("duration"),
+                "aspect_ratio": str(raw.get("aspect_ratio") or "16:9").strip(),
+                "mode": "all_reference",
+                "generate_audio": raw["generate_audio"],
+            },
+        }
+        existing = self.store.get(request_id=request_id, internal=True)
+        if existing:
+            return self.submit(translated, billing_v2=True, reference_v22=True)
+        if not self.reference_verify_slots.acquire(blocking=False):
+            raise GatewayError(
+                HTTPStatus.TOO_MANY_REQUESTS,
+                "reference_media_verifier_busy",
+                "参考素材安全校验繁忙，请使用同一request_id稍后重试。",
+                category="rate_limit",
+            )
+        try:
+            try:
+                self.reference_verifier.verify_image_origins(image_values)
+                self.reference_verifier.verify(references)
+            except ReferenceContractError as error:
+                status = HTTPStatus.CONFLICT if error.code.endswith("identity_mismatch") else HTTPStatus.BAD_REQUEST
+                raise GatewayError(status, error.code, str(error)) from error
+            return self.submit(translated, billing_v2=True, reference_v22=True)
+        except GatewayError as error:
+            if error.code in {"video_route_constraints_unsupported", "video_model_unavailable"}:
+                raise GatewayError(
+                    HTTPStatus.SERVICE_UNAVAILABLE,
+                    code,
+                    "当前精确模型、分辨率和参考素材组合没有可执行且可结算的上游路由。",
+                    category="service_unavailable",
+                ) from error
+            raise
+        finally:
+            self.reference_verify_slots.release()
 
     def public_v2_snapshot(self, snapshot: Mapping[str, Any]) -> dict[str, Any]:
         task_id = str(snapshot.get("job_id") or "")
@@ -1017,19 +1228,24 @@ class Gateway:
         if delivery == "ready" and self.config.public_base_url:
             result_url = f"{self.config.public_base_url}/v1/videos/{urllib.parse.quote(task_id, safe='')}/content"
         billing = dict(snapshot.get("billing") or {})
-        return {
+        result = {
             "id": task_id,
             "request_id": str(snapshot.get("request_id") or ""),
             "object": "video",
             "model": str(snapshot.get("model") or ""),
             "status": str(snapshot.get("status") or ""),
             "progress": 100 if str(snapshot.get("status") or "") in {"succeeded", "failed"} else 0,
+            "created_at": int(snapshot.get("created_at") or 0),
+            "completed_at": int(snapshot.get("finished_at") or 0) or None,
             "result_delivery": delivery,
             "result": {"type": "url", "url": result_url} if result_url else None,
             "result_url": result_url or None,
             "billing": billing,
             "usage": None,
         }
+        if isinstance(snapshot.get("input"), dict):
+            result["input"] = dict(snapshot["input"])
+        return result
 
     def start_submit(self, job_id: str) -> None:
         threading.Thread(target=self._submit_one, args=(job_id,), daemon=True, name=f"video-submit-{job_id[-8:]}").start()

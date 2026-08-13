@@ -46,9 +46,10 @@ class StoreConflict(ValueError):
 
 
 class Store:
-    def __init__(self, data_dir: Path, *, max_active_jobs: int = 500) -> None:
+    def __init__(self, data_dir: Path, *, max_active_jobs: int = 500, public_base_url: str = "") -> None:
         self.data_dir = data_dir
         self.max_active_jobs = max(1, min(int(max_active_jobs), 5000))
+        self.public_base_url = str(public_base_url or "").rstrip("/")
         data_dir.mkdir(parents=True, exist_ok=True)
         self.path = data_dir / "video-jobs.sqlite3"
         self._initialize()
@@ -293,12 +294,18 @@ class Store:
             "contract_version": str(source.get("billing_contract_version") or ""),
             "status": billing_status,
             "currency": "CNY",
+            "reserve_basis": "ark_official_1_5" if source.get("reserved_cny_exact") else "",
             "reserved_amount": _public_money(source.get("reserved_cny_exact")),
             "charged_amount": _public_money(source.get("charged_cny_exact")),
             "refund_amount": _public_money(source.get("refund_cny_exact")),
             "supplement_amount": _public_money(source.get("supplement_cny_exact")),
             "settlement_revision": int(source.get("settlement_revision") or 0),
             "pricing_revision": str(source.get("official_pricing_revision") or ""),
+            "settled_at": (
+                datetime.fromtimestamp(int(source.get("updated_at") or 0), timezone(timedelta(hours=8))).isoformat(timespec="seconds")
+                if billing_status == "settled" and int(source.get("updated_at") or 0) > 0
+                else None
+            ),
         }
         status = str(source.get("status") or "")
         if status == "succeeded":
@@ -306,7 +313,7 @@ class Store:
         else:
             delivery = "unavailable"
         public_status = "running" if status == "reconciling" else status
-        return {
+        snapshot = {
             "job_id": source.get("job_id"),
             "request_id": source.get("request_id"),
             "protocol_version": source.get("protocol_version"),
@@ -331,6 +338,21 @@ class Store:
                 and not source.get("result_json")
             ),
         }
+        if str(source.get("billing_contract_version") or "") == BILLING_CONTRACT_REFERENCE_VERSION:
+            payload = _json_object(str(source.get("payload_json") or ""))
+            reference_input = payload.get("reference_input") if isinstance(payload, dict) else None
+            if isinstance(reference_input, dict):
+                videos = reference_input.get("reference_videos") if isinstance(reference_input.get("reference_videos"), list) else []
+                audios = reference_input.get("reference_audios") if isinstance(reference_input.get("reference_audios"), list) else []
+                snapshot["input"] = {
+                    "reference_video_count": len(videos),
+                    "reference_video_digest": _reference_items_digest(videos),
+                    "reference_video_total_duration_seconds": _reference_duration_total(videos),
+                    "reference_audio_count": len(audios),
+                    "reference_audio_digest": _reference_items_digest(audios),
+                    "reference_audio_total_duration_seconds": _reference_duration_total(audios),
+                }
+        return snapshot
 
     def create(
         self,
@@ -1291,11 +1313,20 @@ class Store:
             "model": snapshot["model"],
             "status": snapshot["status"],
             "progress": 100 if snapshot["status"] in {"succeeded", "failed"} else 0,
+            "created_at": int(snapshot.get("created_at") or 0),
+            "completed_at": int(snapshot.get("finished_at") or 0) or None,
             "result_delivery": snapshot["result_delivery"],
+            "result": None,
             "result_url": None,
             "billing": snapshot["billing"],
             "usage": None,
         }
+        if isinstance(snapshot.get("input"), dict):
+            data["input"] = snapshot["input"]
+        if snapshot["result_delivery"] == "ready" and self.public_base_url:
+            result_url = f"{self.public_base_url}/v1/videos/{job_id}/content"
+            data["result"] = {"type": "url", "url": result_url}
+            data["result_url"] = result_url
         payload = {
             "event_id": event_id,
             "event_version": 1,
@@ -2126,6 +2157,25 @@ def _validated_settlement(payload: Any) -> dict[str, Any]:
     evidence["evidence_fingerprint"] = fingerprint
     evidence["settlement_id"] = settlement_id
     return evidence
+
+
+def _reference_items_digest(items: list[Any]) -> str:
+    if not items:
+        return ""
+    canonical = json.dumps(items, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _reference_duration_total(items: list[Any]) -> str:
+    total = Decimal("0")
+    try:
+        for item in items:
+            if not isinstance(item, dict):
+                return ""
+            total += Decimal(str(item.get("duration_seconds") or "0"))
+    except InvalidOperation:
+        return ""
+    return format(total.quantize(MONEY_QUANTUM), "f")
 
 
 def _route_plan(

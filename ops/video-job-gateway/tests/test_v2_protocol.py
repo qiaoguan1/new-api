@@ -73,7 +73,7 @@ def settlement(job_id: str) -> dict:
 
 
 class BillingV2ProtocolTests(unittest.TestCase):
-    def make_gateway(self, directory: str, *, webhook: bool = False) -> Gateway:
+    def make_gateway(self, directory: str, *, webhook: bool = False, v22: bool = False) -> Gateway:
         adapters = {name: IdleAdapter(name) for name in ("paisio", "toonflow")}
         config = Config(
             token="test-token",
@@ -85,11 +85,18 @@ class BillingV2ProtocolTests(unittest.TestCase):
             webhook_enabled=webhook,
             webhook_url="https://cloud.aixingtuyun.com/api/webhooks/video" if webhook else "",
             webhook_secret="test-webhook-secret-that-is-at-least-32-bytes" if webhook else "",
+            v22_reference_video_enabled=v22,
+            v22_reference_audio_enabled=v22,
+            v22_reference_combined_enabled=v22,
         )
         gateway = Gateway(
             config,
             adapters=adapters,
             billing_collectors={name: SimpleNamespace(ready=True) for name in adapters},
+            reference_verifier=SimpleNamespace(
+                verify=lambda _references: None,
+                verify_image_origins=lambda _urls: None,
+            ),
             start_monitor=False,
         )
         gateway.start_submit = lambda _job_id: None
@@ -217,6 +224,8 @@ class BillingV2ProtocolTests(unittest.TestCase):
             gateway = self.make_gateway(directory)
             request_id = "billing-v22-disabled"
             value = self.body(request_id)
+            value["image"] = "https://tos.example.com/frame.png"
+            value["image_identities"] = ["b" * 64]
             value["reference_audios"] = [{
                 "role": "reference_audio",
                 "url": "https://tos.example.com/reference.mp3?temporary-signature",
@@ -233,6 +242,61 @@ class BillingV2ProtocolTests(unittest.TestCase):
             self.assertEqual(failure.exception.code, "reference_audio_contract_unavailable")
             with gateway.store.connect() as connection:
                 self.assertEqual(connection.execute("select count(*) from video_jobs").fetchone()[0], 0)
+
+    def test_v22_audio_with_image_creates_one_durable_toonflow_job(self):
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as directory:
+            gateway = self.make_gateway(directory, v22=True)
+            request_id = "billing-v22-image-audio"
+            value = self.body(request_id)
+            value["image"] = "https://tos.example.com/frame.png?signature=one"
+            value["image_identities"] = ["c" * 64]
+            value["reference_audios"] = [{
+                "role": "reference_audio",
+                "url": "https://tos.example.com/reference.mp3?signature=one",
+                "sha256": "d" * 64,
+                "mime_type": "audio/mpeg",
+                "codec": "mp3",
+                "size_bytes": 1024,
+                "duration_seconds": "4.000000",
+                "sample_rate_hz": 44100,
+                "channels": 2,
+            }]
+
+            created, reused = gateway.submit_v22(value, idempotency_key=request_id)
+
+            self.assertFalse(reused)
+            self.assertEqual(created["billing"]["contract_version"], BILLING_CONTRACT_REFERENCE_VERSION)
+            self.assertEqual(created["billing"]["status"], "reserved")
+            self.assertEqual(created["billing"]["reserved_amount"], "5.961600")
+            internal = gateway.store.get(job_id=created["job_id"], internal=True)
+            self.assertEqual(internal["provider_id"], "toonflow")
+            payload = json.loads(internal["payload_json"])
+            self.assertEqual(payload["audios"][0]["identity"], "d" * 64)
+            self.assertEqual(payload["_billing_contract_version"], BILLING_CONTRACT_REFERENCE_VERSION)
+            self.assertEqual(created["input"]["reference_audio_count"], 1)
+
+    def test_v22_reference_video_uses_ark_video_input_reservation(self):
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as directory:
+            gateway = self.make_gateway(directory, v22=True)
+            request_id = "billing-v22-reference-video"
+            value = self.body(request_id)
+            value["reference_videos"] = [{
+                "role": "reference_video",
+                "url": "https://tos.example.com/reference.mp4?signature=one",
+                "sha256": "e" * 64,
+                "mime_type": "video/mp4",
+                "size_bytes": 1024,
+                "duration_seconds": "4.000000",
+                "width_pixels": 720,
+                "height_pixels": 1280,
+            }]
+
+            created, _ = gateway.submit_v22(value, idempotency_key=request_id)
+
+            self.assertEqual(created["billing"]["reserved_amount"], "3.628800")
+            internal = gateway.store.get(job_id=created["job_id"], internal=True)
+            payload = json.loads(internal["payload_json"])
+            self.assertEqual(payload["_relay_price"]["input_rate_class"], "with_video_input")
 
     def test_capability_and_price_catalogs_fail_closed_for_v22(self):
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as directory:
@@ -252,6 +316,76 @@ class BillingV2ProtocolTests(unittest.TestCase):
             self.assertTrue(all(profiles[name]["supported"] for name in ("reference_video", "reference_audio", "reference_video_audio")))
             self.assertEqual(profiles["reference_video"]["official_rate_class"], "with_video_input")
             self.assertEqual(profiles["reference_audio"]["official_rate_class"], "without_video_input")
+
+    def test_v22_catalogs_publish_exact_available_resolutions_and_prices_when_enabled(self):
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as directory:
+            gateway = self.make_gateway(directory, v22=True)
+            capabilities = gateway.capabilities()["capabilities"]["video"]
+            for model in capabilities["models"]:
+                self.assertTrue(model["reference_video"]["available"])
+                self.assertTrue(model["reference_audio"]["available"])
+                self.assertTrue(model["reference_video_audio"]["available"])
+                self.assertEqual(
+                    model["reference_audio"]["available_resolutions"],
+                    model["resolutions"],
+                )
+                self.assertTrue(model["reference_audio"]["requires_non_audio_input"])
+            rows = gateway.video_prices()["billing_v22_input_profiles"]["models"]
+            standard_720 = next(
+                row for row in rows
+                if row["model"] == "seedance-2.0" and row["resolution"] == "720p"
+            )
+            self.assertEqual(standard_720["reference_video"]["cny_per_second_exact"], "0.907200")
+            self.assertEqual(standard_720["reference_audio"]["cny_per_second_exact"], "1.490400")
+
+    def test_v22_settled_webhook_contains_only_reference_digests_not_urls(self):
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as directory:
+            gateway = self.make_gateway(directory, webhook=True, v22=True)
+            request_id = "billing-v22-webhook"
+            value = self.body(request_id)
+            value["image"] = "https://tos.example.com/frame.png?secret=image"
+            value["image_identities"] = ["1" * 64]
+            value["reference_audios"] = [{
+                "role": "reference_audio",
+                "url": "https://tos.example.com/reference.wav?secret=audio",
+                "sha256": "2" * 64,
+                "mime_type": "audio/wav",
+                "codec": "wav",
+                "size_bytes": 1024,
+                "duration_seconds": "4.000000",
+                "sample_rate_hz": 48000,
+                "channels": 2,
+            }]
+            created, _ = gateway.submit_v22(value, idempotency_key=request_id)
+            gateway.store.claim_submit(created["job_id"])
+            gateway.store.mark_running(created["job_id"], "provider-task-1", "running", 1)
+            gateway.store.finish(created["job_id"], "succeeded", result={"url": "https://result.example.com/video.mp4"})
+            evidence = settlement(created["job_id"])
+            evidence["contract_version"] = BILLING_CONTRACT_REFERENCE_VERSION
+            material = "\0".join(
+                str(evidence[name])
+                for name in (
+                    "contract_version", "job_id", "provider_task_id", "actual_cost_status",
+                    "actual_cost_cny_exact", "evidence_source", "evidence_id", "observed_at",
+                )
+            )
+            evidence["evidence_fingerprint"] = hashlib.sha256(material.encode()).hexdigest()
+            evidence["settlement_id"] = hashlib.sha256(
+                "\0".join(("xtai-video-settlement-v2", created["job_id"], "1", evidence["evidence_fingerprint"])).encode()
+            ).hexdigest()
+            gateway.store.apply_settlement(evidence)
+
+            events = gateway.store.due_webhook_events(limit=20, lease_seconds=30)
+            settled = next(event for event in events if event["event_type"] == "video.billing.settled")
+            payload = json.loads(settled["payload_json"])
+            self.assertEqual(payload["data"]["input"]["reference_audio_count"], 1)
+            self.assertEqual(payload["data"]["result_delivery"], "ready")
+            self.assertEqual(
+                payload["data"]["result"]["url"],
+                f"https://api.aixingtuyun.com/v1/videos/{created['job_id']}/content",
+            )
+            self.assertNotIn("tos.example.com", settled["payload_json"])
+            self.assertNotIn("secret=", settled["payload_json"])
 
     def test_v2_rejects_mismatched_idempotency_and_singular_undefined_references(self):
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as directory:

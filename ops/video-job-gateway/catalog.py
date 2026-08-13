@@ -25,6 +25,9 @@ class Route:
     aspect_ratios: tuple[str, ...] = ()
     max_total_assets: int = 0
     supports_generate_audio: bool = False
+    supports_reference_video: bool = False
+    supports_reference_audio: bool = False
+    max_reference_audios: int = 0
     billing_mode: str = ""
     routing_unit_cost: str = ""
 
@@ -142,6 +145,9 @@ class Catalog:
                         aspect_ratios=route_aspect_ratios,
                         max_total_assets=_bounded_int(route_source.get("max_total_assets"), 0, 30),
                         supports_generate_audio=bool(route_source.get("supports_generate_audio", False)),
+                        supports_reference_video=bool(route_source.get("supports_reference_video", False)),
+                        supports_reference_audio=bool(route_source.get("supports_reference_audio", False)),
+                        max_reference_audios=_bounded_int(route_source.get("max_reference_audios"), 0, 3),
                         billing_mode=billing_mode,
                         routing_unit_cost=routing_unit_cost,
                     )

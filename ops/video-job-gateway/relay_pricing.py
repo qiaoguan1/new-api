@@ -26,6 +26,11 @@ APPROVED_OFFICIAL_RATES = {
     ("seedance-2.0-mini", "480p"): Decimal("0.2209725"),
     ("seedance-2.0-mini", "720p"): Decimal("0.4968"),
 }
+ARK_VIDEO_INPUT_RATE_RATIOS = {
+    "seedance-2.0": (Decimal("28"), Decimal("46")),
+    "seedance-2.0-fast": (Decimal("22"), Decimal("37")),
+    "seedance-2.0-mini": (Decimal("14"), Decimal("23")),
+}
 
 
 class RelayPricingError(ValueError):
@@ -259,11 +264,27 @@ class RelayPricing:
             "amount_cny_exact": format(amount, "f"),
         }
 
-    def official_quote(self, model: str, resolution: str, duration: int) -> dict[str, Any]:
+    def official_quote(
+        self,
+        model: str,
+        resolution: str,
+        duration: int,
+        *,
+        input_rate_class: str = "without_video_input",
+    ) -> dict[str, Any]:
         rows = self.official_rows([(str(model or ""), str(resolution or "").lower())])
         if len(rows) != 1:
             raise RelayPricingError("relay official price is unavailable for this model and resolution")
-        row = rows[0]
+        row = dict(rows[0])
+        if input_rate_class == "with_video_input":
+            ratio = ARK_VIDEO_INPUT_RATE_RATIOS.get(str(model or ""))
+            if ratio is None:
+                raise RelayPricingError("relay official video-input price is unavailable")
+            official_rate = Decimal(str(row["official_cost_cny_per_second_exact"])) * ratio[0] / ratio[1]
+            row["official_cost_cny_per_second_exact"] = _money_exact(official_rate)
+            row["cny_per_second_exact"] = _money_exact(official_rate * Decimal("1.5"))
+        elif input_rate_class != "without_video_input":
+            raise RelayPricingError("relay official input rate class is invalid")
         seconds = max(1, min(int(duration), 3600))
         official_total = Decimal(str(row["official_cost_cny_per_second_exact"])) * Decimal(seconds)
         amount = official_total * Decimal("1.5")
@@ -275,4 +296,5 @@ class RelayPricing:
             "output_seconds": seconds,
             "official_cost_cny_exact": _money_exact(official_total),
             "amount_cny_exact": _money_exact(amount),
+            "input_rate_class": input_rate_class,
         }
