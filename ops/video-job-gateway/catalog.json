@@ -1,6 +1,6 @@
 {
   "protocol_version": "xtai-relay-v1",
-  "revision": "2026-08-13.1",
+  "revision": "2026-08-13.2",
   "models": [
     {
       "id": "seedance-2.0",
@@ -27,6 +27,10 @@
           "enabled": true,
           "send_resolution": true,
           "supports_generate_audio": true,
+          "supports_reference_video": true,
+          "supports_reference_audio": true,
+          "max_reference_audios": 3,
+          "max_total_assets": 12,
           "adapter_revision": "toonflow-video-actual-cost-2026-08-09"
         },
         {
@@ -49,6 +53,10 @@
           "enabled": true,
           "send_resolution": true,
           "supports_generate_audio": true,
+          "supports_reference_video": true,
+          "supports_reference_audio": true,
+          "max_reference_audios": 3,
+          "max_total_assets": 12,
           "adapter_revision": "toonflow-video-actual-cost-2026-08-09"
         },
         {
@@ -71,6 +79,10 @@
           "enabled": true,
           "send_resolution": true,
           "supports_generate_audio": true,
+          "supports_reference_video": true,
+          "supports_reference_audio": true,
+          "max_reference_audios": 3,
+          "max_total_assets": 12,
           "adapter_revision": "toonflow-video-actual-cost-2026-08-09"
         },
         {
@@ -98,8 +110,8 @@
         "aspect_ratios": ["16:9", "9:16", "1:1", "21:9", "3:4", "4:3"],
         "duration_min": 4,
         "duration_max": 15,
-        "max_images": 1,
-        "max_videos": 0
+        "max_images": 9,
+        "max_videos": 3
       },
       "routes": [
         {
@@ -110,6 +122,10 @@
           "enabled": true,
           "send_resolution": true,
           "supports_generate_audio": true,
+          "supports_reference_video": true,
+          "supports_reference_audio": true,
+          "max_reference_audios": 3,
+          "max_total_assets": 12,
           "adapter_revision": "toonflow-video-actual-cost-2026-08-09"
         },
         {
@@ -132,6 +148,10 @@
           "enabled": true,
           "send_resolution": true,
           "supports_generate_audio": true,
+          "supports_reference_video": true,
+          "supports_reference_audio": true,
+          "max_reference_audios": 3,
+          "max_total_assets": 12,
           "adapter_revision": "toonflow-video-actual-cost-2026-08-09"
         },
         {
@@ -183,8 +203,8 @@
         "aspect_ratios": ["16:9", "9:16", "1:1"],
         "duration_min": 4,
         "duration_max": 15,
-        "max_images": 1,
-        "max_videos": 0
+        "max_images": 9,
+        "max_videos": 3
       },
       "routes": [
         {
@@ -195,6 +215,10 @@
           "enabled": true,
           "send_resolution": true,
           "supports_generate_audio": true,
+          "supports_reference_video": true,
+          "supports_reference_audio": true,
+          "max_reference_audios": 3,
+          "max_total_assets": 12,
           "adapter_revision": "toonflow-video-actual-cost-2026-08-09"
         },
         {
@@ -205,6 +229,10 @@
           "enabled": true,
           "send_resolution": true,
           "supports_generate_audio": true,
+          "supports_reference_video": true,
+          "supports_reference_audio": true,
+          "max_reference_audios": 3,
+          "max_total_assets": 12,
           "adapter_revision": "toonflow-video-actual-cost-2026-08-09"
         }
       ]

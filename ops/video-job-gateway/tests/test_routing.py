@@ -249,6 +249,21 @@ class RoutePlanTests(unittest.TestCase):
         self.assertTrue(all("fast" in name and "mini" not in name for name in fast_names))
         self.assertEqual(mini_names, [])
 
+    def test_checked_in_routes_isolate_reference_audio_to_verified_toonflow(self):
+        catalog = Catalog.load(ROOT / "catalog.json")
+        for model in catalog.models:
+            self.assertTrue(any(route.supports_reference_audio for route in model.routes))
+            self.assertTrue(
+                all(
+                    route.provider == "toonflow"
+                    for route in model.routes
+                    if route.supports_reference_audio
+                )
+            )
+            self.assertTrue(
+                all(route.supports_reference_video for route in model.routes if route.provider == "toonflow")
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

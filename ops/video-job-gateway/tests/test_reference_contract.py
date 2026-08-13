@@ -1,13 +1,20 @@
 import pathlib
 import sys
 import unittest
+from unittest import mock
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from reference_contract import ReferenceContractError, reference_digest, stable_reference_identity, validate_reference_payload
+from reference_contract import (
+    ReferenceContractError,
+    ReferenceMediaVerifier,
+    reference_digest,
+    stable_reference_identity,
+    validate_reference_payload,
+)
 
 
 def payload() -> dict:
@@ -37,6 +44,27 @@ class ReferenceContractTests(unittest.TestCase):
         value["reference_audios"][0]["codec"] = "wav"
         self.assertEqual(validate_reference_payload(value)["reference_audios"][0]["codec"], "wav")
 
+    def test_accepts_aac_and_m4a_reference_shapes(self):
+        for mime_type, codec, suffix in (
+            ("audio/aac", "aac", "aac"),
+            ("audio/mp4", "m4a", "m4a"),
+        ):
+            value = payload()
+            value["reference_audios"][0]["url"] = f"https://tos.example.com/a.{suffix}"
+            value["reference_audios"][0]["mime_type"] = mime_type
+            value["reference_audios"][0]["codec"] = codec
+            self.assertEqual(validate_reference_payload(value)["reference_audios"][0]["codec"], codec)
+
+    def test_rejects_audio_without_image_or_video_reference(self):
+        value = payload()
+        value["reference_videos"] = []
+        with self.assertRaises(ReferenceContractError) as failure:
+            validate_reference_payload(value)
+        self.assertEqual(failure.exception.code, "reference_audio_only_unsupported")
+
+        value["images"] = [{"url": "https://tos.example.com/frame.png"}]
+        self.assertEqual(validate_reference_payload(value)["reference_audios"][0]["codec"], "mp3")
+
     def test_rotated_signed_urls_do_not_change_identity_or_digest(self):
         first = payload()
         second = payload()
@@ -54,6 +82,24 @@ class ReferenceContractTests(unittest.TestCase):
         for value in cases:
             with self.subTest(value=value), self.assertRaises(ReferenceContractError):
                 validate_reference_payload(value)
+
+    @mock.patch("reference_contract.socket.getaddrinfo")
+    def test_image_origin_requires_exact_allowlisted_public_host(self, getaddrinfo):
+        getaddrinfo.return_value = [(2, 1, 6, "", ("8.8.8.8", 443))]
+        verifier = ReferenceMediaVerifier(("tos.example.com",))
+        verifier.verify_image_origins(["https://tos.example.com/frame.png?signature=one"])
+
+        with self.assertRaises(ReferenceContractError) as subdomain:
+            verifier.verify_image_origins(["https://evil.tos.example.com/frame.png"])
+        self.assertEqual(subdomain.exception.code, "video_image_url_invalid")
+
+    @mock.patch("reference_contract.socket.getaddrinfo")
+    def test_image_origin_rejects_private_dns_resolution(self, getaddrinfo):
+        getaddrinfo.return_value = [(2, 1, 6, "", ("127.0.0.1", 443))]
+        verifier = ReferenceMediaVerifier(("tos.example.com",))
+        with self.assertRaises(ReferenceContractError) as failure:
+            verifier.verify_image_origins(["https://tos.example.com/frame.png"])
+        self.assertEqual(failure.exception.code, "video_image_url_invalid")
 
 
 if __name__ == "__main__":
