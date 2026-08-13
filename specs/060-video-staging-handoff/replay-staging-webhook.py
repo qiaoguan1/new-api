@@ -24,7 +24,9 @@ body = str(event["payload_json"]).encode("utf-8")
 payload = json.loads(body)
 if str(payload.get("event_id") or "") != str(event["event_id"]):
     raise SystemExit("persisted event identity mismatch")
-contract = str(payload.get("contract_version") or "")
+data = payload.get("data") if isinstance(payload.get("data"), dict) else {}
+billing = data.get("billing") if isinstance(data.get("billing"), dict) else {}
+contract = str(billing.get("contract_version") or "")
 if contract not in {"xtai-video-billing-v2", "xtai-video-billing-v2.1"}:
     raise SystemExit("persisted event contract is not replayable")
 
