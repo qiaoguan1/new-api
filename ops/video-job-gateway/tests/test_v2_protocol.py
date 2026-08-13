@@ -20,7 +20,7 @@ if str(ROOT) not in sys.path:
 
 from adapters import Observation, ProviderConfig, ToonflowAdapter
 from app import Config, Gateway, GatewayError, handler_class
-from store import BILLING_CONTRACT_LEGACY, BILLING_CONTRACT_VERSION, Store
+from store import BILLING_CONTRACT_LEGACY, BILLING_CONTRACT_REFERENCE_VERSION, BILLING_CONTRACT_VERSION, Store
 
 
 class IdleAdapter:
@@ -201,13 +201,65 @@ class BillingV2ProtocolTests(unittest.TestCase):
             with self.assertRaises(GatewayError):
                 gateway.submit_v2(value, idempotency_key="billing-v2-invalid-image-identity")
 
-    def test_v2_rejects_mismatched_idempotency_and_undefined_references(self):
+    def test_v21_rejects_all_reference_video_and_audio_field_variants(self):
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as directory:
+            gateway = self.make_gateway(directory)
+            for field in ("video", "videos", "audio", "audios", "reference_videos", "reference_audios"):
+                request_id = f"billing-v21-reject-{field}"
+                value = self.body(request_id)
+                value[field] = ["https://media.example.com/reference.mp3"] if field.endswith("s") else "https://media.example.com/reference.mp3"
+                with self.subTest(field=field), self.assertRaises(GatewayError) as failure:
+                    gateway.submit_v2(value, idempotency_key=request_id)
+                self.assertEqual(failure.exception.code, "video_reference_unsupported")
+
+    def test_v22_is_default_closed_before_job_or_freeze(self):
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as directory:
+            gateway = self.make_gateway(directory)
+            request_id = "billing-v22-disabled"
+            value = self.body(request_id)
+            value["reference_audios"] = [{
+                "role": "reference_audio",
+                "url": "https://tos.example.com/reference.mp3?temporary-signature",
+                "sha256": "a" * 64,
+                "mime_type": "audio/mpeg",
+                "codec": "mp3",
+                "size_bytes": 1024,
+                "duration_seconds": "4.000000",
+                "sample_rate_hz": 44100,
+                "channels": 2,
+            }]
+            with self.assertRaises(GatewayError) as failure:
+                gateway.submit_v22(value, idempotency_key=request_id)
+            self.assertEqual(failure.exception.code, "reference_audio_contract_unavailable")
+            with gateway.store.connect() as connection:
+                self.assertEqual(connection.execute("select count(*) from video_jobs").fetchone()[0], 0)
+
+    def test_capability_and_price_catalogs_fail_closed_for_v22(self):
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as directory:
+            gateway = self.make_gateway(directory)
+            capabilities = gateway.capabilities()["capabilities"]["video"]
+            self.assertEqual(capabilities["reference_contract_version"], BILLING_CONTRACT_REFERENCE_VERSION)
+            for model in capabilities["models"]:
+                self.assertTrue(model["reference_video"]["supported"])
+                self.assertFalse(model["reference_video"]["available"])
+                self.assertEqual(model["reference_video"]["max_count"], 3)
+                self.assertTrue(model["reference_audio"]["supported"])
+                self.assertFalse(model["reference_audio"]["available"])
+                self.assertIn("audio/mpeg", model["reference_audio"]["mime_types"])
+            profiles = gateway.video_prices()["billing_v22_input_profiles"]
+            self.assertEqual(profiles["contract_version"], BILLING_CONTRACT_REFERENCE_VERSION)
+            self.assertEqual(profiles["pricing_mode"], "ark_official_input_mode_1_5")
+            self.assertTrue(all(profiles[name]["supported"] for name in ("reference_video", "reference_audio", "reference_video_audio")))
+            self.assertEqual(profiles["reference_video"]["official_rate_class"], "with_video_input")
+            self.assertEqual(profiles["reference_audio"]["official_rate_class"], "without_video_input")
+
+    def test_v2_rejects_mismatched_idempotency_and_singular_undefined_references(self):
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as directory:
             gateway = self.make_gateway(directory)
             with self.assertRaisesRegex(GatewayError, "Idempotency-Key"):
                 gateway.submit_v2(self.body(), idempotency_key="different-request")
             value = self.body()
-            value["videos"] = ["https://example.com/reference.mp4"]
+            value["video"] = "https://example.com/reference.mp4"
             with self.assertRaises(GatewayError):
                 gateway.submit_v2(value, idempotency_key="billing-v2-request")
 

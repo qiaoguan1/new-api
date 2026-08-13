@@ -4,7 +4,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1
 
 WORKDIR /app
-COPY app.py adapters.py billing_collectors.py credential_lifecycle.py catalog.py relay_pricing.py routing.py store.py catalog.json relay-pricing.json /app/
+COPY app.py adapters.py billing_collectors.py credential_lifecycle.py catalog.py reference_contract.py relay_pricing.py routing.py store.py catalog.json relay-pricing.json /app/
 
 RUN useradd --system --uid 10002 --home /nonexistent --shell /usr/sbin/nologin gateway \
     && mkdir -p /data \
