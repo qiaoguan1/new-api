@@ -19,7 +19,12 @@ ACTIVE_STATUSES = {"queued", "submitting", "running", "reconciling"}
 TERMINAL_STATUSES = {"succeeded", "failed", "uncertain", "pending_review"}
 BILLING_CONTRACT_LEGACY = "xtai-video-billing-v2"
 BILLING_CONTRACT_VERSION = "xtai-video-billing-v2.1"
-BILLING_CONTRACT_VERSIONS = frozenset({BILLING_CONTRACT_LEGACY, BILLING_CONTRACT_VERSION})
+BILLING_CONTRACT_REFERENCE_VERSION = "xtai-video-billing-v2.2"
+BILLING_CONTRACT_VERSIONS = frozenset({
+    BILLING_CONTRACT_LEGACY,
+    BILLING_CONTRACT_VERSION,
+    BILLING_CONTRACT_REFERENCE_VERSION,
+})
 PRICE_CONTRACT_VERSION = "xtai-video-pricing-v1"
 MONEY_QUANTUM = Decimal("0.000001")
 MONEY_LIMIT = Decimal("100000")

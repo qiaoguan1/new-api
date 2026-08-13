@@ -1,0 +1,31 @@
+{
+  "provider_id": "video-aixingtu-api",
+  "request_id": "req_example",
+  "model": "seedance-2.0",
+  "resolution": "720p",
+  "duration": 4,
+  "aspect_ratio": "16:9",
+  "generate_audio": true,
+  "prompt": "保持人物一致，参考动作和对白节奏自然向前行走。",
+  "reference_videos": [{
+    "role": "reference_video",
+    "url": "https://tos.example.com/reference.mp4?temporary-signature",
+    "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "mime_type": "video/mp4",
+    "size_bytes": 12345678,
+    "duration_seconds": "4.000000",
+    "width_pixels": 720,
+    "height_pixels": 1280
+  }],
+  "reference_audios": [{
+    "role": "reference_audio",
+    "url": "https://tos.example.com/reference.mp3?temporary-signature",
+    "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "mime_type": "audio/mpeg",
+    "codec": "mp3",
+    "size_bytes": 2345678,
+    "duration_seconds": "4.000000",
+    "sample_rate_hz": 44100,
+    "channels": 2
+  }]
+}

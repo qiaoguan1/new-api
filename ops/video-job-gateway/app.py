@@ -38,6 +38,7 @@ from catalog import Catalog, CatalogError, Model, Route
 from relay_pricing import PRICE_CONTRACT_VERSION, RelayPricing, RelayPricingError
 from routing import RoutePlanError, build_route_plan
 from store import (
+    BILLING_CONTRACT_REFERENCE_VERSION,
     BILLING_CONTRACT_VERSION,
     BILLING_CONTRACT_VERSIONS,
     GENERATION_QUARANTINE_FAILURE_THRESHOLD,
@@ -55,6 +56,7 @@ ALLOWED_MODES = {"text", "first_frame", "first_last_frame", "reference", "all_re
 ALLOWED_IMAGE_ROLES = {"reference", "first", "last", "style"}
 ALLOWED_VIDEO_ROLES = {"reference", "camera_motion"}
 VIDEO_BILLING_V2_CONTRACT = BILLING_CONTRACT_VERSION
+VIDEO_REFERENCE_V22_CONTRACT = BILLING_CONTRACT_REFERENCE_VERSION
 
 
 @dataclass(frozen=True, slots=True)
@@ -102,6 +104,9 @@ class Config:
     v21_approved_providers: frozenset[str] = field(
         default_factory=lambda: frozenset({"toonflow"})
     )
+    v22_reference_video_enabled: bool = False
+    v22_reference_audio_enabled: bool = False
+    v22_reference_combined_enabled: bool = False
     settlement_query_concurrency: int = 2
     settlement_query_interval_seconds: int = 60
     settlement_provider_quarantine_age_seconds: int = 30 * 60
@@ -252,6 +257,9 @@ class Config:
                 "VIDEO_JOB_PAISIO_IDENTITY_RESOLVER_ENABLED", False
             ),
             v21_approved_providers=v21_approved_providers,
+            v22_reference_video_enabled=_env_bool("VIDEO_JOB_GATEWAY_V22_REFERENCE_VIDEO_ENABLED", False),
+            v22_reference_audio_enabled=_env_bool("VIDEO_JOB_GATEWAY_V22_REFERENCE_AUDIO_ENABLED", False),
+            v22_reference_combined_enabled=_env_bool("VIDEO_JOB_GATEWAY_V22_REFERENCE_COMBINED_ENABLED", False),
             settlement_query_concurrency=_env_int("VIDEO_JOB_GATEWAY_SETTLEMENT_QUERY_CONCURRENCY", 2, 1, 10),
             settlement_query_interval_seconds=_env_int("VIDEO_JOB_GATEWAY_SETTLEMENT_QUERY_INTERVAL_SECONDS", 60, 15, 3600),
             settlement_provider_quarantine_age_seconds=_env_int(
@@ -530,6 +538,35 @@ class Gateway:
         video = capabilities.get("video") if isinstance(capabilities.get("video"), dict) else {}
         video["traffic_enabled"] = ready
         video["billing_contract_version"] = VIDEO_BILLING_V2_CONTRACT
+        video["reference_contract_version"] = VIDEO_REFERENCE_V22_CONTRACT
+        for row in video.get("models") or []:
+            if isinstance(row, dict):
+                row["reference_video"] = {
+                    "supported": True,
+                    "available": False,
+                    "reason": "upstream_adapter_verification_pending",
+                    "roles": ["reference_video"],
+                    "max_count": 3,
+                    "mime_types": ["video/mp4"],
+                    "supports_images_with_video": True,
+                    "supports_audio_with_video": True,
+                    "supports_generate_audio_with_video": True,
+                    "max_total_assets": 15,
+                }
+                row["reference_audio"] = {
+                    "supported": True,
+                    "available": False,
+                    "reason": "upstream_adapter_verification_pending",
+                    "roles": ["reference_audio"],
+                    "max_count": 3,
+                    "mime_types": ["audio/mpeg", "audio/wav"],
+                    "audio_codecs": ["mp3", "wav"],
+                    "requires_non_audio_input": False,
+                    "supports_images_with_audio": True,
+                    "supports_video_with_audio": True,
+                    "supports_generate_audio_with_reference_audio": True,
+                    "max_total_assets": 15,
+                }
         video["generate_audio"] = bool(video.get("generate_audio"))
         video["settlement_capabilities"] = [
             DURABLE_REQUEST_ID_SUBMIT_CONTRACT,
@@ -561,6 +598,14 @@ class Gateway:
             "catalog_revision": self.catalog.revision,
             "pricing": self.pricing.snapshot(self.price_pairs()),
             "billing_v2_pricing": self.pricing.official_snapshot(self.price_pairs()),
+            "billing_v22_input_profiles": {
+                "contract_version": VIDEO_REFERENCE_V22_CONTRACT,
+                "pricing_revision": "ark-official-input-mode-1.5-2026-08-13",
+                "pricing_mode": "ark_official_input_mode_1_5",
+                "reference_video": {"supported": True, "official_rate_class": "with_video_input"},
+                "reference_audio": {"supported": True, "official_rate_class": "without_video_input"},
+                "reference_video_audio": {"supported": True, "official_rate_class": "with_video_input"},
+            },
         }
 
     def stream_snapshot(self) -> dict[str, int]:
@@ -866,8 +911,12 @@ class Gateway:
             raise GatewayError(HTTPStatus.BAD_REQUEST, "missing_generate_audio", "generate_audio必须明确传布尔值。")
         if not isinstance(raw.get("generate_audio"), bool):
             raise GatewayError(HTTPStatus.BAD_REQUEST, "invalid_generate_audio", "generate_audio必须是布尔值。")
-        if raw.get("video") or raw.get("videos") or raw.get("audio") or raw.get("audios"):
-            raise GatewayError(HTTPStatus.BAD_REQUEST, "video_reference_unsupported", "计费v2尚未定义视频或音频参考。")
+        if any(raw.get(name) not in (None, "", []) for name in ("video", "videos", "audio", "audios", "reference_videos", "reference_audios")):
+            raise GatewayError(
+                HTTPStatus.BAD_REQUEST,
+                "video_reference_unsupported",
+                "xtai-video-billing-v2.1不接受参考视频或参考音频；请先完成v2.2能力与价格门禁。",
+            )
         image_values: list[str] = []
         if raw.get("image"):
             image_values.append(str(raw.get("image") or "").strip())
@@ -913,6 +962,53 @@ class Gateway:
             },
         }
         return self.submit(translated, billing_v2=True)
+
+    def submit_v22(self, raw: Any, *, idempotency_key: str) -> tuple[dict[str, Any], bool]:
+        """Fail closed until exact v2.2 route capabilities and prices are approved."""
+        if not isinstance(raw, dict):
+            raise GatewayError(HTTPStatus.BAD_REQUEST, "payload_invalid", "请求体必须是JSON对象。")
+        request_id = str(raw.get("request_id") or "").strip()
+        if not request_id or not hmac.compare_digest(request_id, str(idempotency_key or "").strip()):
+            raise GatewayError(
+                HTTPStatus.CONFLICT,
+                "video_idempotency_key_mismatch",
+                "Idempotency-Key必须与request_id完全一致。",
+            )
+        has_video = bool(raw.get("reference_videos"))
+        has_audio = bool(raw.get("reference_audios"))
+        if not has_video and not has_audio:
+            raise GatewayError(
+                HTTPStatus.BAD_REQUEST,
+                "reference_input_combination_unsupported",
+                "v2.2仅用于包含参考视频或参考音频的新任务。",
+            )
+        try:
+            from reference_contract import ReferenceContractError, validate_reference_payload
+
+            validate_reference_payload(raw)
+        except ReferenceContractError as error:
+            status = HTTPStatus.CONFLICT if error.code.endswith("identity_mismatch") else HTTPStatus.BAD_REQUEST
+            raise GatewayError(status, error.code, str(error)) from error
+        enabled = (
+            self.config.v22_reference_combined_enabled
+            if has_video and has_audio
+            else self.config.v22_reference_video_enabled
+            if has_video
+            else self.config.v22_reference_audio_enabled
+        )
+        code = "reference_video_contract_unavailable" if has_video else "reference_audio_contract_unavailable"
+        message = "当前参考素材合同或精确上游能力尚未发布；任务未冻结、未提交。"
+        if not enabled:
+            raise GatewayError(HTTPStatus.SERVICE_UNAVAILABLE, code, message, category="service_unavailable")
+        # The switches cannot bypass verified route availability.  The official
+        # capability and base × 1.5 pricing are published independently, while
+        # paid routing remains closed until each adapter passes no-charge probes.
+        raise GatewayError(
+            HTTPStatus.SERVICE_UNAVAILABLE,
+            code,
+            "官方能力已发布，但当前精确上游路由尚未完成无费用验证；任务未冻结、未提交。",
+            category="service_unavailable",
+        )
 
     def public_v2_snapshot(self, snapshot: Mapping[str, Any]) -> dict[str, Any]:
         task_id = str(snapshot.get("job_id") or "")
@@ -1599,12 +1695,19 @@ def handler_class(gateway: Gateway) -> type[BaseHTTPRequestHandler]:
                 if path == "/v1/operations/video-settlements":
                     snapshot, reused = gateway.apply_settlement(raw)
                 elif path == "/v1/videos":
-                    if not self.v2_contract_current():
-                        raise GatewayError(HTTPStatus.BAD_REQUEST, "unsupported_contract_version", "新视频任务必须使用xtai-video-billing-v2.1。")
-                    snapshot, reused = gateway.submit_v2(
-                        raw,
-                        idempotency_key=str(self.headers.get("Idempotency-Key") or ""),
-                    )
+                    contract_version = self.v2_contract_version()
+                    if hmac.compare_digest(contract_version, VIDEO_BILLING_V2_CONTRACT):
+                        snapshot, reused = gateway.submit_v2(
+                            raw,
+                            idempotency_key=str(self.headers.get("Idempotency-Key") or ""),
+                        )
+                    elif hmac.compare_digest(contract_version, VIDEO_REFERENCE_V22_CONTRACT):
+                        snapshot, reused = gateway.submit_v22(
+                            raw,
+                            idempotency_key=str(self.headers.get("Idempotency-Key") or ""),
+                        )
+                    else:
+                        raise GatewayError(HTTPStatus.BAD_REQUEST, "unsupported_contract_version", "视频任务合同版本无效。")
                     self.json_response(HTTPStatus.OK if reused else HTTPStatus.ACCEPTED, gateway.public_v2_snapshot(snapshot))
                     return
                 else:
