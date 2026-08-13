@@ -11,6 +11,13 @@ state=/opt/xtai/state/video-billing-v2-staging/data
 candidate_state=/opt/xtai/state/video-billing-v2-staging-candidate-issue60/data
 secrets=/opt/xtai/secrets/video-billing
 env_file="$release/staging-issue60.env"
+staging_inspect="$release/staging-issue60-inspect.json"
+production_inspect="$release/production-issue60-inspect.json"
+
+cleanup_sensitive_files() {
+  rm -f "$env_file" "$staging_inspect" "$production_inspect"
+}
+trap cleanup_sensitive_files EXIT
 
 case "$state" in
   /opt/xtai/state/video-billing-v2-staging/data) ;;
@@ -21,10 +28,10 @@ case "$candidate_state" in
   *) echo "unsafe candidate state path" >&2; exit 1 ;;
 esac
 
-docker inspect "$current" > "$release/staging-issue60-inspect.json"
-docker inspect "$production" > "$release/production-issue60-inspect.json"
-chmod 600 "$release/staging-issue60-inspect.json" "$release/production-issue60-inspect.json"
-python3 - "$release/staging-issue60-inspect.json" "$release/production-issue60-inspect.json" "$env_file" <<'PY'
+docker inspect "$current" > "$staging_inspect"
+docker inspect "$production" > "$production_inspect"
+chmod 600 "$staging_inspect" "$production_inspect"
+python3 - "$staging_inspect" "$production_inspect" "$env_file" <<'PY'
 import json
 import pathlib
 import sys
@@ -96,7 +103,7 @@ restore() {
   docker rename "$rollback" "$current" >/dev/null 2>&1 || true
   docker start "$current" >/dev/null 2>&1 || true
 }
-trap restore INT TERM HUP
+trap 'restore; exit 1' INT TERM HUP
 
 if ! docker run -d --name "$current" --network app-net --restart unless-stopped --user gateway \
   --env-file "$env_file" \
@@ -111,6 +118,5 @@ if ! docker exec "$current" python -c "import json,urllib.request; h=json.loads(
   restore
   exit 1
 fi
-rm -f "$env_file" "$release/staging-issue60-inspect.json" "$release/production-issue60-inspect.json"
 trap - INT TERM HUP
 echo "deployment=ok rollback=$rollback"

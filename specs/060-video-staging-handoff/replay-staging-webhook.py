@@ -51,8 +51,15 @@ request = urllib.request.Request(
         "User-Agent": "XingTuVideoWebhookVerification/1",
     },
 )
+
+
+class NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, request, file_pointer, code, message, headers, new_url):
+        return None
+
+
 try:
-    with urllib.request.urlopen(request, timeout=10) as response:
+    with urllib.request.build_opener(NoRedirect()).open(request, timeout=10) as response:
         status = int(response.status)
         response.read(4096)
 except urllib.error.HTTPError as error:
