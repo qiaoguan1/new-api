@@ -1,0 +1,213 @@
+{
+  "protocol_version": "xtai-relay-v1",
+  "revision": "2026-08-13.1",
+  "models": [
+    {
+      "id": "seedance-2.0",
+      "label": "满血版",
+      "enabled": true,
+      "aliases": {
+        "value-sd-premium-720p": "720p"
+      },
+      "capabilities": {
+        "resolutions": ["480p", "720p", "1080p"],
+        "operation_modes": ["text", "first_frame", "reference", "all_reference"],
+        "aspect_ratios": ["16:9", "9:16", "1:1", "21:9", "3:4", "4:3", "2:3", "3:2"],
+        "duration_min": 4,
+        "duration_max": 15,
+        "max_images": 9,
+        "max_videos": 3
+      },
+      "routes": [
+        {
+          "provider": "toonflow",
+          "upstream_model": "Seedance 2.0",
+          "resolution": "480p",
+          "priority": 20,
+          "enabled": true,
+          "send_resolution": true,
+          "supports_generate_audio": true,
+          "adapter_revision": "toonflow-video-actual-cost-2026-08-09"
+        },
+        {
+          "provider": "paisio",
+          "upstream_model": "sd3-480p",
+          "resolution": "480p",
+          "priority": 10,
+          "enabled": true,
+          "send_resolution": false,
+          "supports_generate_audio": true,
+          "billing_mode": "per_second",
+          "routing_unit_cost": "0.38",
+          "adapter_revision": "paisio-video-face-sd3-sd4-2026-08-13"
+        },
+        {
+          "provider": "toonflow",
+          "upstream_model": "Seedance 2.0",
+          "resolution": "720p",
+          "priority": 20,
+          "enabled": true,
+          "send_resolution": true,
+          "supports_generate_audio": true,
+          "adapter_revision": "toonflow-video-actual-cost-2026-08-09"
+        },
+        {
+          "provider": "paisio",
+          "upstream_model": "sd3-720p",
+          "resolution": "720p",
+          "priority": 10,
+          "enabled": true,
+          "send_resolution": false,
+          "supports_generate_audio": true,
+          "billing_mode": "per_second",
+          "routing_unit_cost": "0.56",
+          "adapter_revision": "paisio-video-face-sd3-sd4-2026-08-13"
+        },
+        {
+          "provider": "toonflow",
+          "upstream_model": "Seedance 2.0",
+          "resolution": "1080p",
+          "priority": 20,
+          "enabled": true,
+          "send_resolution": true,
+          "supports_generate_audio": true,
+          "adapter_revision": "toonflow-video-actual-cost-2026-08-09"
+        },
+        {
+          "provider": "paisio",
+          "upstream_model": "sd3-1080p",
+          "resolution": "1080p",
+          "priority": 10,
+          "enabled": true,
+          "send_resolution": false,
+          "supports_generate_audio": true,
+          "billing_mode": "per_second",
+          "routing_unit_cost": "0.89",
+          "adapter_revision": "paisio-video-face-sd3-sd4-2026-08-13"
+        }
+      ]
+    },
+    {
+      "id": "seedance-2.0-fast",
+      "label": "Fast版",
+      "enabled": true,
+      "aliases": {},
+      "capabilities": {
+        "resolutions": ["480p", "720p"],
+        "operation_modes": ["text", "first_frame", "reference"],
+        "aspect_ratios": ["16:9", "9:16", "1:1", "21:9", "3:4", "4:3"],
+        "duration_min": 4,
+        "duration_max": 15,
+        "max_images": 1,
+        "max_videos": 0
+      },
+      "routes": [
+        {
+          "provider": "toonflow",
+          "upstream_model": "Seedance 2.0 fast",
+          "resolution": "480p",
+          "priority": 20,
+          "enabled": true,
+          "send_resolution": true,
+          "supports_generate_audio": true,
+          "adapter_revision": "toonflow-video-actual-cost-2026-08-09"
+        },
+        {
+          "provider": "paisio",
+          "upstream_model": "sd3-fast-480p",
+          "resolution": "480p",
+          "priority": 10,
+          "enabled": true,
+          "send_resolution": false,
+          "supports_generate_audio": true,
+          "billing_mode": "per_second",
+          "routing_unit_cost": "0.33",
+          "adapter_revision": "paisio-video-face-sd3-sd4-2026-08-13"
+        },
+        {
+          "provider": "toonflow",
+          "upstream_model": "Seedance 2.0 fast",
+          "resolution": "720p",
+          "priority": 20,
+          "enabled": true,
+          "send_resolution": true,
+          "supports_generate_audio": true,
+          "adapter_revision": "toonflow-video-actual-cost-2026-08-09"
+        },
+        {
+          "provider": "paisio",
+          "upstream_model": "sd3-fast-720p",
+          "resolution": "720p",
+          "priority": 10,
+          "enabled": true,
+          "send_resolution": false,
+          "supports_generate_audio": true,
+          "billing_mode": "per_second",
+          "routing_unit_cost": "0.48",
+          "adapter_revision": "paisio-video-face-sd3-sd4-2026-08-13"
+        },
+        {
+          "provider": "paisio",
+          "upstream_model": "sd4-fast2-720p",
+          "resolution": "720p",
+          "priority": 10,
+          "enabled": true,
+          "send_resolution": false,
+          "supports_generate_audio": true,
+          "billing_mode": "per_call",
+          "routing_unit_cost": "3.10",
+          "adapter_revision": "paisio-video-face-sd3-sd4-2026-08-13"
+        },
+        {
+          "provider": "paisio",
+          "upstream_model": "sd4-fast5-720p",
+          "resolution": "720p",
+          "priority": 10,
+          "enabled": true,
+          "send_resolution": false,
+          "supports_generate_audio": true,
+          "billing_mode": "per_call",
+          "routing_unit_cost": "3.30",
+          "adapter_revision": "paisio-video-face-sd3-sd4-2026-08-13"
+        }
+      ]
+    },
+    {
+      "id": "seedance-2.0-mini",
+      "label": "Mini版",
+      "enabled": true,
+      "aliases": {},
+      "capabilities": {
+        "resolutions": ["480p", "720p"],
+        "operation_modes": ["text", "first_frame", "reference"],
+        "aspect_ratios": ["16:9", "9:16", "1:1"],
+        "duration_min": 4,
+        "duration_max": 15,
+        "max_images": 1,
+        "max_videos": 0
+      },
+      "routes": [
+        {
+          "provider": "toonflow",
+          "upstream_model": "Seedance 2.0 mini",
+          "resolution": "480p",
+          "priority": 10,
+          "enabled": true,
+          "send_resolution": true,
+          "supports_generate_audio": true,
+          "adapter_revision": "toonflow-video-actual-cost-2026-08-09"
+        },
+        {
+          "provider": "toonflow",
+          "upstream_model": "Seedance 2.0 mini",
+          "resolution": "720p",
+          "priority": 10,
+          "enabled": true,
+          "send_resolution": true,
+          "supports_generate_audio": true,
+          "adapter_revision": "toonflow-video-actual-cost-2026-08-09"
+        }
+      ]
+    }
+  ]
+}

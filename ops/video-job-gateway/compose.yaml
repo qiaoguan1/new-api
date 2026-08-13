@@ -1,0 +1,33 @@
+name: xtai-video-job-gateway
+
+services:
+  video-job-gateway:
+    build: .
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      VIDEO_JOB_GATEWAY_DATA_DIR: /data
+      VIDEO_JOB_GATEWAY_CATALOG_FILE: /app/catalog.json
+      VIDEO_JOB_GATEWAY_HOST: 0.0.0.0
+      VIDEO_JOB_GATEWAY_PORT: 8091
+      VIDEO_JOB_GATEWAY_ENABLED_PROVIDERS: ${VIDEO_JOB_GATEWAY_ENABLED_PROVIDERS:-toonflow,paisio,rolldek}
+      VIDEO_JOB_GATEWAY_V21_APPROVED_PROVIDERS: ${VIDEO_JOB_GATEWAY_V21_APPROVED_PROVIDERS:-toonflow}
+      VIDEO_JOB_TOONFLOW_BILLING_TOKEN_FILE: /run/secrets/video-billing/toonflow.token
+      VIDEO_JOB_PAISIO_BILLING_CREDENTIAL_FILE: /run/secrets/video-billing/paisio-session.json
+      VIDEO_JOB_ROLLDEK_BILLING_CREDENTIAL_FILE: /run/secrets/video-billing/rolldek-session.json
+    volumes:
+      - ${VIDEO_JOB_GATEWAY_HOST_DATA_DIR:-./data}:/data
+      - ${VIDEO_JOB_GATEWAY_HOST_SECRET_DIR:-./secrets}:/run/secrets/video-billing:ro
+    networks:
+      - relay
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8091/health', timeout=2).read()"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+networks:
+  relay:
+    external: true
+    name: app-net
