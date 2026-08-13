@@ -31,6 +31,10 @@ target.chmod(0o600)
 PY
 
 docker exec "$current" python -c "import sqlite3; a=sqlite3.connect('/data/video-jobs.sqlite3'); b=sqlite3.connect('/data/video-jobs.issue90.backup.sqlite3'); a.backup(b); b.close(); a.close()"
+case "$candidate_state" in
+  /opt/xtai/state/video-billing-v2-issue90-candidate/data) ;;
+  *) echo "unsafe candidate state path" >&2; exit 1 ;;
+esac
 rm -rf "$candidate_state"
 mkdir -p "$candidate_state"
 cp "$state/video-jobs.issue90.backup.sqlite3" "$candidate_state/video-jobs.sqlite3"
