@@ -50,8 +50,16 @@ docker exec "$candidate" python -c "import json,sqlite3,urllib.request; h=json.l
 docker rm -f "$candidate" >/dev/null
 
 touch "$state/DRAIN"
-active=$(docker exec "$current" python -c "import sqlite3; c=sqlite3.connect('/data/video-jobs.sqlite3'); print(c.execute(\"select count(*) from video_jobs where status in ('queued','submitting','running','reconciling')\").fetchone()[0])")
-pending=$(docker exec "$current" python -c "import sqlite3; c=sqlite3.connect('/data/video-jobs.sqlite3'); print(c.execute(\"select count(*) from video_jobs where billing_status in ('settlement_pending','recovery_pending')\").fetchone()[0])")
+active=1
+pending=1
+for _round in $(seq 1 60); do
+  active=$(docker exec "$current" python -c "import sqlite3; c=sqlite3.connect('/data/video-jobs.sqlite3'); print(c.execute(\"select count(*) from video_jobs where status in ('queued','submitting','running','reconciling')\").fetchone()[0])")
+  pending=$(docker exec "$current" python -c "import sqlite3; c=sqlite3.connect('/data/video-jobs.sqlite3'); print(c.execute(\"select count(*) from video_jobs where billing_status in ('settlement_pending','recovery_pending')\").fetchone()[0])")
+  if [ "$active" = 0 ] && [ "$pending" = 0 ]; then
+    break
+  fi
+  sleep 2
+done
 if [ "$active" != 0 ] || [ "$pending" != 0 ]; then
   rm -f "$state/DRAIN"
   echo "production not idle: active=$active pending=$pending" >&2
