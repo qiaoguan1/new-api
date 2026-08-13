@@ -40,6 +40,8 @@ from routing import RoutePlanError, build_route_plan
 from store import (
     BILLING_CONTRACT_VERSION,
     BILLING_CONTRACT_VERSIONS,
+    GENERATION_QUARANTINE_FAILURE_THRESHOLD,
+    GENERATION_QUARANTINE_WINDOW_SECONDS,
     Store,
     StoreConflict,
     build_settlement_evidence,
@@ -96,6 +98,7 @@ class Config:
     newapi_billing_enabled_providers: frozenset[str] = field(default_factory=frozenset)
     newapi_billing_credential_files: dict[str, Path] = field(default_factory=dict, repr=False)
     newapi_billing_rates_cny_per_usd: dict[str, str] = field(default_factory=dict)
+    paisio_identity_resolver_enabled: bool = False
     v21_approved_providers: frozenset[str] = field(
         default_factory=lambda: frozenset({"toonflow"})
     )
@@ -245,6 +248,9 @@ class Config:
             newapi_billing_enabled_providers=newapi_billing_enabled,
             newapi_billing_credential_files=newapi_billing_files,
             newapi_billing_rates_cny_per_usd=newapi_billing_rates,
+            paisio_identity_resolver_enabled=_env_bool(
+                "VIDEO_JOB_PAISIO_IDENTITY_RESOLVER_ENABLED", False
+            ),
             v21_approved_providers=v21_approved_providers,
             settlement_query_concurrency=_env_int("VIDEO_JOB_GATEWAY_SETTLEMENT_QUERY_CONCURRENCY", 2, 1, 10),
             settlement_query_interval_seconds=_env_int("VIDEO_JOB_GATEWAY_SETTLEMENT_QUERY_INTERVAL_SECONDS", 60, 15, 3600),
@@ -329,6 +335,13 @@ class Gateway:
                     credential_file=config.newapi_billing_credential_files[provider_id],
                     rate_cny_per_usd=config.newapi_billing_rates_cny_per_usd.get(provider_id, "1"),
                     timeout_seconds=provider.poll_timeout_seconds,
+                    result_hosts=provider.result_hosts,
+                    max_media_bytes=config.max_stream_bytes,
+                    identity_resolution_enabled=(
+                        config.paisio_identity_resolver_enabled
+                        if provider_id == "paisio"
+                        else True
+                    ),
                 )
         self.pricing = pricing or RelayPricing(
             config.pricing_file or Path(__file__).with_name("relay-pricing.json"),
@@ -372,7 +385,7 @@ class Gateway:
         billing_ready = {
             provider_id
             for provider_id, collector in self.billing_collectors.items()
-            if bool(getattr(collector, "ready", False))
+            if bool(getattr(collector, "identity_ready", getattr(collector, "ready", False)))
         }
         approved = set(
             getattr(
@@ -433,6 +446,7 @@ class Gateway:
 
     def provider_health(self) -> dict[str, Any]:
         unhealthy = self.store.unhealthy_providers()
+        generation_quarantines = set(self.store.generation_quarantines())
         settlement_unhealthy = self.store.unhealthy_settlement_providers(
             min_age_seconds=getattr(
                 self.config,
@@ -449,7 +463,10 @@ class Gateway:
         for provider_id, adapter in sorted(self.adapters.items()):
             generation_ready = bool(adapter.ready_for_new_jobs)
             collector = self.billing_collectors.get(provider_id)
-            billing_ready = bool(collector is not None and getattr(collector, "ready", False))
+            billing_ready = bool(
+                collector is not None
+                and getattr(collector, "identity_ready", getattr(collector, "ready", False))
+            )
             approved = provider_id in set(
                 getattr(
                     getattr(self, "config", None),
@@ -462,6 +479,7 @@ class Gateway:
                 and billing_ready
                 and approved
                 and provider_id not in unhealthy
+                and provider_id not in generation_quarantines
                 and provider_id not in settlement_unhealthy
             )
             if not generation_ready:
@@ -470,6 +488,8 @@ class Gateway:
                 exclusion_reason = "billing_not_ready"
             elif not approved:
                 exclusion_reason = "billing_not_approved"
+            elif provider_id in generation_quarantines:
+                exclusion_reason = "provider_generation_quarantined"
             elif provider_id in settlement_unhealthy:
                 exclusion_reason = "billing_settlement_backlog"
             elif provider_id in unhealthy:
@@ -486,7 +506,10 @@ class Gateway:
                     "eligible_for_new_jobs": eligible,
                     "eligible_for_new_v21_jobs": eligible,
                     "exclusion_reason": exclusion_reason,
-                    "recent_definite_failure_threshold_reached": provider_id in unhealthy,
+                    "recent_definite_failure_threshold_reached": (
+                        provider_id in unhealthy and provider_id not in generation_quarantines
+                    ),
+                    "persistent_generation_quarantine_active": provider_id in generation_quarantines,
                     "settlement_backlog_threshold_reached": provider_id in settlement_unhealthy,
                 }
             )
@@ -494,6 +517,8 @@ class Gateway:
             "ok": True,
             "window_seconds": 300,
             "failure_threshold": 3,
+            "persistent_generation_quarantine_window_seconds": GENERATION_QUARANTINE_WINDOW_SECONDS,
+            "persistent_generation_quarantine_failure_threshold": GENERATION_QUARANTINE_FAILURE_THRESHOLD,
             "providers": rows,
             "time": int(time.time()),
         }
@@ -585,7 +610,7 @@ class Gateway:
         )
         route = routes[0]
         selection_reason = (
-            "capability_only_v1" if len(routes) == 1 else "fixed_provider_priority_v1"
+            "capability_only_v1" if len(routes) == 1 else "capability_and_estimated_cost_v1"
         )
         route_plan = [
             {
@@ -593,6 +618,8 @@ class Gateway:
                 "upstream_model": candidate.upstream_model,
                 "adapter_revision": candidate.adapter_revision,
                 "send_resolution": candidate.send_resolution,
+                "billing_mode": candidate.billing_mode,
+                "routing_unit_cost": candidate.routing_unit_cost,
             }
             for candidate in routes
         ]
@@ -810,6 +837,7 @@ class Gateway:
                 stable_model=model.id,
                 resolution=resolution or "default",
                 routes=candidate_routes,
+                duration=duration,
             )
         except RoutePlanError as error:
             raise GatewayError(HTTPStatus.CONFLICT, "video_model_unavailable", str(error)) from error
@@ -938,7 +966,9 @@ class Gateway:
                 payload = json.loads(str(job.get("payload_json") or "{}"))
                 if bool(payload.get("_billing_v2")):
                     collector = self.billing_collectors.get(str(job.get("provider_id") or ""))
-                    if collector is None or not bool(getattr(collector, "ready", False)):
+                    if collector is None or not bool(
+                        getattr(collector, "identity_ready", getattr(collector, "ready", False))
+                    ):
                         error = _error(
                             "provider_billing_not_ready",
                             "service_unavailable",
@@ -963,8 +993,9 @@ class Gateway:
                     payload.setdefault("_route", {})["send_resolution"] = bool(
                         route_settings.get("send_resolution", False)
                     )
+                submission_request_id = str(job.get("_submission_request_id") or job["request_id"])
                 observation = adapter.submit(
-                    str(job["request_id"]),
+                    submission_request_id,
                     str(job["upstream_model"]),
                     payload,
                 )
@@ -980,9 +1011,8 @@ class Gateway:
                     )
                     if not observation.upstream_task_id and self.store.advance_route(job_id, error=error):
                         continue
-                    self.store.finish(
+                    self.store.begin_recovery(
                         job_id,
-                        "failed",
                         error=error,
                         upstream_task_id=observation.upstream_task_id,
                         upstream_status=observation.upstream_status,
@@ -1007,16 +1037,14 @@ class Gateway:
                 contract = error.contract()
                 if not error.uncertain and self.store.advance_route(job_id, error=contract):
                     continue
-                self.store.finish(
-                    job_id,
-                    "uncertain" if error.uncertain else "failed",
-                    error=contract,
-                )
+                if error.uncertain:
+                    self.store.begin_recovery(job_id, error=contract)
+                else:
+                    self.store.finish(job_id, "failed", error=contract)
                 return
             except Exception as error:
-                self.store.finish(
+                self.store.begin_recovery(
                     job_id,
-                    "uncertain",
                     error=_error(
                         "gateway_execution_uncertain",
                         "internal",
@@ -1041,10 +1069,17 @@ class Gateway:
                 last_cleanup = current
             for job in self.store.due_poll_jobs(limit=self.config.poll_concurrency, lease_seconds=30):
                 threading.Thread(target=self._poll_one, args=(job,), daemon=True, name=f"video-poll-{str(job['job_id'])[-8:]}").start()
+            for job in self.store.due_recovery_jobs(limit=self.config.settlement_query_concurrency, lease_seconds=60):
+                threading.Thread(
+                    target=self._recover_one,
+                    args=(job,),
+                    daemon=True,
+                    name=f"video-recover-{str(job['job_id'])[-8:]}",
+                ).start()
             for job in self.store.due_settlement_jobs(
                 set(self.billing_collectors),
                 limit=self.config.settlement_query_concurrency,
-                lease_seconds=max(30, self.config.toonflow_billing_timeout_seconds + 10),
+                lease_seconds=300,
             ):
                 threading.Thread(
                     target=self._collect_settlement_one,
@@ -1074,7 +1109,30 @@ class Gateway:
                 )
                 return
             try:
-                record = collector.collect(str(job.get("upstream_task_id") or ""))
+                current = self.store.get(job_id=job_id, internal=True)
+                if not current or str(current.get("billing_status") or "") != "settlement_pending":
+                    return
+                if provider_id == "paisio":
+                    binding = self.store.get_provider_task_binding(job_id)
+                    if binding:
+                        record = collector.collect(str(binding.get("billing_task_id") or ""))
+                    else:
+                        record = collector.resolve_and_collect(current)
+                        self.store.bind_provider_task(
+                            job_id=job_id,
+                            provider_id=provider_id,
+                            execution_task_id=record.execution_task_id,
+                            billing_task_id=record.provider_task_id,
+                            resolver_version=record.resolver_version,
+                            provider_record_id=record.provider_record_id,
+                            provider_submit_time=record.provider_submit_time,
+                            provider_finish_time=record.provider_finish_time,
+                            media_size_bytes=record.media_size_bytes,
+                            media_sha256=record.media_sha256,
+                        )
+                else:
+                    record = collector.collect(str(current.get("upstream_task_id") or ""))
+                aggregate_cost = self.store.record_success_attempt_cost(job_id, record)
                 current = self.store.get(job_id=job_id, internal=True)
                 if not current or str(current.get("billing_status") or "") != "settlement_pending":
                     return
@@ -1082,10 +1140,12 @@ class Gateway:
                     job_id=job_id,
                     revision=int(current.get("settlement_revision") or 0) + 1,
                     provider_task_id=record.provider_task_id,
-                    actual_cost_status=record.actual_cost_status,
-                    actual_cost_cny_exact=record.actual_cost_cny_exact,
-                    evidence_source=record.evidence_source,
-                    evidence_id=record.evidence_id,
+                    actual_cost_status="zero_verified" if Decimal(aggregate_cost) == 0 else "actual",
+                    actual_cost_cny_exact=aggregate_cost,
+                    evidence_source="xtai_aggregate_attempt_cost",
+                    evidence_id="aggregate:" + hashlib.sha256(
+                        f"{job_id}\0{aggregate_cost}\0{record.evidence_id}".encode("utf-8")
+                    ).hexdigest(),
                     observed_at=record.observed_at,
                     contract_version=str(current.get("billing_contract_version") or ""),
                 )
@@ -1166,9 +1226,8 @@ class Gateway:
         with self.poll_slots:
             job_id = str(job["job_id"])
             if int(time.time()) - int(job.get("created_at") or 0) > self.config.max_job_age_seconds:
-                self.store.finish(
+                self.store.begin_recovery(
                     job_id,
-                    "pending_review",
                     error=_error("video_job_age_exceeded", "upstream", "视频任务超过自动查询时限，已转人工核对且不会重提。", 504, False, True, "poll"),
                     upstream_task_id=str(job.get("upstream_task_id") or ""),
                     upstream_status=str(job.get("upstream_status") or ""),
@@ -1191,9 +1250,8 @@ class Gateway:
                     missing=True,
                 )
                 if count >= 2:
-                    self.store.finish(
+                    self.store.begin_recovery(
                         job_id,
-                        "failed",
                         error=_error("upstream_job_not_found_confirmed", "upstream", "上游连续两次确认任务不存在。", 404, False, False, "poll"),
                         upstream_task_id=str(job.get("upstream_task_id") or ""),
                         upstream_status="not_found",
@@ -1208,9 +1266,8 @@ class Gateway:
                     upstream_status=observation.upstream_status,
                 )
             elif observation.status == "failed":
-                self.store.finish(
+                self.store.begin_recovery(
                     job_id,
-                    "failed",
                     error=_error(
                         observation.error_code or "upstream_video_failed",
                         "upstream",
@@ -1229,6 +1286,82 @@ class Gateway:
                     upstream_status=observation.upstream_status or observation.status,
                     poll_delay=self.config.poll_interval_seconds,
                 )
+
+    def _recover_one(self, job: dict[str, Any]) -> None:
+        """Automatically close failed/uncertain attempts from authenticated evidence."""
+        with self.settlement_slots:
+            job_id = str(job.get("job_id") or "")
+            current = self.store.get(job_id=job_id, internal=True) or {}
+            if str(current.get("status") or "") != "reconciling":
+                return
+            now = int(time.time())
+            deadline = int(current.get("recovery_deadline_at") or 0)
+            task_id = str(current.get("upstream_task_id") or "")
+            if not task_id:
+                if int(current.get("recovery_attempts") or 0) <= 2 and self.store.retry_uncertain_submit(job_id):
+                    self.start_submit(job_id)
+                    return
+                if deadline and now >= deadline:
+                    self.store.finish(
+                        job_id,
+                        "failed",
+                        error=_error(
+                            "video_submit_identity_unresolved",
+                            "upstream",
+                            "The upstream submit identity could not be proven before the automatic recovery deadline.",
+                            504,
+                            False,
+                            True,
+                            "reconcile",
+                        ),
+                    )
+                    return
+                self.store.retry_recovery(
+                    job_id,
+                    delay_seconds=min(3600, 60 * (2 ** min(int(current.get("recovery_attempts") or 1), 5))),
+                    error_code="provider_submit_identity_pending",
+                )
+                return
+            provider_id = str(current.get("provider_id") or "").strip().lower()
+            collector = self.billing_collectors.get(provider_id)
+            if collector is None or not hasattr(collector, "collect_failed"):
+                self.store.retry_recovery(job_id, delay_seconds=3600, error_code="provider_failure_collector_not_configured")
+                return
+            try:
+                record = collector.collect_failed(task_id)
+                raw_error = json.loads(str(current.get("error_json") or "{}"))
+                advanced = self.store.complete_failed_attempt(
+                    job_id,
+                    provider_task_id=record.provider_task_id,
+                    actual_cost_cny_exact=record.actual_cost_cny_exact,
+                    evidence_source=record.evidence_source,
+                    evidence_id=record.evidence_id,
+                    observed_at=record.observed_at,
+                    error=raw_error if isinstance(raw_error, dict) else {},
+                )
+                if advanced:
+                    self.start_submit(job_id)
+            except BillingCollectionError as error:
+                if deadline and now >= deadline:
+                    self.store.finish(
+                        job_id,
+                        "failed",
+                        error=_error(
+                            "video_recovery_deadline_exceeded",
+                            "upstream",
+                            "Automatic provider evidence reconciliation reached its deadline.",
+                            504,
+                            False,
+                            True,
+                            "reconcile",
+                        ),
+                        upstream_task_id=task_id,
+                        upstream_status=str(current.get("upstream_status") or ""),
+                    )
+                else:
+                    self.store.retry_recovery(job_id, delay_seconds=error.retry_after_seconds, error_code=error.code)
+            except (StoreConflict, json.JSONDecodeError):
+                self.store.retry_recovery(job_id, delay_seconds=900, error_code="video_recovery_evidence_conflict")
 
     def _delay_poll(self, job_id: str, upstream_status: str, error: dict[str, Any]) -> None:
         current = self.store.get(job_id=job_id, internal=True) or {}

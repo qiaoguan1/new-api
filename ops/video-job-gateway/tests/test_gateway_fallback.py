@@ -22,6 +22,7 @@ class FakeAdapter:
         self.outcome = outcome
         self.calls = 0
         self.last_payload = None
+        self.request_ids = []
 
     @property
     def ready_for_new_jobs(self):
@@ -30,6 +31,7 @@ class FakeAdapter:
     def submit(self, request_id, upstream_model, payload):
         self.calls += 1
         self.last_payload = payload
+        self.request_ids.append(request_id)
         if isinstance(self.outcome, Exception):
             raise self.outcome
         return self.outcome
@@ -85,6 +87,41 @@ class GatewayFallbackTests(unittest.TestCase):
             self.assertEqual(rows["paisio"]["exclusion_reason"], "billing_not_approved")
             self.assertNotIn("token", str(rows).lower())
 
+    def test_persistent_generation_quarantine_excludes_new_v21_jobs(self):
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as directory:
+            gateway = Gateway.__new__(Gateway)
+            gateway.store = Store(pathlib.Path(directory))
+            gateway.adapters = {
+                "toonflow": FakeAdapter("toonflow", Observation(status="running")),
+                "paisio": FakeAdapter("paisio", Observation(status="running")),
+            }
+            gateway.billing_collectors = {
+                "toonflow": FakeBillingCollector(True),
+                "paisio": FakeBillingCollector(True),
+            }
+            gateway.config = types.SimpleNamespace(
+                v21_approved_providers=frozenset({"toonflow", "paisio"})
+            )
+            with gateway.store.connect() as connection:
+                connection.execute(
+                    """
+                    insert into video_provider_generation_quarantines(
+                        provider_id,status,reason_code,failure_count,window_seconds,
+                        first_failure_at,last_failure_at,activated_at,cleared_at
+                    ) values('paisio','active','provider_credential_refresh_failed',2,600,1,2,2,0)
+                    """
+                )
+                connection.commit()
+
+            self.assertEqual(gateway.eligible_v2_providers, {"toonflow"})
+            rows = {row["provider_id"]: row for row in gateway.provider_health()["providers"]}
+            self.assertTrue(rows["paisio"]["persistent_generation_quarantine_active"])
+            self.assertEqual(
+                rows["paisio"]["exclusion_reason"],
+                "provider_generation_quarantined",
+            )
+            self.assertFalse(rows["paisio"]["eligible_for_new_v21_jobs"])
+
     def test_settlement_backlog_quarantines_new_jobs_but_not_provider_configuration(self):
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as directory:
             gateway = Gateway.__new__(Gateway)
@@ -116,6 +153,7 @@ class GatewayFallbackTests(unittest.TestCase):
             self.assertTrue(rows["paisio"]["settlement_backlog_threshold_reached"])
             self.assertFalse(rows["toonflow"]["settlement_backlog_threshold_reached"])
             self.assertNotIn("token", str(rows).lower())
+
     def test_toonflow_result_allowlist_accepts_tos_subdomain_only(self):
         allowed = ("api.toonflow.net", "tos-cn-beijing.volces.com")
         with mock.patch("app.socket.getaddrinfo", return_value=[(2, 1, 6, "", ("8.8.8.8", 443))]):
@@ -184,9 +222,39 @@ class GatewayFallbackTests(unittest.TestCase):
             self.gateway(store, second, first)._submit_with_fallback(job_id)
 
             job = store.get(job_id=job_id, internal=True)
-            self.assertEqual(job["status"], "uncertain")
+            self.assertEqual(job["status"], "reconciling")
             self.assertEqual(job["provider_id"], "paisio")
             self.assertEqual(second.calls, 0)
+
+    def test_same_provider_model_fallback_uses_distinct_stable_idempotency_key(self):
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as directory:
+            store = Store(pathlib.Path(directory))
+            snapshot, _ = store.create(
+                request_id="request-same-provider-fallback",
+                fingerprint="fingerprint-same-provider",
+                protocol_version="xtai-relay-v1",
+                catalog_revision="test",
+                stable_model="seedance-2.0-fast",
+                provider_id="paisio",
+                upstream_model="sd3-fast-720p",
+                adapter_revision="paisio-v1",
+                payload_json='{"_route":{"resolution":"720p"}}',
+                route_plan=[
+                    {"provider_id": "paisio", "upstream_model": "sd3-fast-720p", "adapter_revision": "paisio-v1", "send_resolution": False},
+                    {"provider_id": "paisio", "upstream_model": "sd4-fast2-720p", "adapter_revision": "paisio-v1", "send_resolution": False},
+                ],
+                selection_reason="test",
+            )
+            first = FakeAdapter("paisio", Observation(status="failed", error_code="rejected"))
+            gateway = self.gateway(store, FakeAdapter("toonflow", Observation(status="running")), first)
+            gateway._submit_with_fallback(str(snapshot["job_id"]))
+
+            job = store.get(job_id=str(snapshot["job_id"]), internal=True)
+            self.assertEqual(job["upstream_model"], "sd4-fast2-720p")
+            self.assertEqual(first.calls, 2)
+            self.assertEqual(first.request_ids[0], "request-same-provider-fallback")
+            self.assertRegex(first.request_ids[1], r"^xtai-[0-9a-f]{48}$")
+            self.assertNotEqual(first.request_ids[0], first.request_ids[1])
 
     def test_v21_rechecks_billing_readiness_immediately_before_submit(self):
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as directory:
@@ -230,7 +298,7 @@ class GatewayFallbackTests(unittest.TestCase):
             self.gateway(store, second, first)._submit_with_fallback(job_id)
 
             job = store.get(job_id=job_id, internal=True)
-            self.assertEqual(job["status"], "failed")
+            self.assertEqual(job["status"], "reconciling")
             self.assertEqual(job["provider_id"], "paisio")
             self.assertEqual(job["upstream_task_id"], "paisio-created-task")
             self.assertEqual(first.calls, 1)
@@ -275,7 +343,7 @@ class GatewayFallbackTests(unittest.TestCase):
 
             job = gateway.store.get(request_id="priority-reason-request", internal=True)
             self.assertEqual(job["provider_id"], "paisio")
-            self.assertEqual(job["selection_reason"], "fixed_provider_priority_v1")
+            self.assertEqual(job["selection_reason"], "capability_and_estimated_cost_v1")
 
     def test_capability_only_job_persists_single_route_reason(self):
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as directory:

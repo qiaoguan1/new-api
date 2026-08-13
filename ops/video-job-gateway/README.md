@@ -13,9 +13,14 @@ downstream model names and approved upstream model mappings.
   persisted plan.
 - `seedance-2.0-mini` remains Toonflow-only until another route has reviewed capability evidence.
 - The complete ordered plan is written to SQLite before any upstream submission.
-- Fallback is allowed only after a definite submission rejection with no upstream task ID.
-- Timeouts, interrupted connections, malformed success responses, and any other uncertain outcome
-  never cross providers. They stop as `uncertain` for manual reconciliation.
+- Definite pre-creation rejection falls back immediately. Post-creation failures first enter
+  authenticated billing reconciliation; only verified terminal net cost/refund evidence allows the
+  next route.
+- Timeouts, interrupted connections, and malformed success responses retry only the same route with
+  the same idempotency key. Recovery is bounded to four routes, the job age limit, and an extra-cost
+  guard equal to the original reservation; it does not require a per-job operator decision.
+- Every attempt and its exact fixed-point CNY evidence are persisted. Final settlement sums all
+  verified attempt costs and applies the public markup once.
 - Public capability and job responses omit provider IDs, upstream model names, route plans, costs,
   margins, and credentials.
 

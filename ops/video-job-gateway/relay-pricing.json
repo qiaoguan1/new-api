@@ -7,35 +7,35 @@
     "seedance-2.0": {
       "480p": {
         "official_cost_cny_per_second": "0.441945",
-        "relay_price_aliases": ["seedance-2.0-480p", "sd2-480p"]
+        "relay_price_aliases": ["seedance-2.0-480p"]
       },
       "720p": {
         "official_cost_cny_per_second": "0.9936",
-        "relay_price_aliases": ["seedance2.0-selfsur-720p", "seedance-2.0-720p", "sd2-720p", "sd2-pro-720p", "value-sd-premium-720p"]
+        "relay_price_aliases": ["seedance2.0-selfsur-720p", "seedance-2.0-720p", "value-sd-premium-720p"]
       },
       "1080p": {
         "official_cost_cny_per_second": "2.4786",
-        "relay_price_aliases": ["seedance-2.0-1080p", "sd2-1080p"]
+        "relay_price_aliases": ["seedance-2.0-1080p"]
       }
     },
     "seedance-2.0-fast": {
       "480p": {
         "official_cost_cny_per_second": "0.3554775",
-        "relay_price_aliases": ["seedance-2.0-fast-480p", "sd2-fast-480p"]
+        "relay_price_aliases": ["seedance-2.0-fast-480p"]
       },
       "720p": {
         "official_cost_cny_per_second": "0.7992",
-        "relay_price_aliases": ["seedance2.0-selfsur-fast-720p", "seedance-2.0-fast-720p", "sd2-fast-720p"]
+        "relay_price_aliases": ["seedance2.0-selfsur-fast-720p", "seedance-2.0-fast-720p"]
       }
     },
     "seedance-2.0-mini": {
       "480p": {
         "official_cost_cny_per_second": "0.2209725",
-        "relay_price_aliases": ["seedance-2.0-mini-480p", "sd2-mini-480p"]
+        "relay_price_aliases": ["seedance-2.0-mini-480p"]
       },
       "720p": {
         "official_cost_cny_per_second": "0.4968",
-        "relay_price_aliases": ["seedance-2.0-mini-720p", "sd2-mini-720p"]
+        "relay_price_aliases": ["seedance-2.0-mini-720p"]
       }
     }
   }

@@ -17,6 +17,15 @@ SUCCESS_STATUSES = {"completed", "complete", "succeeded", "success", "done", "fi
 FAILURE_STATUSES = {"failed", "failure", "error", "cancelled", "canceled", "rejected", "expired"}
 QUEUED_STATUSES = {"pending", "queued", "created", "submitted", "waiting"}
 RUNNING_STATUSES = {"in_progress", "in-progress", "processing", "running", "generating"}
+PROVIDER_CREDENTIAL_FAILURE_MARKERS = (
+    "refresh leased account credential",
+    "invalid adobe refresh response",
+    "adobe refresh cookie failed",
+)
+REFERENCE_FETCH_REJECTION_MARKERS = (
+    "cannot fetch content from the provided url",
+    "url_rejected",
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -595,6 +604,8 @@ def _observation(raw: dict[str, Any], fallback_task_id: str = "") -> Observation
         status = "running"
     error_message = _safe_error(raw, "", "上游视频任务失败。") if status == "failed" else ""
     error_code = _first_text(raw, ("error_code", "code")) if status == "failed" else ""
+    if status == "failed":
+        error_code = _normalized_failure_code(error_code, error_message)
     return Observation(
         status=status,
         upstream_task_id=upstream_task_id,
@@ -605,6 +616,15 @@ def _observation(raw: dict[str, Any], fallback_task_id: str = "") -> Observation
         retryable=False,
         requires_auth=False,
     )
+
+
+def _normalized_failure_code(error_code: str, error_message: str) -> str:
+    combined = " ".join(f"{error_code} {error_message}".lower().split())
+    if any(marker in combined for marker in PROVIDER_CREDENTIAL_FAILURE_MARKERS):
+        return "provider_credential_refresh_failed"
+    if any(marker in combined for marker in REFERENCE_FETCH_REJECTION_MARKERS):
+        return "video_reference_fetch_rejected"
+    return str(error_code or "upstream_video_failed").strip()[:80]
 
 
 def _result_url(raw: dict[str, Any]) -> str:

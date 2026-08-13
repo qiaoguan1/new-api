@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
 
@@ -24,6 +25,8 @@ class Route:
     aspect_ratios: tuple[str, ...] = ()
     max_total_assets: int = 0
     supports_generate_audio: bool = False
+    billing_mode: str = ""
+    routing_unit_cost: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -104,12 +107,25 @@ class Catalog:
                 upstream_model = str(route_source.get("upstream_model") or "").strip()
                 route_resolution = str(route_source.get("resolution") or "").strip().lower()[:20]
                 route_aspect_ratios = tuple(_strings(route_source.get("aspect_ratios"), 20))
+                billing_mode = str(route_source.get("billing_mode") or "").strip().lower()
+                routing_unit_cost = str(route_source.get("routing_unit_cost") or "").strip()
                 if provider not in {"paisio", "rolldek", "toonflow"} or not upstream_model:
                     raise CatalogError(f"video relay route provider/model is invalid for {model_id}")
                 if route_resolution and resolutions and route_resolution not in resolutions:
                     raise CatalogError(f"video relay route resolution is invalid for {model_id}")
                 if route_aspect_ratios and aspect_ratios and not set(route_aspect_ratios).issubset(aspect_ratios):
                     raise CatalogError(f"video relay route aspect ratio is invalid for {model_id}")
+                if bool(billing_mode) != bool(routing_unit_cost):
+                    raise CatalogError(f"video relay route cost metadata is incomplete for {model_id}")
+                if billing_mode:
+                    if billing_mode not in {"per_second", "per_call"}:
+                        raise CatalogError(f"video relay route billing mode is invalid for {model_id}")
+                    try:
+                        unit_cost = Decimal(routing_unit_cost)
+                    except InvalidOperation as error:
+                        raise CatalogError(f"video relay route cost is invalid for {model_id}") from error
+                    if not unit_cost.is_finite() or unit_cost <= 0:
+                        raise CatalogError(f"video relay route cost is invalid for {model_id}")
                 key = (provider, upstream_model, route_resolution)
                 if key in route_keys:
                     raise CatalogError(f"video relay catalog contains a duplicate route for {model_id}")
@@ -126,6 +142,8 @@ class Catalog:
                         aspect_ratios=route_aspect_ratios,
                         max_total_assets=_bounded_int(route_source.get("max_total_assets"), 0, 30),
                         supports_generate_audio=bool(route_source.get("supports_generate_audio", False)),
+                        billing_mode=billing_mode,
+                        routing_unit_cost=routing_unit_cost,
                     )
                 )
             routes.sort(key=lambda item: (item.priority, item.provider, item.upstream_model))

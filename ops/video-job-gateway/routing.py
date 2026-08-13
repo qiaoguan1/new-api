@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 from collections import defaultdict
 from collections.abc import Iterable
+from decimal import Decimal, InvalidOperation
 
 from catalog import Route
 
@@ -19,6 +20,7 @@ def build_route_plan(
     stable_model: str,
     resolution: str,
     routes: Iterable[Route],
+    duration: int = 0,
 ) -> tuple[Route, ...]:
     """Return an immutable, deterministic route order grouped by priority tier.
 
@@ -39,15 +41,16 @@ def build_route_plan(
     if not candidates:
         raise RoutePlanError("route plan has no eligible provider")
 
-    providers: set[str] = set()
+    route_keys: set[tuple[str, str]] = set()
     tiers: dict[int, list[Route]] = defaultdict(list)
     for route in candidates:
         provider = str(route.provider or "").strip().lower()
         if not provider:
             raise RoutePlanError("route plan contains an invalid provider")
-        if provider in providers:
-            raise RoutePlanError("route plan contains a duplicate provider")
-        providers.add(provider)
+        route_key = (provider, str(route.upstream_model or "").strip())
+        if route_key in route_keys:
+            raise RoutePlanError("route plan contains a duplicate provider/model route")
+        route_keys.add(route_key)
         tiers[int(route.priority)].append(route)
 
     ordered: list[Route] = []
@@ -56,6 +59,7 @@ def build_route_plan(
             sorted(
                 tiers[priority],
                 key=lambda route: (
+                    _estimated_cost(route, duration),
                     -_score(identity, route),
                     route.provider,
                     route.upstream_model,
@@ -63,6 +67,27 @@ def build_route_plan(
             )
         )
     return tuple(ordered)
+
+
+def _estimated_cost(route: Route, duration: int) -> Decimal:
+    """Return catalog-only cost used for deterministic upstream route ordering."""
+
+    mode = str(route.billing_mode or "").strip().lower()
+    raw = str(route.routing_unit_cost or "").strip()
+    if not mode or not raw:
+        return Decimal("Infinity")
+    try:
+        unit = Decimal(raw)
+    except InvalidOperation as error:
+        raise RoutePlanError("route plan contains an invalid routing cost") from error
+    if not unit.is_finite() or unit <= 0:
+        raise RoutePlanError("route plan contains an invalid routing cost")
+    if mode == "per_second":
+        seconds = max(1, int(duration or 0))
+        return unit * Decimal(seconds)
+    if mode == "per_call":
+        return unit
+    raise RoutePlanError("route plan contains an unsupported billing mode")
 
 
 def _score(identity: tuple[str, str, str], route: Route) -> int:

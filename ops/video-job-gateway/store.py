@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Any
 
 
-ACTIVE_STATUSES = {"queued", "submitting", "running"}
+ACTIVE_STATUSES = {"queued", "submitting", "running", "reconciling"}
 TERMINAL_STATUSES = {"succeeded", "failed", "uncertain", "pending_review"}
 BILLING_CONTRACT_LEGACY = "xtai-video-billing-v2"
 BILLING_CONTRACT_VERSION = "xtai-video-billing-v2.1"
@@ -24,6 +24,16 @@ PRICE_CONTRACT_VERSION = "xtai-video-pricing-v1"
 MONEY_QUANTUM = Decimal("0.000001")
 MONEY_LIMIT = Decimal("100000")
 SHA256_PATTERN = re.compile(r"[0-9a-f]{64}")
+GENERATION_QUARANTINE_FAILURE_THRESHOLD = 2
+GENERATION_QUARANTINE_WINDOW_SECONDS = 10 * 60
+GENERATION_INFRASTRUCTURE_ERROR_CODES = frozenset({
+    "provider_credential_refresh_failed",
+})
+GENERATION_INFRASTRUCTURE_MESSAGE_MARKERS = (
+    "refresh leased account credential",
+    "invalid adobe refresh response",
+    "adobe refresh cookie failed",
+)
 
 
 class StoreConflict(ValueError):
@@ -72,6 +82,8 @@ class Store:
                     upstream_task_id text not null default '',
                     upstream_status text not null default '',
                     submit_attempts integer not null default 0,
+                    submit_started_at integer not null default 0,
+                    submit_confirmed_at integer not null default 0,
                     poll_attempts integer not null default 0,
                     poll_errors integer not null default 0,
                     missing_count integer not null default 0,
@@ -102,6 +114,19 @@ class Store:
                     on video_jobs(status, finished_at);
                 create index if not exists idx_video_jobs_updated
                     on video_jobs(updated_at);
+                create table if not exists video_provider_generation_quarantines (
+                    provider_id text primary key,
+                    status text not null,
+                    reason_code text not null,
+                    failure_count integer not null,
+                    window_seconds integer not null,
+                    first_failure_at integer not null,
+                    last_failure_at integer not null,
+                    activated_at integer not null,
+                    cleared_at integer not null default 0
+                );
+                create index if not exists idx_video_provider_generation_quarantine_status
+                    on video_provider_generation_quarantines(status,activated_at);
                 create table if not exists video_settlements (
                     settlement_id text primary key,
                     job_id text not null,
@@ -122,6 +147,50 @@ class Store:
                 );
                 create index if not exists idx_video_settlements_job
                     on video_settlements(job_id, revision);
+                create table if not exists video_provider_task_bindings (
+                    job_id text primary key,
+                    provider_id text not null,
+                    execution_task_id text not null,
+                    billing_task_id text not null,
+                    resolver_version text not null,
+                    provider_record_id text not null,
+                    provider_submit_time integer not null,
+                    provider_finish_time integer not null,
+                    media_size_bytes integer not null,
+                    media_sha256 text not null,
+                    evidence_fingerprint text not null,
+                    created_at integer not null,
+                    unique(provider_id,execution_task_id),
+                    unique(provider_id,billing_task_id),
+                    foreign key(job_id) references video_jobs(job_id) on delete cascade
+                );
+                create unique index if not exists idx_video_provider_binding_evidence
+                    on video_provider_task_bindings(evidence_fingerprint);
+                create table if not exists video_job_attempts (
+                    attempt_id text primary key,
+                    job_id text not null,
+                    route_index integer not null,
+                    provider_id text not null,
+                    upstream_model text not null,
+                    idempotency_key text not null,
+                    state text not null,
+                    execution_task_id text not null default '',
+                    billing_task_id text not null default '',
+                    actual_cost_cny_exact text not null default '',
+                    evidence_source text not null default '',
+                    evidence_id text not null default '',
+                    observed_at text not null default '',
+                    submit_count integer not null default 0,
+                    created_at integer not null,
+                    updated_at integer not null,
+                    unique(job_id,route_index),
+                    unique(provider_id,idempotency_key),
+                    foreign key(job_id) references video_jobs(job_id) on delete cascade
+                );
+                create unique index if not exists idx_video_attempt_evidence
+                    on video_job_attempts(evidence_id) where evidence_id<>'';
+                create index if not exists idx_video_attempt_job
+                    on video_job_attempts(job_id,route_index);
                 create table if not exists video_webhook_outbox (
                     event_id text primary key,
                     job_id text not null,
@@ -165,10 +234,24 @@ class Store:
                 "settlement_next_query_at": "integer not null default 0",
                 "settlement_query_started_at": "integer not null default 0",
                 "settlement_query_last_error": "text not null default ''",
+                "submit_started_at": "integer not null default 0",
+                "submit_confirmed_at": "integer not null default 0",
+                "recovery_started_at": "integer not null default 0",
+                "recovery_deadline_at": "integer not null default 0",
+                "recovery_next_at": "integer not null default 0",
+                "recovery_attempts": "integer not null default 0",
+                "recovery_last_error": "text not null default ''",
             }
             for name, definition in migrations.items():
                 if name not in existing_columns:
                     connection.execute(f"alter table video_jobs add column {name} {definition}")
+            attempt_columns = {
+                str(row[1]) for row in connection.execute("pragma table_info(video_job_attempts)").fetchall()
+            }
+            if "billing_task_id" not in attempt_columns:
+                connection.execute(
+                    "alter table video_job_attempts add column billing_task_id text not null default ''"
+                )
             connection.execute(
                 """
                 create index if not exists idx_video_jobs_settlement_query
@@ -217,13 +300,14 @@ class Store:
             delivery = "ready" if result_ready else "pending_settlement"
         else:
             delivery = "unavailable"
+        public_status = "running" if status == "reconciling" else status
         return {
             "job_id": source.get("job_id"),
             "request_id": source.get("request_id"),
             "protocol_version": source.get("protocol_version"),
             "catalog_revision": source.get("catalog_revision"),
             "model": source.get("stable_model"),
-            "status": source.get("status"),
+            "status": public_status,
             "created_at": int(source.get("created_at") or 0),
             "updated_at": int(source.get("updated_at") or 0),
             "finished_at": int(source.get("finished_at") or 0),
@@ -231,6 +315,10 @@ class Store:
             "result": result,
             "result_delivery": delivery,
             "billing": billing,
+            "recovery": {
+                "phase": "reconciling" if status == "reconciling" else "",
+                "attempt": int(source.get("route_index") or 0) + 1,
+            },
             "result_expired": bool(
                 source.get("status") == "succeeded"
                 and result_ready
@@ -272,7 +360,7 @@ class Store:
                     raise StoreConflict("request_id already belongs to another payload")
                 return self.snapshot(existing), True
             active = connection.execute(
-                "select count(*) from video_jobs where status in ('queued','submitting','running')"
+                "select count(*) from video_jobs where status in ('queued','submitting','running','reconciling')"
             ).fetchone()[0]
             if int(active or 0) >= self.max_active_jobs:
                 connection.rollback()
@@ -333,17 +421,44 @@ class Store:
             if not row or row["status"] != "queued":
                 connection.commit()
                 return None
+            idempotency_key = _attempt_idempotency_key(row)
+            attempt_id = "vat_" + hashlib.sha256(
+                f"{job_id}\0{int(row['route_index'] or 0)}".encode("utf-8")
+            ).hexdigest()[:32]
+            connection.execute(
+                """
+                insert into video_job_attempts(
+                    attempt_id,job_id,route_index,provider_id,upstream_model,
+                    idempotency_key,state,submit_count,created_at,updated_at
+                ) values(?,?,?,?,?,?,'submitting',1,?,?)
+                on conflict(job_id,route_index) do update set
+                    state='submitting',submit_count=submit_count+1,updated_at=excluded.updated_at
+                """,
+                (
+                    attempt_id,
+                    job_id,
+                    int(row["route_index"] or 0),
+                    str(row["provider_id"] or ""),
+                    str(row["upstream_model"] or ""),
+                    idempotency_key,
+                    current,
+                    current,
+                ),
+            )
             connection.execute(
                 """
                 update video_jobs
-                set status='submitting',submit_attempts=submit_attempts+1,updated_at=?
+                set status='submitting',submit_attempts=submit_attempts+1,
+                    submit_started_at=?,submit_confirmed_at=0,updated_at=?
                 where job_id=? and status='queued'
                 """,
-                (current, job_id),
+                (current, current, job_id),
             )
             row = connection.execute("select * from video_jobs where job_id=?", (job_id,)).fetchone()
             connection.commit()
-            return dict(row)
+            result = dict(row)
+            result["_submission_request_id"] = idempotency_key
+            return result
 
     def advance_route(self, job_id: str, *, error: dict[str, Any]) -> bool:
         """Move a definitively rejected pre-creation submit to its persisted fallback."""
@@ -414,12 +529,431 @@ class Store:
                 """
                 update video_jobs
                 set status='running',upstream_task_id=?,upstream_status=?,error_json='',
+                    submit_confirmed_at=case when submit_confirmed_at=0 then ? else submit_confirmed_at end,
                     next_poll_at=?,updated_at=?
                 where job_id=? and status='submitting'
                 """,
-                (upstream_task_id[:200], upstream_status[:80], current + max(1, poll_delay), current, job_id),
+                (
+                    upstream_task_id[:200],
+                    upstream_status[:80],
+                    current,
+                    current + max(1, poll_delay),
+                    current,
+                    job_id,
+                ),
+            )
+            connection.execute(
+                """
+                update video_job_attempts
+                set state='running',execution_task_id=?,updated_at=?
+                where job_id=? and route_index=(select route_index from video_jobs where job_id=?)
+                """,
+                (upstream_task_id[:200], current, job_id, job_id),
             )
             connection.commit()
+
+    def begin_recovery(
+        self,
+        job_id: str,
+        *,
+        error: dict[str, Any],
+        upstream_task_id: str = "",
+        upstream_status: str = "",
+        delay_seconds: int = 15,
+        deadline_seconds: int = 8 * 3600,
+    ) -> bool:
+        """Persist an uncertain or failed attempt for unattended reconciliation."""
+        current = int(time.time())
+        error_json = json.dumps(error or {}, ensure_ascii=False, separators=(",", ":"))
+        with self.connect() as connection:
+            connection.execute("begin immediate")
+            row = connection.execute("select * from video_jobs where job_id=?", (job_id,)).fetchone()
+            if not row or str(row["status"] or "") not in {"submitting", "running", "reconciling"}:
+                connection.commit()
+                return False
+            task_id = str(upstream_task_id or row["upstream_task_id"] or "")[:200]
+            connection.execute(
+                """
+                update video_jobs
+                set status='reconciling',error_json=?,upstream_task_id=?,upstream_status=?,
+                    billing_status=case when reserved_cny_exact<>'' then 'recovery_pending' else 'unavailable' end,
+                    recovery_started_at=case when recovery_started_at=0 then ? else recovery_started_at end,
+                    recovery_deadline_at=case when recovery_deadline_at=0 then ? else recovery_deadline_at end,
+                    recovery_next_at=?,recovery_last_error='',next_poll_at=0,updated_at=?,finished_at=0
+                where job_id=?
+                """,
+                (
+                    error_json,
+                    task_id,
+                    str(upstream_status or row["upstream_status"] or "")[:80],
+                    current,
+                    min(
+                        current + max(300, min(int(deadline_seconds), 48 * 3600)),
+                        int(row["created_at"] or current) + max(300, min(int(deadline_seconds), 48 * 3600)),
+                    ),
+                    current + max(1, min(int(delay_seconds), 3600)),
+                    current,
+                    job_id,
+                ),
+            )
+            connection.execute(
+                """
+                update video_job_attempts set state='reconciling',execution_task_id=?,updated_at=?
+                where job_id=? and route_index=?
+                """,
+                (task_id, current, job_id, int(row["route_index"] or 0)),
+            )
+            connection.commit()
+            return True
+
+    def due_recovery_jobs(self, *, limit: int = 20, lease_seconds: int = 60) -> list[dict[str, Any]]:
+        current = int(time.time())
+        with self.connect() as connection:
+            connection.execute("begin immediate")
+            rows = connection.execute(
+                """
+                select * from video_jobs
+                where status='reconciling' and recovery_next_at<=?
+                order by recovery_next_at,updated_at limit ?
+                """,
+                (current, max(1, min(int(limit), 100))),
+            ).fetchall()
+            if rows:
+                connection.executemany(
+                    """
+                    update video_jobs set recovery_next_at=?,recovery_attempts=recovery_attempts+1
+                    where job_id=? and status='reconciling'
+                    """,
+                    [(current + max(15, int(lease_seconds)), str(row["job_id"])) for row in rows],
+                )
+            connection.commit()
+        return [dict(row) for row in rows]
+
+    def retry_recovery(self, job_id: str, *, delay_seconds: int, error_code: str) -> None:
+        current = int(time.time())
+        with self.connect() as connection:
+            connection.execute(
+                """
+                update video_jobs set recovery_next_at=?,recovery_last_error=?,updated_at=?
+                where job_id=? and status='reconciling'
+                """,
+                (current + max(15, min(int(delay_seconds), 3600)), str(error_code or "recovery_pending")[:120], current, job_id),
+            )
+
+    def retry_uncertain_submit(self, job_id: str, *, max_same_route_submits: int = 2) -> bool:
+        """Retry the same persisted route and idempotency key; never cross-provider blindly."""
+        current = int(time.time())
+        with self.connect() as connection:
+            connection.execute("begin immediate")
+            row = connection.execute("select * from video_jobs where job_id=?", (job_id,)).fetchone()
+            attempt = connection.execute(
+                "select * from video_job_attempts where job_id=? and route_index=?",
+                (job_id, int(row["route_index"] or 0) if row else -1),
+            ).fetchone()
+            if (
+                not row
+                or str(row["status"] or "") != "reconciling"
+                or str(row["upstream_task_id"] or "")
+                or not attempt
+                or int(attempt["submit_count"] or 0) >= max(1, int(max_same_route_submits))
+            ):
+                connection.commit()
+                return False
+            connection.execute(
+                """
+                update video_jobs set status='queued',billing_status=case when reserved_cny_exact<>'' then 'reserved' else 'unavailable' end,
+                    error_json='',recovery_next_at=0,recovery_last_error='',updated_at=? where job_id=?
+                """,
+                (current, job_id),
+            )
+            connection.execute(
+                "update video_job_attempts set state='prepared',updated_at=? where attempt_id=?",
+                (current, str(attempt["attempt_id"])),
+            )
+            connection.commit()
+            return True
+
+    def complete_failed_attempt(
+        self,
+        job_id: str,
+        *,
+        provider_task_id: str,
+        actual_cost_cny_exact: str,
+        evidence_source: str,
+        evidence_id: str,
+        observed_at: str,
+        error: dict[str, Any],
+    ) -> bool:
+        """Record authoritative failed-attempt cost and atomically advance one route."""
+        amount = _money_exact(actual_cost_cny_exact, allow_zero=True)
+        current = int(time.time())
+        with self.connect() as connection:
+            connection.execute("begin immediate")
+            row = connection.execute("select * from video_jobs where job_id=?", (job_id,)).fetchone()
+            if not row or str(row["status"] or "") != "reconciling":
+                connection.commit()
+                return False
+            index = int(row["route_index"] or 0)
+            attempt = connection.execute(
+                "select * from video_job_attempts where job_id=? and route_index=?",
+                (job_id, index),
+            ).fetchone()
+            if not attempt:
+                connection.rollback()
+                raise StoreConflict("video recovery attempt is missing")
+            existing_evidence = str(attempt["evidence_id"] or "")
+            if existing_evidence and existing_evidence != str(evidence_id or ""):
+                connection.rollback()
+                raise StoreConflict("video recovery attempt has conflicting evidence")
+            connection.execute(
+                """
+                update video_job_attempts
+                set state='failed',execution_task_id=?,billing_task_id=?,actual_cost_cny_exact=?,evidence_source=?,
+                    evidence_id=?,observed_at=?,updated_at=? where attempt_id=?
+                """,
+                (
+                    str(row["upstream_task_id"] or "")[:200], str(provider_task_id or "")[:200], amount,
+                    str(evidence_source or "")[:120], str(evidence_id or "")[:240],
+                    str(observed_at or "")[:80], current, str(attempt["attempt_id"]),
+                ),
+            )
+            try:
+                plan = json.loads(str(row["route_plan_json"] or "[]"))
+                history = json.loads(str(row["route_history_json"] or "[]"))
+            except json.JSONDecodeError as exc:
+                connection.rollback()
+                raise StoreConflict("video recovery route plan is invalid") from exc
+            next_index = index + 1
+            aggregate_cost = _sum_attempt_costs(connection, job_id)
+            try:
+                cost_guard = Decimal(_money_exact(row["reserved_cny_exact"], allow_zero=False))
+            except StoreConflict:
+                cost_guard = Decimal("0")
+            within_cost_guard = cost_guard <= 0 or aggregate_cost <= cost_guard
+            if (
+                within_cost_guard
+                and isinstance(plan, list)
+                and next_index < min(len(plan), 4)
+                and isinstance(plan[next_index], dict)
+            ):
+                next_route = plan[next_index]
+                provider_id = str(next_route.get("provider_id") or "").strip().lower()
+                upstream_model = str(next_route.get("upstream_model") or "").strip()
+                adapter_revision = str(next_route.get("adapter_revision") or "").strip()
+                if not provider_id or not upstream_model or not adapter_revision:
+                    connection.rollback()
+                    raise StoreConflict("video recovery fallback route is invalid")
+                if not isinstance(history, list):
+                    history = []
+                history.append({
+                    "route_index": index,
+                    "provider_id": str(row["provider_id"] or ""),
+                    "error": {"code": str(error.get("code") or "upstream_failed")[:80], "uncertain": False},
+                    "billing": {"status": "verified", "actual_cost_cny_exact": amount},
+                    "at": current,
+                })
+                connection.execute(
+                    """
+                    update video_jobs set provider_id=?,upstream_model=?,adapter_revision=?,route_index=?,
+                        route_history_json=?,status='queued',upstream_task_id='',upstream_status='',
+                        error_json='',billing_status=case when reserved_cny_exact<>'' then 'reserved' else 'unavailable' end,
+                        recovery_started_at=0,recovery_deadline_at=0,recovery_next_at=0,
+                        recovery_attempts=0,recovery_last_error='',submit_confirmed_at=0,
+                        missing_count=0,missing_last_at=0,poll_errors=0,updated_at=? where job_id=?
+                    """,
+                    (
+                        provider_id, upstream_model, adapter_revision, next_index,
+                        json.dumps(history, ensure_ascii=False, separators=(",", ":")), current, job_id,
+                    ),
+                )
+                connection.commit()
+                return True
+            aggregate_cost_exact = _quantize_money(aggregate_cost)
+            aggregate_evidence_id = "aggregate-failed:" + hashlib.sha256(
+                f"{job_id}\0{aggregate_cost_exact}\0{evidence_id}".encode("utf-8")
+            ).hexdigest()
+            connection.commit()
+        self.finish(
+            job_id,
+            "failed",
+            error=error,
+            upstream_task_id=str(row["upstream_task_id"] or provider_task_id),
+            upstream_status="failed",
+            defer_failed_settlement=bool(str(row["reserved_cny_exact"] or "")),
+        )
+        if str(row["reserved_cny_exact"] or ""):
+            terminal = self.get(job_id=job_id, internal=True) or {}
+            evidence = build_settlement_evidence(
+                job_id=job_id,
+                revision=int(terminal.get("settlement_revision") or 0) + 1,
+                provider_task_id=provider_task_id,
+                actual_cost_status="zero_verified" if aggregate_cost == 0 else "actual",
+                actual_cost_cny_exact=aggregate_cost_exact,
+                evidence_source="xtai_aggregate_attempt_cost",
+                evidence_id=aggregate_evidence_id,
+                observed_at=observed_at,
+                contract_version=str(terminal.get("billing_contract_version") or ""),
+            )
+            self.apply_settlement(evidence)
+        return False
+
+    def attempt_cost_total(self, job_id: str, *, include_current: bool = True) -> str:
+        with self.connect() as connection:
+            total = _sum_attempt_costs(connection, job_id)
+        return _quantize_money(total)
+
+    def record_success_attempt_cost(self, job_id: str, record: Any) -> str:
+        amount = _money_exact(getattr(record, "actual_cost_cny_exact", ""), allow_zero=True)
+        current = int(time.time())
+        with self.connect() as connection:
+            connection.execute("begin immediate")
+            row = connection.execute("select * from video_jobs where job_id=?", (job_id,)).fetchone()
+            if not row:
+                connection.rollback()
+                raise StoreConflict("video job does not exist")
+            attempt = connection.execute(
+                "select * from video_job_attempts where job_id=? and route_index=?",
+                (job_id, int(row["route_index"] or 0)),
+            ).fetchone()
+            if not attempt:
+                attempt_id = "vat_" + hashlib.sha256(
+                    f"{job_id}\0{int(row['route_index'] or 0)}".encode("utf-8")
+                ).hexdigest()[:32]
+                connection.execute(
+                    """
+                    insert into video_job_attempts(
+                        attempt_id,job_id,route_index,provider_id,upstream_model,
+                        idempotency_key,state,execution_task_id,submit_count,created_at,updated_at
+                    ) values(?,?,?,?,?,?,'succeeded',?,1,?,?)
+                    """,
+                    (
+                        attempt_id, job_id, int(row["route_index"] or 0),
+                        str(row["provider_id"] or ""), str(row["upstream_model"] or ""),
+                        _attempt_idempotency_key(row), str(row["upstream_task_id"] or ""),
+                        current, current,
+                    ),
+                )
+                attempt = connection.execute(
+                    "select * from video_job_attempts where attempt_id=?", (attempt_id,)
+                ).fetchone()
+            existing = str(attempt["evidence_id"] or "")
+            if existing and existing != str(getattr(record, "evidence_id", "")):
+                connection.rollback()
+                raise StoreConflict("video success attempt has conflicting evidence")
+            connection.execute(
+                """
+                update video_job_attempts set state='succeeded',actual_cost_cny_exact=?,
+                    evidence_source=?,evidence_id=?,observed_at=?,updated_at=? where attempt_id=?
+                """,
+                (
+                    amount, str(getattr(record, "evidence_source", ""))[:120],
+                    str(getattr(record, "evidence_id", ""))[:240],
+                    str(getattr(record, "observed_at", ""))[:80], current, str(attempt["attempt_id"]),
+                ),
+            )
+            total = _sum_attempt_costs(connection, job_id)
+            connection.commit()
+        return _quantize_money(total)
+
+    def get_provider_task_binding(self, job_id: str) -> dict[str, Any] | None:
+        with self.connect() as connection:
+            row = connection.execute(
+                "select * from video_provider_task_bindings where job_id=?",
+                (str(job_id or "").strip(),),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def bind_provider_task(
+        self,
+        *,
+        job_id: str,
+        provider_id: str,
+        execution_task_id: str,
+        billing_task_id: str,
+        resolver_version: str,
+        provider_record_id: str,
+        provider_submit_time: int,
+        provider_finish_time: int,
+        media_size_bytes: int,
+        media_sha256: str,
+    ) -> tuple[dict[str, Any], bool]:
+        binding = _validated_provider_binding(
+            {
+                "job_id": job_id,
+                "provider_id": provider_id,
+                "execution_task_id": execution_task_id,
+                "billing_task_id": billing_task_id,
+                "resolver_version": resolver_version,
+                "provider_record_id": provider_record_id,
+                "provider_submit_time": provider_submit_time,
+                "provider_finish_time": provider_finish_time,
+                "media_size_bytes": media_size_bytes,
+                "media_sha256": media_sha256,
+            }
+        )
+        current = int(time.time())
+        with self.connect() as connection:
+            connection.execute("begin immediate")
+            row = connection.execute(
+                "select * from video_jobs where job_id=?", (binding["job_id"],)
+            ).fetchone()
+            if not row:
+                connection.rollback()
+                raise StoreConflict("provider task binding job does not exist")
+            if str(row["provider_id"] or "").strip().lower() != binding["provider_id"]:
+                connection.rollback()
+                raise StoreConflict("provider task binding provider does not match the video job")
+            if str(row["upstream_task_id"] or "") != binding["execution_task_id"]:
+                connection.rollback()
+                raise StoreConflict("provider execution task identity does not match the video job")
+            existing = connection.execute(
+                "select * from video_provider_task_bindings where job_id=?",
+                (binding["job_id"],),
+            ).fetchone()
+            if existing:
+                if str(existing["evidence_fingerprint"] or "") != binding["evidence_fingerprint"]:
+                    connection.rollback()
+                    raise StoreConflict("video job already has a different provider task binding")
+                connection.commit()
+                return dict(existing), True
+            if str(row["status"] or "") != "succeeded" or str(
+                row["billing_status"] or ""
+            ) != "settlement_pending":
+                connection.rollback()
+                raise StoreConflict("only a succeeded unsettled video job can bind billing identity")
+            try:
+                connection.execute(
+                    """
+                    insert into video_provider_task_bindings(
+                        job_id,provider_id,execution_task_id,billing_task_id,resolver_version,
+                        provider_record_id,provider_submit_time,provider_finish_time,
+                        media_size_bytes,media_sha256,evidence_fingerprint,created_at
+                    ) values(?,?,?,?,?,?,?,?,?,?,?,?)
+                    """,
+                    (
+                        binding["job_id"],
+                        binding["provider_id"],
+                        binding["execution_task_id"],
+                        binding["billing_task_id"],
+                        binding["resolver_version"],
+                        binding["provider_record_id"],
+                        binding["provider_submit_time"],
+                        binding["provider_finish_time"],
+                        binding["media_size_bytes"],
+                        binding["media_sha256"],
+                        binding["evidence_fingerprint"],
+                        current,
+                    ),
+                )
+            except sqlite3.IntegrityError as error:
+                connection.rollback()
+                raise StoreConflict("provider task identity is already bound") from error
+            inserted = connection.execute(
+                "select * from video_provider_task_bindings where job_id=?",
+                (binding["job_id"],),
+            ).fetchone()
+            connection.commit()
+            return dict(inserted), False
 
     def finish(
         self,
@@ -430,6 +964,7 @@ class Store:
         error: dict[str, Any] | None = None,
         upstream_task_id: str = "",
         upstream_status: str = "",
+        defer_failed_settlement: bool = False,
     ) -> None:
         if status not in TERMINAL_STATUSES:
             raise ValueError("invalid terminal video job status")
@@ -438,7 +973,10 @@ class Store:
         error_json = json.dumps(error or {}, ensure_ascii=False, separators=(",", ":")) if error else ""
         with self.connect() as connection:
             connection.execute("begin immediate")
-            row = connection.execute("select status,upstream_task_id from video_jobs where job_id=?", (job_id,)).fetchone()
+            row = connection.execute(
+                "select status,upstream_task_id,provider_id from video_jobs where job_id=?",
+                (job_id,),
+            ).fetchone()
             if row and row["status"] in ACTIVE_STATUSES:
                 task_id = upstream_task_id or str(row["upstream_task_id"] or "")
                 billing_row = connection.execute(
@@ -451,9 +989,14 @@ class Store:
                     charged = ""
                     refund = ""
                 elif status == "failed" and reserved:
-                    billing_status = "refunded"
-                    charged = "0.000000"
-                    refund = _money_exact(reserved, allow_zero=False)
+                    if defer_failed_settlement:
+                        billing_status = "settlement_pending"
+                        charged = ""
+                        refund = ""
+                    else:
+                        billing_status = "refunded"
+                        charged = "0.000000"
+                        refund = _money_exact(reserved, allow_zero=False)
                 elif status in {"uncertain", "pending_review"} and reserved:
                     billing_status = "pending_review"
                     charged = ""
@@ -466,6 +1009,9 @@ class Store:
                     """
                     update video_jobs
                     set status=?,result_json=?,error_json=?,upstream_task_id=?,upstream_status=?,
+                        submit_confirmed_at=case
+                            when ?<>'' and submit_confirmed_at=0 then ?
+                            else submit_confirmed_at end,
                         billing_status=?,charged_cny_exact=?,refund_cny_exact=?,
                         supplement_cny_exact='',
                         settlement_next_query_at=?,settlement_query_started_at=0,
@@ -479,6 +1025,8 @@ class Store:
                         error_json,
                         task_id[:200],
                         upstream_status[:80],
+                        task_id[:200],
+                        current,
                         billing_status,
                         charged,
                         refund,
@@ -491,6 +1039,14 @@ class Store:
                 updated = connection.execute(
                     "select * from video_jobs where job_id=?", (job_id,)
                 ).fetchone()
+                if updated and status == "failed":
+                    self._record_generation_infrastructure_failure(
+                        connection,
+                        job_id=job_id,
+                        provider_id=str(row["provider_id"] or ""),
+                        error=error or {},
+                        current=current,
+                    )
                 if updated and reserved:
                     event_type = {
                         "succeeded": "video.task.succeeded",
@@ -531,18 +1087,37 @@ class Store:
             if not row:
                 connection.rollback()
                 raise StoreConflict("video settlement job does not exist")
-            if str(row["status"]) != "succeeded":
+            if str(row["status"]) not in {"succeeded", "failed"}:
                 connection.rollback()
-                raise StoreConflict("only a succeeded video job can be settled")
-            if str(row["billing_status"]) not in {"settlement_pending", "settled"}:
+                raise StoreConflict("only a terminal video job can be settled")
+            if str(row["billing_status"]) not in {"settlement_pending", "refunded", "settled"}:
                 connection.rollback()
                 raise StoreConflict("video job has no settleable reservation")
             if str(row["billing_contract_version"] or "") != evidence["contract_version"]:
                 connection.rollback()
                 raise StoreConflict("settlement contract does not match the video job")
-            if str(row["upstream_task_id"]) != evidence["provider_task_id"]:
+            binding = connection.execute(
+                "select * from video_provider_task_bindings where job_id=?",
+                (evidence["job_id"],),
+            ).fetchone()
+            if binding and (
+                str(binding["provider_id"] or "") != str(row["provider_id"] or "")
+                or str(binding["execution_task_id"] or "") != str(row["upstream_task_id"] or "")
+                or str(binding["billing_task_id"] or "") != evidence["provider_task_id"]
+            ):
                 connection.rollback()
-                raise StoreConflict("provider task identity does not match the video job")
+                raise StoreConflict("provider task binding does not match the settlement evidence")
+            if not binding and str(row["upstream_task_id"]) != evidence["provider_task_id"]:
+                attempt = connection.execute(
+                    """
+                    select 1 from video_job_attempts
+                    where job_id=? and billing_task_id=? and evidence_id<>''
+                    """,
+                    (evidence["job_id"], evidence["provider_task_id"]),
+                ).fetchone()
+                if not attempt:
+                    connection.rollback()
+                    raise StoreConflict("provider task identity does not match the video job")
             expected_revision = int(row["settlement_revision"] or 0) + 1
             if evidence["revision"] != expected_revision:
                 connection.rollback()
@@ -598,7 +1173,7 @@ class Store:
                     settlement_next_query_at=0,settlement_query_started_at=0,
                     settlement_query_last_error='',
                     updated_at=?
-                where job_id=? and status='succeeded'
+                where job_id=? and status in ('succeeded','failed')
                 """,
                 (
                     charged,
@@ -883,7 +1458,7 @@ class Store:
     def active_count(self) -> int:
         with self.connect() as connection:
             row = connection.execute(
-                "select count(*) from video_jobs where status in ('queued','submitting','running')"
+                "select count(*) from video_jobs where status in ('queued','submitting','running','reconciling')"
             ).fetchone()
         return max(0, int(row[0] if row else 0))
 
@@ -914,10 +1489,19 @@ class Store:
         failure_threshold: int = 3,
         window_seconds: int = 5 * 60,
     ) -> set[str]:
-        """Return providers with repeated definite pre-creation failures in the recent window."""
+        """Return providers blocked by temporary health or persistent infrastructure quarantine."""
         cutoff = int(time.time()) - max(60, int(window_seconds))
         counts: Counter[str] = Counter()
         with self.connect() as connection:
+            quarantined = {
+                str(row["provider_id"] or "").strip().lower()
+                for row in connection.execute(
+                    """
+                    select provider_id from video_provider_generation_quarantines
+                    where status='active'
+                    """
+                ).fetchall()
+            }
             rows = connection.execute(
                 """
                 select provider_id,status,error_json,upstream_task_id,route_history_json
@@ -945,7 +1529,128 @@ class Store:
             if provider and not bool(error.get("uncertain", False)):
                 counts[provider] += 1
         threshold = max(1, int(failure_threshold))
-        return {provider for provider, count in counts.items() if count >= threshold}
+        return quarantined | {
+            provider for provider, count in counts.items() if count >= threshold
+        }
+
+    def generation_quarantines(self, *, active_only: bool = True) -> dict[str, dict[str, Any]]:
+        """Return auditable provider generation quarantine state without credentials."""
+        query = "select * from video_provider_generation_quarantines"
+        if active_only:
+            query += " where status='active'"
+        query += " order by provider_id"
+        with self.connect() as connection:
+            rows = connection.execute(query).fetchall()
+        return {
+            str(row["provider_id"]): dict(row)
+            for row in rows
+            if str(row["provider_id"] or "")
+        }
+
+    def clear_generation_quarantine(self, provider_id: str, *, now: int | None = None) -> bool:
+        """Explicitly clear a persistent generation quarantine and retain its audit row."""
+        provider = str(provider_id or "").strip().lower()
+        if not re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,79}", provider):
+            raise ValueError("invalid provider id")
+        current = int(time.time()) if now is None else int(now)
+        with self.connect() as connection:
+            connection.execute("begin immediate")
+            cursor = connection.execute(
+                """
+                update video_provider_generation_quarantines
+                set status='cleared',cleared_at=?
+                where provider_id=? and status='active'
+                """,
+                (current, provider),
+            )
+            changed = cursor.rowcount == 1
+            connection.commit()
+        return changed
+
+    def _record_generation_infrastructure_failure(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        job_id: str,
+        provider_id: str,
+        error: dict[str, Any],
+        current: int,
+    ) -> None:
+        provider = str(provider_id or "").strip().lower()
+        if not provider or not _is_generation_infrastructure_failure(error):
+            return
+        existing = connection.execute(
+            """
+            select * from video_provider_generation_quarantines
+            where provider_id=?
+            """,
+            (provider,),
+        ).fetchone()
+        if existing and str(existing["status"] or "") == "active":
+            connection.execute(
+                """
+                update video_provider_generation_quarantines
+                set reason_code=?,failure_count=failure_count+1,last_failure_at=?
+                where provider_id=?
+                """,
+                (_generation_failure_reason(error), current, provider),
+            )
+            return
+
+        cutoff = current - GENERATION_QUARANTINE_WINDOW_SECONDS
+        cleared_at = int(existing["cleared_at"] or 0) if existing else 0
+        rows = connection.execute(
+            """
+            select error_json,finished_at from video_jobs
+            where provider_id=? and job_id<>? and status='failed'
+              and finished_at>=? and finished_at>?
+            """,
+            (provider, job_id, cutoff, cleared_at),
+        ).fetchall()
+        prior_failures = [
+            row
+            for row in rows
+            if _is_generation_infrastructure_failure(
+                _json_object(str(row["error_json"] or "")) or {}
+            )
+        ]
+        failure_count = 1 + len(prior_failures)
+        if failure_count < GENERATION_QUARANTINE_FAILURE_THRESHOLD:
+            return
+        first_failure_at = min(
+            [current] + [int(row["finished_at"] or current) for row in prior_failures]
+        )
+        values = (
+            "active",
+            _generation_failure_reason(error),
+            failure_count,
+            GENERATION_QUARANTINE_WINDOW_SECONDS,
+            first_failure_at,
+            current,
+            current,
+            0,
+            provider,
+        )
+        if existing:
+            connection.execute(
+                """
+                update video_provider_generation_quarantines
+                set status=?,reason_code=?,failure_count=?,window_seconds=?,
+                    first_failure_at=?,last_failure_at=?,activated_at=?,cleared_at=?
+                where provider_id=?
+                """,
+                values,
+            )
+        else:
+            connection.execute(
+                """
+                insert into video_provider_generation_quarantines(
+                    status,reason_code,failure_count,window_seconds,first_failure_at,
+                    last_failure_at,activated_at,cleared_at,provider_id
+                ) values(?,?,?,?,?,?,?,?,?)
+                """,
+                values,
+            )
 
     def unhealthy_settlement_providers(
         self,
@@ -1003,18 +1708,24 @@ class Store:
             connection.execute(
                 """
                 update video_jobs
-                set status='uncertain',error_json=?,updated_at=?,finished_at=?,next_poll_at=0
+                set status='reconciling',error_json=?,updated_at=?,finished_at=0,next_poll_at=0,
+                    recovery_started_at=case when recovery_started_at=0 then ? else recovery_started_at end,
+                    recovery_deadline_at=case when recovery_deadline_at=0 then ? else recovery_deadline_at end,
+                    recovery_next_at=?,billing_status=case when reserved_cny_exact<>'' then 'recovery_pending' else 'unavailable' end
                 where status='submitting'
                 """,
-                (restart_error, current, current),
+                (restart_error, current, current, current + 8 * 3600, current),
             )
             connection.execute(
                 """
                 update video_jobs
-                set status='pending_review',error_json=?,updated_at=?,finished_at=?,next_poll_at=0
+                set status='reconciling',error_json=?,updated_at=?,finished_at=0,next_poll_at=0,
+                    recovery_started_at=case when recovery_started_at=0 then ? else recovery_started_at end,
+                    recovery_deadline_at=case when recovery_deadline_at=0 then ? else recovery_deadline_at end,
+                    recovery_next_at=?,billing_status=case when reserved_cny_exact<>'' then 'recovery_pending' else 'unavailable' end
                 where status='running' and upstream_task_id=''
                 """,
-                (restart_error, current, current),
+                (restart_error, current, current, current + 8 * 3600, current),
             )
             connection.execute(
                 "update video_jobs set next_poll_at=? where status='running' and upstream_task_id<>''",
@@ -1059,6 +1770,10 @@ class Store:
                     f"delete from video_settlements where job_id in ({placeholders})",
                     expired_job_ids,
                 )
+                connection.execute(
+                    f"delete from video_provider_task_bindings where job_id in ({placeholders})",
+                    expired_job_ids,
+                )
             cursor = connection.execute(
                 """
                 delete from video_jobs
@@ -1079,8 +1794,44 @@ def _json_object(value: str) -> dict[str, Any] | None:
     return parsed if isinstance(parsed, dict) else None
 
 
+def _generation_failure_reason(error: dict[str, Any]) -> str:
+    code = str(error.get("code") or "").strip().lower()
+    message = " ".join(str(error.get("message") or "").lower().split())
+    if any(marker in message for marker in GENERATION_INFRASTRUCTURE_MESSAGE_MARKERS):
+        return "provider_credential_refresh_failed"
+    return (code or "provider_generation_infrastructure_failed")[:80]
+
+
+def _is_generation_infrastructure_failure(error: dict[str, Any]) -> bool:
+    """Recognize only provider-side credential infrastructure failures.
+
+    Generic provider failures, content rejection, and inaccessible customer
+    media are deliberately excluded so they cannot quarantine a healthy route.
+    """
+    code = str(error.get("code") or "").strip().lower()
+    category = str(error.get("category") or "").strip().lower()
+    message = " ".join(str(error.get("message") or "").lower().split())
+    if code in GENERATION_INFRASTRUCTURE_ERROR_CODES or category == "authentication":
+        return True
+    return any(marker in message for marker in GENERATION_INFRASTRUCTURE_MESSAGE_MARKERS)
+
+
 def _quantize_money(value: Decimal) -> str:
     return format(value.quantize(MONEY_QUANTUM, rounding=ROUND_CEILING), "f")
+
+
+def _sum_attempt_costs(connection: sqlite3.Connection, job_id: str) -> Decimal:
+    """Sum fixed-point text in Python Decimal; SQLite numeric affinity is binary float."""
+    rows = connection.execute(
+        "select actual_cost_cny_exact from video_job_attempts where job_id=? and actual_cost_cny_exact<>''",
+        (job_id,),
+    ).fetchall()
+    total = Decimal("0")
+    for row in rows:
+        total += Decimal(_money_exact(row[0], allow_zero=True))
+    if total > MONEY_LIMIT:
+        raise StoreConflict("aggregate provider cost is outside the accepted range")
+    return total
 
 
 def _quantize_signed_money(value: Decimal) -> str:
@@ -1101,6 +1852,32 @@ def _money_exact(value: Any, *, allow_zero: bool) -> str:
     ):
         raise StoreConflict("billing money is outside the accepted range")
     return _quantize_money(number)
+
+
+def _attempt_idempotency_key(row: sqlite3.Row | dict[str, Any]) -> str:
+    request_id = str(row["request_id"] or "")
+    provider_id = str(row["provider_id"] or "").strip().lower()
+    route_index = int(row["route_index"] or 0)
+    try:
+        plan = json.loads(str(row["route_plan_json"] or "[]"))
+    except json.JSONDecodeError:
+        plan = []
+    prior_same_provider = any(
+        isinstance(previous, dict)
+        and str(previous.get("provider_id") or "").strip().lower() == provider_id
+        for previous in (plan[:route_index] if isinstance(plan, list) else [])
+    )
+    if not prior_same_provider:
+        return request_id
+    material = "\0".join(
+        (
+            request_id,
+            provider_id,
+            str(row["upstream_model"] or ""),
+            str(row["adapter_revision"] or ""),
+        )
+    ).encode("utf-8")
+    return "xtai-" + hashlib.sha256(material).hexdigest()[:48]
 
 
 def _public_money(value: Any) -> str | None:
@@ -1178,6 +1955,65 @@ def _evidence_fingerprint(evidence: dict[str, Any]) -> str:
     return hashlib.sha256(material.encode("utf-8")).hexdigest()
 
 
+def _provider_binding_fingerprint(binding: dict[str, Any]) -> str:
+    material = "\0".join(
+        (
+            "xtai-video-provider-task-binding-v1",
+            binding["job_id"],
+            binding["provider_id"],
+            binding["execution_task_id"],
+            binding["billing_task_id"],
+            binding["resolver_version"],
+            binding["provider_record_id"],
+            str(binding["provider_submit_time"]),
+            str(binding["provider_finish_time"]),
+            str(binding["media_size_bytes"]),
+            binding["media_sha256"],
+        )
+    )
+    return hashlib.sha256(material.encode("utf-8")).hexdigest()
+
+
+def _validated_provider_binding(payload: Any) -> dict[str, Any]:
+    if not isinstance(payload, dict):
+        raise StoreConflict("provider task binding must be an object")
+    binding = {
+        "job_id": str(payload.get("job_id") or "").strip(),
+        "provider_id": str(payload.get("provider_id") or "").strip().lower(),
+        "execution_task_id": str(payload.get("execution_task_id") or "").strip(),
+        "billing_task_id": str(payload.get("billing_task_id") or "").strip(),
+        "resolver_version": str(payload.get("resolver_version") or "").strip(),
+        "provider_record_id": str(payload.get("provider_record_id") or "").strip(),
+        "media_sha256": str(payload.get("media_sha256") or "").strip().lower(),
+    }
+    try:
+        binding["provider_submit_time"] = int(payload.get("provider_submit_time"))
+        binding["provider_finish_time"] = int(payload.get("provider_finish_time"))
+        binding["media_size_bytes"] = int(payload.get("media_size_bytes"))
+    except (TypeError, ValueError) as error:
+        raise StoreConflict("provider task binding numeric evidence is invalid") from error
+    if (
+        not re.fullmatch(r"vjob_[0-9a-f]{32}", binding["job_id"])
+        or not re.fullmatch(r"[a-z0-9_-]{1,40}", binding["provider_id"])
+        or not binding["execution_task_id"]
+        or len(binding["execution_task_id"]) > 200
+        or not binding["billing_task_id"]
+        or len(binding["billing_task_id"]) > 200
+        or binding["execution_task_id"] == binding["billing_task_id"]
+        or not re.fullmatch(r"[a-z0-9._-]{1,80}", binding["resolver_version"])
+        or not binding["provider_record_id"]
+        or len(binding["provider_record_id"]) > 200
+        or binding["provider_submit_time"] <= 0
+        or binding["provider_finish_time"] < binding["provider_submit_time"]
+        or binding["media_size_bytes"] <= 0
+        or binding["media_size_bytes"] > 2 * 1024 * 1024 * 1024
+        or not SHA256_PATTERN.fullmatch(binding["media_sha256"])
+    ):
+        raise StoreConflict("provider task binding evidence is invalid")
+    binding["evidence_fingerprint"] = _provider_binding_fingerprint(binding)
+    return binding
+
+
 def _settlement_id(job_id: str, revision: int, fingerprint: str) -> str:
     material = "\0".join(
         ("xtai-video-settlement-v2", job_id, str(revision), fingerprint)
@@ -1240,7 +2076,9 @@ def _validated_settlement(payload: Any) -> dict[str, Any]:
         or source not in {
             "provider_account_ledger",
             "newapi_authenticated_video_task",
+            "paisio_authenticated_request_ledger",
             "toonflow_web_operation_log",
+            "xtai_aggregate_attempt_cost",
         }
         or not evidence_id
         or len(evidence_id) > 200
@@ -1301,16 +2139,17 @@ def _route_plan(
         }
     ]
     result: list[dict[str, Any]] = []
-    seen: set[str] = set()
+    seen: set[tuple[str, str]] = set()
     for item in source:
         if not isinstance(item, dict):
             raise ValueError("video route plan entry must be an object")
         provider = str(item.get("provider_id") or "").strip().lower()
         model = str(item.get("upstream_model") or "").strip()
         revision = str(item.get("adapter_revision") or "").strip()
-        if not provider or provider in seen or not model or not revision:
-            raise ValueError("video route plan is invalid or contains a duplicate provider")
-        seen.add(provider)
+        route_key = (provider, model)
+        if not provider or route_key in seen or not model or not revision:
+            raise ValueError("video route plan is invalid or contains a duplicate provider/model")
+        seen.add(route_key)
         result.append(
             {
                 "provider_id": provider[:40],

@@ -108,6 +108,18 @@ class ToonflowCollectorTests(unittest.TestCase):
         self.assertEqual(record.actual_cost_status, "zero_verified")
         self.assertEqual(record.actual_cost_cny_exact, "0.000000")
 
+    def test_failed_operation_collects_authoritative_terminal_price(self):
+        collector, _ = self.collector({
+            "code": 0,
+            "data": {"data": [completed_row(state=-1, price="7.5", errorReason="provider failed")]},
+        })
+
+        record = collector.collect_failed("cgt-test")
+
+        self.assertEqual(record.actual_cost_status, "actual")
+        self.assertEqual(record.actual_cost_cny_exact, "7.500000")
+        self.assertEqual(record.evidence_source, "toonflow_web_failed_operation_log")
+
     def test_token_file_is_reloaded_without_gateway_restart(self):
         def token(label):
             payload = base64.urlsafe_b64encode(
@@ -274,6 +286,39 @@ class NewAPITaskBillingCollectorTests(unittest.TestCase):
         self.assertIn("request_id=task-1", ledger_request.full_url)
         self.assertEqual(ledger_request.get_header("Authorization"), "Bearer account-read-only-token")
         self.assertEqual(ledger_request.get_header("New-api-user"), "42")
+
+    def test_paisio_failed_execution_id_resolves_billing_id_and_net_refund(self):
+        collector, opener = self.collector(
+            {
+                "success": True,
+                "data": {"items": [{
+                    "id": 60149,
+                    "task_id": "task_R6Failure",
+                    "action": "videoGenerate",
+                    "status": "FAILURE",
+                    "submit_time": 1786600000,
+                    "finish_time": 1786600100,
+                    "data": {"task_id": "38b19213aa554916b2a9e3e3d57f5e47"},
+                }]},
+            },
+            ledger_payload={
+                "success": True,
+                "data": {"total": 2, "items": [
+                    {"id": 1, "type": 2, "request_id": "task_R6Failure", "quota": 460000,
+                     "other": '{"billing_type":"per_sec"}'},
+                    {"id": 2, "type": 2, "request_id": "task_R6Failure", "quota": -460000,
+                     "other": '{"billing_type":"generation_failed_refund"}'},
+                ]},
+            },
+        )
+
+        record = collector.collect_failed("38b19213aa554916b2a9e3e3d57f5e47")
+
+        self.assertEqual(record.provider_task_id, "task_R6Failure")
+        self.assertEqual(record.execution_task_id, "38b19213aa554916b2a9e3e3d57f5e47")
+        self.assertEqual(record.actual_cost_status, "zero_verified")
+        self.assertEqual(record.actual_cost_cny_exact, "0.000000")
+        self.assertIn("request_id=task_R6Failure", opener.requests[-1][0].full_url)
 
     def test_paisio_request_ledger_fails_closed_when_filter_is_ignored_or_refunded(self):
         task = {
