@@ -7,13 +7,13 @@
 | Issue | #90 |
 | Scope | MAJOR |
 | Security-Sensitive | YES |
-| Reviewed | 2026-08-13T18:10:00+08:00 |
+| Reviewed | 2026-08-13T20:00:00+08:00 |
 
 ### Criteria Results
 
 | # | Criterion | Status | Findings |
 |---|-----------|--------|----------|
-| 1 | Blindspots | FIXED | 2 |
+| 1 | Blindspots | FIXED | 3 |
 | 2 | Clarity | PASS | 0 |
 | 3 | Maintainability | PASS | 0 |
 | 4 | Security | FIXED | 1 |
@@ -29,6 +29,7 @@
 | 2 | Major | Recovery deadline still emitted `pending_review`, leaving a per-job operator decision. | Deadline now deterministically fails the downstream job and releases its reservation while retaining a safe operational error code. |
 | 3 | Major | Terminal failed jobs could emit a full-refund webhook immediately before a non-zero settlement webhook. | Failed jobs with verified attempt evidence emit `settlement_pending` first and one authoritative final settlement afterward. |
 | 4 | Minor | Existing routing documentation described manual reconciliation. | Gateway and downstream protocol documentation now describes the bounded automatic recovery contract. |
+| 5 | Major | Paisio identity matching only allowed the provider finish timestamp to trail the gateway by two seconds, although provider ledger finalization is asynchronous. | Provider and gateway finish timestamps now use the approved symmetric 120-second tolerance, while submit-window, terminal-state, unique-candidate, and media-fingerprint checks remain mandatory. |
 
 ### Security Review
 
@@ -46,7 +47,7 @@ None.
 
 | Category | Count |
 |----------|-------|
-| Fixed in PR | 4 |
+| Fixed in PR | 5 |
 | Deferred (with tracking) | 0 |
 | Unaddressed | 0 |
 

@@ -211,6 +211,20 @@ class PaisioIdentityResolverTests(unittest.TestCase):
         self.assertEqual(record.media_size_bytes, len(MEDIA))
         self.assertEqual(len(record.media_sha256), 64)
 
+    def test_provider_finish_after_gateway_success_within_tolerance_resolves(self):
+        row = task_row()
+        job = job_for(row, finished_at=int(row["finish_time"]) - 16)
+        record = collector_for({1: [row]}).resolve_and_collect(job)
+        self.assertEqual(record.provider_task_id, row["task_id"])
+
+    def test_provider_finish_after_gateway_success_beyond_tolerance_is_rejected(self):
+        now = int(time.time())
+        row = task_row(submit_time=now - 400, finish_time=now - 100)
+        job = job_for(row, finished_at=int(row["finish_time"]) - 121)
+        self.assert_code(
+            "provider_billing_record_not_ready", collector_for({1: [row]}), job
+        )
+
     def test_noise_rows_are_filtered_before_media_comparison(self):
         row = task_row()
         noise = [

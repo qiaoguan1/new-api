@@ -586,8 +586,7 @@ class NewAPITaskBillingCollector:
                     and PAISIO_BILLING_TASK_PATTERN.fullmatch(task_id)
                     and lower_submit_time <= submit_time <= upper_submit_time
                     and finish_time >= submit_time
-                    and finish_time <= gateway_finished_at + self.identity_time_skew_seconds
-                    and gateway_finished_at - finish_time
+                    and abs(gateway_finished_at - finish_time)
                     <= self.identity_finish_tolerance_seconds
                 ):
                     candidates.append(row)
