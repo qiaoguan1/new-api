@@ -1,6 +1,6 @@
 {
   "protocol_version": "xtai-relay-v1",
-  "revision": "2026-08-13.2",
+  "revision": "2026-08-14.2",
   "models": [
     {
       "id": "seedance-2.0",
