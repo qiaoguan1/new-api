@@ -7,6 +7,6 @@
 - [x] T005 Implement request-aware capability contract negotiation.
 - [x] T006 Run focused and full gateway tests.
 - [x] T007 Complete comprehensive and security review with zero unaddressed findings.
-- [ ] T008 Commit, push, raise PR, pass CI, and merge.
-- [ ] T009 Deploy staging then production with rollback and preserved state.
-- [ ] T010 Run ten no-charge verification rounds and provide downstream confirmation.
+- [x] T008 Commit, push, raise PR, pass the configured merge gates, and merge.
+- [x] T009 Deploy staging then production with rollback and preserved state.
+- [x] T010 Run ten no-charge verification rounds and provide downstream confirmation.
