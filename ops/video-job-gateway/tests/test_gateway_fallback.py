@@ -78,13 +78,16 @@ class GatewayFallbackTests(unittest.TestCase):
             }
             gateway.config = types.SimpleNamespace(v21_approved_providers=frozenset({"toonflow"}))
 
-            rows = {row["provider_id"]: row for row in gateway.provider_health()["providers"]}
+            health = gateway.provider_health()
+            rows = {row["provider_id"]: row for row in health["providers"]}
 
             self.assertTrue(rows["toonflow"]["eligible_for_new_v21_jobs"])
             self.assertEqual(rows["toonflow"]["exclusion_reason"], "")
             self.assertFalse(rows["paisio"]["eligible_for_new_v21_jobs"])
             self.assertTrue(rows["paisio"]["billing_ready"])
             self.assertEqual(rows["paisio"]["exclusion_reason"], "billing_not_approved")
+            self.assertEqual(health["temporary_capacity_window_seconds"], 600)
+            self.assertEqual(health["temporary_capacity_failure_threshold"], 2)
             self.assertNotIn("token", str(rows).lower())
 
     def test_persistent_generation_quarantine_excludes_new_v21_jobs(self):

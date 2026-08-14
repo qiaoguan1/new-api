@@ -31,6 +31,8 @@ MONEY_LIMIT = Decimal("100000")
 SHA256_PATTERN = re.compile(r"[0-9a-f]{64}")
 GENERATION_QUARANTINE_FAILURE_THRESHOLD = 2
 GENERATION_QUARANTINE_WINDOW_SECONDS = 10 * 60
+GENERATION_CAPACITY_FAILURE_THRESHOLD = 2
+GENERATION_CAPACITY_WINDOW_SECONDS = 10 * 60
 GENERATION_INFRASTRUCTURE_ERROR_CODES = frozenset({
     "provider_credential_refresh_failed",
 })
@@ -38,6 +40,12 @@ GENERATION_INFRASTRUCTURE_MESSAGE_MARKERS = (
     "refresh leased account credential",
     "invalid adobe refresh response",
     "adobe refresh cookie failed",
+)
+GENERATION_CAPACITY_ERROR_CODES = frozenset({
+    "provider_capacity_exhausted",
+})
+GENERATION_CAPACITY_MESSAGE_MARKERS = (
+    "scheduler claim wait timed out",
 )
 
 
@@ -1526,8 +1534,11 @@ class Store:
         window_seconds: int = 5 * 60,
     ) -> set[str]:
         """Return providers blocked by temporary health or persistent infrastructure quarantine."""
-        cutoff = int(time.time()) - max(60, int(window_seconds))
+        current = int(time.time())
+        cutoff = current - max(60, int(window_seconds))
+        capacity_cutoff = current - GENERATION_CAPACITY_WINDOW_SECONDS
         counts: Counter[str] = Counter()
+        capacity_failures: set[tuple[str, str]] = set()
         with self.connect() as connection:
             quarantined = {
                 str(row["provider_id"] or "").strip().lower()
@@ -1540,10 +1551,11 @@ class Store:
             }
             rows = connection.execute(
                 """
-                select provider_id,status,error_json,upstream_task_id,route_history_json
+                select job_id,provider_id,status,error_json,upstream_task_id,
+                       route_history_json,finished_at
                 from video_jobs where updated_at>=?
                 """,
-                (cutoff,),
+                (min(cutoff, capacity_cutoff),),
             ).fetchall()
         for row in rows:
             try:
@@ -1556,17 +1568,45 @@ class Store:
                         continue
                     error = entry.get("error") if isinstance(entry.get("error"), dict) else {}
                     provider = str(entry.get("provider_id") or "").strip().lower()
-                    if provider and not bool(error.get("uncertain", False)):
+                    occurred_at = int(entry.get("at") or 0)
+                    if (
+                        provider
+                        and occurred_at >= capacity_cutoff
+                        and not bool(error.get("uncertain", False))
+                        and _is_generation_capacity_failure(error)
+                    ):
+                        capacity_failures.add((provider, str(row["job_id"])))
+                    if (
+                        provider
+                        and occurred_at >= cutoff
+                        and not bool(error.get("uncertain", False))
+                    ):
                         counts[provider] += 1
-            if row["status"] != "failed" or str(row["upstream_task_id"] or ""):
+            if row["status"] != "failed":
                 continue
             error = _json_object(str(row["error_json"] or "")) or {}
             provider = str(row["provider_id"] or "").strip().lower()
-            if provider and not bool(error.get("uncertain", False)):
+            if (
+                provider
+                and int(row["finished_at"] or 0) >= capacity_cutoff
+                and not bool(error.get("uncertain", False))
+                and _is_generation_capacity_failure(error)
+            ):
+                capacity_failures.add((provider, str(row["job_id"])))
+            if (
+                provider
+                and not str(row["upstream_task_id"] or "")
+                and not bool(error.get("uncertain", False))
+            ):
                 counts[provider] += 1
         threshold = max(1, int(failure_threshold))
+        capacity_counts = Counter(provider for provider, _ in capacity_failures)
         return quarantined | {
             provider for provider, count in counts.items() if count >= threshold
+        } | {
+            provider
+            for provider, count in capacity_counts.items()
+            if count >= GENERATION_CAPACITY_FAILURE_THRESHOLD
         }
 
     def generation_quarantines(self, *, active_only: bool = True) -> dict[str, dict[str, Any]]:
@@ -1850,6 +1890,15 @@ def _is_generation_infrastructure_failure(error: dict[str, Any]) -> bool:
     if code in GENERATION_INFRASTRUCTURE_ERROR_CODES or category == "authentication":
         return True
     return any(marker in message for marker in GENERATION_INFRASTRUCTURE_MESSAGE_MARKERS)
+
+
+def _is_generation_capacity_failure(error: dict[str, Any]) -> bool:
+    """Recognize provider account-pool exhaustion without matching content errors."""
+    code = str(error.get("code") or "").strip().lower()
+    message = " ".join(str(error.get("message") or "").lower().split())
+    if code in GENERATION_CAPACITY_ERROR_CODES:
+        return True
+    return any(marker in message for marker in GENERATION_CAPACITY_MESSAGE_MARKERS)
 
 
 def _quantize_money(value: Decimal) -> str:

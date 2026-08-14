@@ -210,6 +210,57 @@ class StoreRoutingTests(unittest.TestCase):
                 "cleared",
             )
 
+    def test_two_recent_scheduler_capacity_failures_temporarily_exclude_provider(self):
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as directory:
+            store = Store(pathlib.Path(directory))
+            error = {
+                "code": "upstream_video_failed",
+                "category": "upstream",
+                "message": "no eligible account: scheduler claim wait timed out",
+                "uncertain": False,
+            }
+
+            self.finish_provider_failure(store, 0, error)
+            self.assertEqual(store.unhealthy_providers(), set())
+
+            self.finish_provider_failure(store, 1, error)
+            self.assertEqual(store.unhealthy_providers(), {"paisio"})
+            self.assertEqual(store.generation_quarantines(), {})
+
+    def test_scheduler_capacity_exclusion_expires_without_manual_clear(self):
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as directory:
+            store = Store(pathlib.Path(directory))
+            error = {
+                "code": "upstream_video_failed",
+                "category": "upstream",
+                "message": "No eligible account: scheduler claim wait timed out",
+                "uncertain": False,
+            }
+            self.finish_provider_failure(store, 0, error)
+            self.finish_provider_failure(store, 1, error)
+
+            with store.connect() as connection:
+                connection.execute(
+                    "update video_jobs set updated_at=updated_at-601,finished_at=finished_at-601"
+                )
+                connection.commit()
+
+            self.assertEqual(store.unhealthy_providers(), set())
+
+    def test_post_creation_content_rejections_do_not_trigger_capacity_exclusion(self):
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as directory:
+            store = Store(pathlib.Path(directory))
+            error = {
+                "code": "upstream_video_failed",
+                "category": "upstream",
+                "message": "Prompt rejected by content policy",
+                "uncertain": False,
+            }
+            self.finish_provider_failure(store, 0, error)
+            self.finish_provider_failure(store, 1, error)
+
+            self.assertEqual(store.unhealthy_providers(), set())
+
     def test_reference_fetch_rejections_do_not_quarantine_provider(self):
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as directory:
             store = Store(pathlib.Path(directory))
