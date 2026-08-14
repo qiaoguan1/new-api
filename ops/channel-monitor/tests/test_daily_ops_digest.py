@@ -104,11 +104,22 @@ class DigestBuilderTests(unittest.TestCase):
                 "audit": root / "audit.json",
                 "pricing": root / "pricing.json",
                 "live": root / "live.json",
+                "recharges": root / "recharges.json",
                 "state": root / "state.json",
             }
             for key, value in (
                 ("upstreams", upstreams), ("ledger", ledger), ("audit", audit),
                 ("pricing", pricing), ("live", live),
+                (
+                    "recharges",
+                    {
+                        "source": "authenticated_upstream_recharge_records",
+                        "generated_at": int(digest.time.time()),
+                        "complete": 0,
+                        "unavailable": 0,
+                        "providers": {},
+                    },
+                ),
             ):
                 paths[key].write_text(json.dumps(value), encoding="utf-8")
             argv = [
@@ -118,6 +129,7 @@ class DigestBuilderTests(unittest.TestCase):
                 "--audit", str(paths["audit"]),
                 "--pricing-log", str(paths["pricing"]),
                 "--live-balance", str(paths["live"]),
+                "--recharges", str(paths["recharges"]),
                 "--state", str(paths["state"]),
             ]
             with mock.patch.object(
@@ -142,6 +154,53 @@ class DigestBuilderTests(unittest.TestCase):
         self.assertNotIn("token", serialized.lower())
         self.assertNotIn("website_url", serialized.lower())
         self.assertLess(len(serialized.encode("utf-8")), 64 * 1024)
+
+    def test_digest_includes_only_sanitized_recharge_aggregates(self):
+        recharges = {
+            "source": "authenticated_upstream_recharge_records",
+            "generated_at": 199,
+            "complete": 1,
+            "unavailable": 1,
+            "providers": {
+                "paisio": {
+                    "name": "Paisio",
+                    "status": "complete",
+                    "successful_records": 2,
+                    "credited_amount": 10.2,
+                    "credited_unit": "upstream_account_money",
+                    "paid_amounts": {"CNY": 10},
+                    "trade_no": "must-not-leak",
+                },
+                "broken": {
+                    "name": "Broken",
+                    "status": "unavailable",
+                    "unavailable_reason": "contains private upstream details",
+                },
+            },
+        }
+
+        report = digest.build_digest(
+            *self.fixture(), DAY, generated_at=200, recharges=recharges
+        )
+        payload = digest.notification_payload(report)
+
+        self.assertEqual(payload["recharges"]["paid_cny_total"], 10.0)
+        self.assertEqual(payload["recharges"]["complete"], 1)
+        self.assertNotIn("trade_no", json.dumps(payload))
+        self.assertNotIn("private upstream details", json.dumps(payload))
+
+    def test_stale_recharge_summary_fails_closed(self):
+        recharges = {
+            "source": "authenticated_upstream_recharge_records",
+            "generated_at": 1,
+            "complete": 0,
+            "unavailable": 0,
+            "providers": {},
+        }
+        with self.assertRaisesRegex(digest.DigestError, "recharge_summary_stale"):
+            digest.build_digest(
+                *self.fixture(), DAY, generated_at=200_000, recharges=recharges
+            )
 
 
 if __name__ == "__main__":
