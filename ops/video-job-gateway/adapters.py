@@ -26,6 +26,9 @@ REFERENCE_FETCH_REJECTION_MARKERS = (
     "cannot fetch content from the provided url",
     "url_rejected",
 )
+PROVIDER_CAPACITY_FAILURE_MARKERS = (
+    "scheduler claim wait timed out",
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -631,6 +634,8 @@ def _normalized_failure_code(error_code: str, error_message: str) -> str:
         return "provider_credential_refresh_failed"
     if any(marker in combined for marker in REFERENCE_FETCH_REJECTION_MARKERS):
         return "video_reference_fetch_rejected"
+    if any(marker in combined for marker in PROVIDER_CAPACITY_FAILURE_MARKERS):
+        return "provider_capacity_exhausted"
     return str(error_code or "upstream_video_failed").strip()[:80]
 
 

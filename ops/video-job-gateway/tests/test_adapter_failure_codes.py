@@ -33,6 +33,17 @@ class AdapterFailureCodeTests(unittest.TestCase):
         self.assertEqual(observation.status, "failed")
         self.assertEqual(observation.error_code, "video_reference_fetch_rejected")
 
+    def test_scheduler_claim_timeout_receives_capacity_code(self):
+        observation = _observation(
+            {
+                "status": "failed",
+                "task_id": "provider-task-capacity",
+                "message": "no eligible account: scheduler claim wait timed out",
+            }
+        )
+
+        self.assertEqual(observation.error_code, "provider_capacity_exhausted")
+
 
 if __name__ == "__main__":
     unittest.main()
