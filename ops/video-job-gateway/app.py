@@ -565,13 +565,25 @@ class Gateway:
             "time": int(time.time()),
         }
 
-    def capabilities(self) -> dict[str, Any]:
+    def capabilities(
+        self,
+        billing_contract_version: str = VIDEO_BILLING_V2_CONTRACT,
+    ) -> dict[str, Any]:
+        if billing_contract_version not in {
+            VIDEO_BILLING_V2_CONTRACT,
+            VIDEO_REFERENCE_V22_CONTRACT,
+        }:
+            raise GatewayError(
+                HTTPStatus.BAD_REQUEST,
+                "unsupported_contract_version",
+                "视频任务合同版本无效。",
+            )
         snapshot = self.catalog.public_snapshot(self.eligible_v2_providers)
         ready, _ = self.readiness()
         capabilities = snapshot.get("capabilities") if isinstance(snapshot.get("capabilities"), dict) else {}
         video = capabilities.get("video") if isinstance(capabilities.get("video"), dict) else {}
         video["traffic_enabled"] = ready
-        video["billing_contract_version"] = VIDEO_BILLING_V2_CONTRACT
+        video["billing_contract_version"] = billing_contract_version
         video["reference_contract_version"] = VIDEO_REFERENCE_V22_CONTRACT
         for row in video.get("models") or []:
             if isinstance(row, dict):
@@ -638,7 +650,7 @@ class Gateway:
             "provider-actual-cost-settlement-v1",
             "authenticated-billing-evidence-v1",
         ]
-        snapshot["billing_contract_version"] = VIDEO_BILLING_V2_CONTRACT
+        snapshot["billing_contract_version"] = billing_contract_version
         return snapshot
 
     def price_pairs(self) -> list[tuple[str, str]]:
@@ -1856,7 +1868,24 @@ def handler_class(gateway: Gateway) -> type[BaseHTTPRequestHandler]:
                 self.json_response(HTTPStatus.OK, gateway.public_v2_snapshot(snapshot))
                 return
             if parsed.path == "/v1/capabilities":
-                self.json_response(HTTPStatus.OK, {"ok": True, **gateway.capabilities()})
+                billing_contract_version = (
+                    self.v2_contract_version() or VIDEO_BILLING_V2_CONTRACT
+                )
+                try:
+                    payload = gateway.capabilities(billing_contract_version)
+                except GatewayError as error:
+                    self.json_response(
+                        error.status,
+                        {"error": error.contract()},
+                    )
+                    return
+                self.json_response(
+                    HTTPStatus.OK,
+                    {
+                        "ok": True,
+                        **payload,
+                    },
+                )
                 return
             if parsed.path == "/v1/video-prices":
                 self.json_response(HTTPStatus.OK, gateway.video_prices())
