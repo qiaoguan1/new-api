@@ -28,6 +28,7 @@ DEFAULT_LEDGER_PATH = ROOT / "data" / "upstream-balance-ledger.json"
 DEFAULT_AUDIT_PATH = ROOT / "data" / "daily-upstream-audit.json"
 DEFAULT_PRICING_LOG_PATH = ROOT / "data" / "auto-pricing-log.json"
 DEFAULT_LIVE_BALANCE_PATH = ROOT / "data" / "upstream-balance-live.json"
+DEFAULT_RECHARGES_PATH = ROOT / "data" / "upstream-recharge-summary.json"
 DEFAULT_STATE_PATH = ROOT / "data" / "daily-ops-digest-state.json"
 BEIJING = ZoneInfo("Asia/Shanghai")
 MAX_CHANNELS = 100
@@ -152,6 +153,7 @@ def build_digest(
     day: str,
     *,
     generated_at: int,
+    recharges: Any = None,
 ) -> dict[str, Any]:
     """Build a bounded digest from private monitoring artifacts."""
     day_rows = (ledger.get("days") or {}).get(day) if isinstance(ledger, dict) else None
@@ -226,6 +228,47 @@ def build_digest(
             "alerts": len([row for row in audit.get("alerts") or [] if isinstance(row, dict)]),
         },
     }
+    if recharges is not None:
+        recharge_generated_at = _count(
+            recharges.get("generated_at") if isinstance(recharges, dict) else None
+        )
+        if (
+            not isinstance(recharges, dict)
+            or recharges.get("source") != "authenticated_upstream_recharge_records"
+            or not isinstance(recharges.get("providers"), dict)
+        ):
+            raise DigestError("recharge_summary_invalid")
+        if (
+            recharge_generated_at <= 0
+            or recharge_generated_at > int(generated_at) + 300
+            or int(generated_at) - recharge_generated_at > 36 * 60 * 60
+        ):
+            raise DigestError("recharge_summary_stale")
+        recharge_rows = []
+        paid_cny_total = 0.0
+        for slug, row in sorted(recharges["providers"].items()):
+            if not isinstance(row, dict) or len(recharge_rows) >= MAX_CHANNELS:
+                continue
+            paid = row.get("paid_amounts") if isinstance(row.get("paid_amounts"), dict) else {}
+            paid_cny = _number(paid.get("CNY"))
+            if paid_cny is not None:
+                paid_cny_total += paid_cny
+            recharge_rows.append(
+                {
+                    "name": _safe_name(row.get("name"), str(slug)),
+                    "status": _safe_code(row.get("status"), "unknown"),
+                    "successful_records": _count(row.get("successful_records")),
+                    "credited_amount": _number(row.get("credited_amount")),
+                    "credited_unit": _safe_code(row.get("credited_unit"), "unknown"),
+                    "paid_cny": round(paid_cny, 6) if paid_cny is not None else None,
+                }
+            )
+        report["recharges"] = {
+            "complete": _count(recharges.get("complete")),
+            "unavailable": _count(recharges.get("unavailable")),
+            "paid_cny_total": round(paid_cny_total, 6),
+            "providers": recharge_rows,
+        }
     payload = notification_payload(report)
     if len(json.dumps(payload, ensure_ascii=False).encode("utf-8")) > MAX_PAYLOAD_BYTES:
         raise DigestError("digest_payload_too_large")
@@ -246,6 +289,7 @@ def notification_payload(report: dict[str, Any]) -> dict[str, Any]:
         "channels": channels,
         "pricing": report.get("pricing"),
         "audit": report.get("audit"),
+        "recharges": report.get("recharges"),
     }
 
 
@@ -350,6 +394,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--audit", type=pathlib.Path, default=DEFAULT_AUDIT_PATH)
     parser.add_argument("--pricing-log", type=pathlib.Path, default=DEFAULT_PRICING_LOG_PATH)
     parser.add_argument("--live-balance", type=pathlib.Path, default=DEFAULT_LIVE_BALANCE_PATH)
+    parser.add_argument("--recharges", type=pathlib.Path, default=DEFAULT_RECHARGES_PATH)
     parser.add_argument("--state", type=pathlib.Path, default=DEFAULT_STATE_PATH)
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--force", action="store_true")
@@ -378,6 +423,7 @@ def main(argv: list[str] | None = None, environ: dict[str, str] | os._Environ[st
             read_json(args.live_balance, required=True),
             day,
             generated_at=now,
+            recharges=read_json(args.recharges, required=True),
         )
         if args.dry_run:
             print(json.dumps({"status": "dry_run", "date": day, "channels": len(report["channels"])}, sort_keys=True))
