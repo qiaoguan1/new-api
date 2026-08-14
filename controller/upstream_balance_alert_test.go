@@ -93,6 +93,43 @@ func TestValidUpstreamBalanceAlertRejectsUnboundedNumbers(t *testing.T) {
 	}
 }
 
+func TestUpstreamBalanceAlertPreservesPatrolAndCredentialEvents(t *testing.T) {
+	patrol := upstreamBalanceAlertRequest{
+		Kind: "patrol_incident_open", Name: "video_gateway", OccurredAt: 1786407600,
+		Code: "provider_capacity_exhausted", Severity: "warning",
+	}
+	if !validUpstreamBalanceAlertRequest(patrol) {
+		t.Fatal("expected a valid patrol event")
+	}
+	_, patrolContent := upstreamBalanceAlertContent(patrol)
+	if !strings.Contains(patrolContent, "provider_capacity_exhausted") ||
+		!strings.Contains(patrolContent, "warning") {
+		t.Fatalf("patrol fields were lost: %s", patrolContent)
+	}
+
+	credential := upstreamBalanceAlertRequest{
+		Kind: "credential_expiring", Name: "Toonflow", Threshold: 7, OccurredAt: 1786407600,
+	}
+	if !validUpstreamBalanceAlertRequest(credential) {
+		t.Fatal("expected a valid credential event")
+	}
+	_, credentialContent := upstreamBalanceAlertContent(credential)
+	if !strings.Contains(credentialContent, "视频上游") || !strings.Contains(credentialContent, "7") {
+		t.Fatalf("credential fields were lost: %s", credentialContent)
+	}
+}
+
+func TestUpstreamBalanceAlertRejectsInvalidPatrolFields(t *testing.T) {
+	for _, request := range []upstreamBalanceAlertRequest{
+		{Kind: "patrol_incident_open", Name: "gateway", OccurredAt: 1, Severity: "warning"},
+		{Kind: "patrol_incident_open", Name: "gateway", OccurredAt: 1, Code: "code", Severity: "urgent"},
+	} {
+		if validUpstreamBalanceAlertRequest(request) {
+			t.Fatalf("expected invalid patrol request to be rejected: %#v", request)
+		}
+	}
+}
+
 func TestSendUpstreamBalanceAlertRequiresConfiguredValidRecipient(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	previous, existed := os.LookupEnv("UPSTREAM_BALANCE_ALERT_EMAIL")
