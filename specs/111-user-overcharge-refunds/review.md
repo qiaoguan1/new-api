@@ -50,3 +50,19 @@ Unaddressed: 0
   445,328,255 quota can return to original tokens and 242,692 quota is
   wallet-only. Transaction ended with `ROLLBACK`.
 - No paid generation request was created.
+
+## Production execution
+
+- Reviewed script SHA-256:
+  `dac8f12c223c6154d5f216503861e7b4da395b5fd3bbdeefd24e075d63e44474`.
+- Full PostgreSQL backup:
+  `/opt/ai-api-stack/channel-monitor/backups/issue111/new-api-before-refund-20260815-004911.dump`.
+- Affected-row backup:
+  `/opt/ai-api-stack/channel-monitor/backups/historical-overcharge-refunds/issue111-20260815-005007-73c4d88b67fb.json`.
+- Live apply inserted 3,814 immutable audit rows and credited 445,570,947
+  quota (891.141894 CNY) across 14 accounts. Every wallet increase and
+  `used_quota` decrease matched its audited refund exactly.
+- A second apply of the identical frozen plan inserted zero rows and credited
+  zero quota.
+- Ten no-charge production rounds passed: API status, video health, and video
+  readiness returned HTTP 200; the audit count and sum remained unchanged.
