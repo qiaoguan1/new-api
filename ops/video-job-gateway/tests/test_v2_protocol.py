@@ -338,6 +338,87 @@ class BillingV2ProtocolTests(unittest.TestCase):
             self.assertEqual(standard_720["reference_video"]["cny_per_second_exact"], "0.907200")
             self.assertEqual(standard_720["reference_audio"]["cny_per_second_exact"], "1.490400")
 
+    def test_capabilities_negotiate_the_requested_supported_billing_contract(self):
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as directory:
+            gateway = self.make_gateway(directory, v22=True)
+            server = ThreadingHTTPServer(("127.0.0.1", 0), handler_class(gateway))
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            try:
+                url = f"http://127.0.0.1:{server.server_port}/v1/capabilities"
+                cases = (
+                    (None, BILLING_CONTRACT_VERSION),
+                    (BILLING_CONTRACT_VERSION, BILLING_CONTRACT_VERSION),
+                    (BILLING_CONTRACT_REFERENCE_VERSION, BILLING_CONTRACT_REFERENCE_VERSION),
+                )
+                for requested, expected in cases:
+                    with self.subTest(requested=requested):
+                        headers = {"Authorization": "Bearer test-token"}
+                        if requested:
+                            headers["X-XingTu-Contract-Version"] = requested
+                        with urllib.request.urlopen(
+                            urllib.request.Request(url, headers=headers),
+                            timeout=5,
+                        ) as response:
+                            self.assertEqual(response.status, 200)
+                            payload = json.loads(response.read())
+                        self.assertEqual(payload["billing_contract_version"], expected)
+                        self.assertEqual(
+                            payload["capabilities"]["video"]["billing_contract_version"],
+                            expected,
+                        )
+                        self.assertEqual(payload["protocol_version"], "xtai-relay-v1")
+                        self.assertTrue(payload["capabilities"]["video"]["traffic_enabled"])
+
+                with self.assertRaises(urllib.error.HTTPError) as unauthorized:
+                    urllib.request.urlopen(
+                        urllib.request.Request(
+                            url,
+                            headers={
+                                "X-XingTu-Contract-Version": BILLING_CONTRACT_REFERENCE_VERSION,
+                            },
+                        ),
+                        timeout=5,
+                    )
+                self.assertEqual(unauthorized.exception.code, 401)
+
+                with self.assertRaises(urllib.error.HTTPError) as failure:
+                    urllib.request.urlopen(
+                        urllib.request.Request(
+                            url,
+                            headers={
+                                "Authorization": "Bearer test-token",
+                                "X-XingTu-Contract-Version": "xtai-video-billing-v9",
+                            },
+                        ),
+                        timeout=5,
+                    )
+                self.assertEqual(failure.exception.code, 400)
+                error = json.loads(failure.exception.read())
+                self.assertEqual(error["error"]["code"], "unsupported_contract_version")
+
+                with urllib.request.urlopen(
+                    urllib.request.Request(
+                        f"http://127.0.0.1:{server.server_port}/v1/video-prices",
+                        headers={
+                            "Authorization": "Bearer test-token",
+                            "X-XingTu-Contract-Version": BILLING_CONTRACT_REFERENCE_VERSION,
+                        },
+                    ),
+                    timeout=5,
+                ) as response:
+                    prices = json.loads(response.read())
+                self.assertEqual(prices["pricing"]["contract_version"], "xtai-video-pricing-v1")
+                self.assertEqual(prices["pricing"]["currency"], "CNY")
+                self.assertEqual(len(prices["pricing"]["models"]), 7)
+                self.assertTrue(
+                    all(row["billing_unit"] == "output_second" for row in prices["pricing"]["models"])
+                )
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=5)
+
     def test_v22_settled_webhook_contains_only_reference_digests_not_urls(self):
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as directory:
             gateway = self.make_gateway(directory, webhook=True, v22=True)
