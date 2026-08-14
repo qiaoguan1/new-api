@@ -233,6 +233,9 @@ class RoutePlanTests(unittest.TestCase):
             raw = (ROOT / name).read_text(encoding="utf-8").lower()
             self.assertNotIn("sd2", raw, name)
 
+        catalog = Catalog.load(ROOT / "catalog.json")
+        self.assertEqual(catalog.revision, "2026-08-14.2")
+
     def test_paisio_route_names_follow_standard_fast_mini_contract(self):
         catalog = Catalog.load(ROOT / "catalog.json")
         full = next(model for model in catalog.models if model.id == "seedance-2.0")
