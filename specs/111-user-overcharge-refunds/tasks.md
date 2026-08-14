@@ -9,7 +9,7 @@
 - [x] T007 Implement source-bound planning and immutable plan validation.
 - [x] T008 Run focused and full tests; freeze and manually reconcile the production plan.
 - [x] T009 Complete comprehensive and security review with zero unaddressed findings.
-- [ ] T010 Commit, push, open PR, pass CI, merge, and deploy the reviewed script.
-- [ ] T011 Run rollback-only transaction validation and create production backups.
-- [ ] T012 Apply the exact plan during a maintenance window and restore ingress.
-- [ ] T013 Verify per-user balances, audit rows, idempotency, and ten health rounds.
+- [x] T010 Commit, push, open PR, pass CI, merge, and deploy the reviewed script.
+- [x] T011 Run rollback-only transaction validation and create production backups.
+- [x] T012 Apply the exact plan during a maintenance window and restore ingress.
+- [x] T013 Verify per-user balances, audit rows, idempotency, and ten health rounds.
