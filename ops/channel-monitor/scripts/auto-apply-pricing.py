@@ -8,7 +8,8 @@ actual-cost sample can change a price.
 
 Pricing contract:
 
-* standard/base price = highest eligible actual cost x 10
+* source cost = recent actual cost, otherwise authenticated catalog cost
+* standard/base price = highest retained source cost x 10
 * customer group ratio = 0.15
 * customer price = actual cost x 1.5
 """
@@ -40,6 +41,7 @@ CREDENTIALS_PATH = ROOT / "upstream-credentials.json"
 LOG_PATH = ROOT / "data" / "auto-pricing-log.json"
 BACKUP_DIR = ROOT / "backups" / "pricing"
 VIDEO_POLICY_PATH = ROOT / "config" / "video-model-policy.json"
+MANUAL_EVIDENCE_PATH = ROOT / "config" / "pricing-evidence-overrides.json"
 
 EXPECTED_GROUP_RATIO = 0.15
 BASE_MULTIPLIER = 10.0
@@ -50,6 +52,7 @@ ACTUAL_COST_LOOKBACK_DAYS = 7
 MAX_TEXT_COST_CNY_PER_M = 100_000.0
 MAX_FIXED_COST_CNY_PER_CALL = 10_000.0
 MAX_COMPLETION_RATIO = 1_000.0
+MAX_MANUAL_EVIDENCE_DAYS = 31
 RECOVERABLE_UNDERPRICING_ALERT_TYPES = frozenset(
     {
         "price_below_upstream_input",
@@ -534,8 +537,90 @@ def _source_actual_cost(ledger, day, model, slug):
     return None
 
 
-def _collect_model_evidence(ledger, day_rows, day, model, eligible_sources):
-    """Collect actual and catalog evidence per source and return safe maxima."""
+def _manual_catalog_cost(manual_evidence, slug, model, day):
+    """Return bounded, time-limited admin-verified catalog evidence."""
+    if (
+        not isinstance(manual_evidence, dict)
+        or isinstance(manual_evidence.get("version"), bool)
+        or manual_evidence.get("version") != 1
+    ):
+        return None
+    sources = manual_evidence.get("sources")
+    source = sources.get(slug) if isinstance(sources, dict) else None
+    models = source.get("models") if isinstance(source, dict) else None
+    row = models.get(model) if isinstance(models, dict) else None
+    if not isinstance(row, dict):
+        return None
+    try:
+        target_day = datetime.date.fromisoformat(day)
+        verified_on = datetime.date.fromisoformat(row["verified_on"])
+        valid_through = datetime.date.fromisoformat(row["valid_through"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    if (
+        verified_on > target_day
+        or target_day > valid_through
+        or valid_through < verified_on
+        or (valid_through - verified_on).days > MAX_MANUAL_EVIDENCE_DAYS
+    ):
+        return None
+    fetched_at = int(
+        datetime.datetime.combine(
+            verified_on,
+            datetime.time.min,
+            tzinfo=datetime.timezone(datetime.timedelta(hours=8)),
+        ).timestamp()
+    )
+    if row.get("kind") == "text":
+        input_cost = row.get("input_cost_cny_per_m")
+        output_cost = row.get("output_cost_cny_per_m")
+        if (
+            not _positive_number(input_cost)
+            or not _positive_number(output_cost)
+            or float(input_cost) > MAX_TEXT_COST_CNY_PER_M
+            or float(output_cost) > MAX_TEXT_COST_CNY_PER_M
+        ):
+            return None
+        return {
+            "kind": "text",
+            "input": float(input_cost),
+            "output": float(output_cost),
+            "sample_date": row["verified_on"],
+            "evidence_type": "manual_authenticated_catalog",
+            "fetched_at": fetched_at,
+        }
+    if row.get("kind") == "fixed":
+        fixed_cost = row.get("cost_cny_per_call")
+        if (
+            not _positive_number(fixed_cost)
+            or float(fixed_cost) > MAX_FIXED_COST_CNY_PER_CALL
+        ):
+            return None
+        return {
+            "kind": "fixed",
+            "fixed": float(fixed_cost),
+            "sample_date": row["verified_on"],
+            "evidence_type": "manual_authenticated_catalog",
+            "fetched_at": fetched_at,
+        }
+    return None
+
+
+def _collect_model_evidence(
+    ledger,
+    day_rows,
+    day,
+    model,
+    eligible_sources,
+    manual_evidence=None,
+):
+    """Collect one best evidence row per source and return cross-source maxima.
+
+    A recent task-backed actual cost is authoritative for that source. The
+    authenticated catalog is a fallback only when no recent actual sample is
+    available, so a displayed list price cannot replace what the account was
+    demonstrably charged.
+    """
     kinds = set()
     text_input = []
     text_output = []
@@ -545,14 +630,18 @@ def _collect_model_evidence(ledger, day_rows, day, model, eligible_sources):
     evidence_types = set()
     for slug in sorted(eligible_sources):
         entry = day_rows.get(slug) or {}
-        evidence_rows = [
-            evidence
-            for evidence in (
-                _source_actual_cost(ledger, day, model, slug),
-                _catalog_cost(entry, model, day),
+        actual = _source_actual_cost(ledger, day, model, slug)
+        evidence_rows = [actual] if actual is not None else []
+        if not evidence_rows:
+            catalog = _catalog_cost(entry, model, day)
+            if catalog is not None:
+                evidence_rows.append(catalog)
+        if not evidence_rows:
+            manual_catalog = _manual_catalog_cost(
+                manual_evidence, slug, model, day
             )
-            if evidence is not None
-        ]
+            if manual_catalog is not None:
+                evidence_rows.append(manual_catalog)
         if not evidence_rows:
             missing.append(slug)
             metadata = entry.get("pricing_metadata") if isinstance(entry, dict) else None
@@ -588,9 +677,13 @@ def _collect_model_evidence(ledger, day_rows, day, model, eligible_sources):
 
 
 def _cost_basis(evidence_types, sample_dates, day):
-    if evidence_types == {"authenticated_catalog"}:
+    catalog_types = {
+        "authenticated_catalog",
+        "manual_authenticated_catalog",
+    }
+    if evidence_types and evidence_types <= catalog_types:
         return "authenticated_catalog"
-    if "authenticated_catalog" in evidence_types:
+    if evidence_types & catalog_types:
         return "mixed_actual_catalog"
     return "current_day_actual" if all(value == day for value in sample_dates) else "recent_actual"
 
@@ -628,6 +721,7 @@ def build_pricing_plan(
     *,
     max_change_ratio,
     protected_videos=(),
+    manual_evidence=None,
 ):
     """Build a pure, side-effect-free pricing plan for every discovered model."""
     for key in OPTION_KEYS + ("GroupRatio",):
@@ -690,6 +784,7 @@ def build_pricing_plan(
             day,
             model,
             eligible_sources,
+            manual_evidence,
         )
         if costs["missing_sources"]:
             decision["reason"] = (
@@ -913,6 +1008,10 @@ def main(argv=None):
         ledger = read_json(LEDGER_PATH, required=True)
         daily_audit = read_json(AUDIT_PATH, required=True)
         video_policy = read_json(VIDEO_POLICY_PATH, required=True)
+        manual_evidence = read_json(
+            MANUAL_EVIDENCE_PATH,
+            {"version": 1, "sources": {}},
+        )
         credentials = read_json(CREDENTIALS_PATH, required=True)
         incomplete_credentials = incomplete_credential_sources(ledger, day, credentials)
         current = {key: get_option(key) for key in OPTION_KEYS + ("GroupRatio",)}
@@ -926,6 +1025,7 @@ def main(argv=None):
             current,
             max_change_ratio=max_change_ratio,
             protected_videos=protected_video_models(daily_audit, video_policy),
+            manual_evidence=manual_evidence,
         )
         run = {
             "date": plan["date"],
