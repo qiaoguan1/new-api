@@ -30,6 +30,8 @@ highest trusted cost among the retained routes.
 8. Existing video pricing remains outside this policy.
 9. Production writes require a rollback backup and a dry-run review. No paid
    model request is part of verification.
+10. The production maintenance run must accept an explicit target-model set so
+    no unrelated model option can be changed by this scoped deployment.
 
 ## Acceptance
 
