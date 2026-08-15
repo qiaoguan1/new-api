@@ -1,0 +1,45 @@
+{
+  "version": 1,
+  "sources": {
+    "hanhe": {
+      "models": {
+        "gpt-5.5": {
+          "kind": "text",
+          "input_cost_cny_per_m": 0.5,
+          "output_cost_cny_per_m": 3.0,
+          "verified_on": "2026-08-15",
+          "valid_through": "2026-08-31"
+        },
+        "gpt-5.6-sol": {
+          "kind": "text",
+          "input_cost_cny_per_m": 0.5,
+          "output_cost_cny_per_m": 3.0,
+          "verified_on": "2026-08-15",
+          "valid_through": "2026-08-31"
+        },
+        "gpt-image-2": {
+          "kind": "fixed",
+          "cost_cny_per_call": 0.1,
+          "resolution_cost_cny_per_call": {
+            "1K": 0.05,
+            "2K": 0.05,
+            "4K": 0.1
+          },
+          "verified_on": "2026-08-15",
+          "valid_through": "2026-08-31"
+        }
+      }
+    },
+    "jojocode": {
+      "models": {
+        "gpt-5.6-sol": {
+          "kind": "text",
+          "input_cost_cny_per_m": 0.8755,
+          "output_cost_cny_per_m": 5.253,
+          "verified_on": "2026-08-11",
+          "valid_through": "2026-08-31"
+        }
+      }
+    }
+  }
+}

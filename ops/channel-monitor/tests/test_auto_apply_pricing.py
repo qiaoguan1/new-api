@@ -89,6 +89,22 @@ class PricingPlanTests(unittest.TestCase):
             "GroupRatio": {"text": 0.15, "image": 0.15, "video": 0.15},
         }
 
+    def manual_catalog(self, slug, model, row, *, valid_through=DAY):
+        return {
+            "version": 1,
+            "sources": {
+                slug: {
+                    "models": {
+                        model: {
+                            **row,
+                            "verified_on": DAY,
+                            "valid_through": valid_through,
+                        }
+                    }
+                }
+            },
+        }
+
     def test_discovers_unknown_text_and_image_models_without_allowlist(self):
         daily_audit = audit(channel(1, "healthy", ["brand-new-text", "brand-new-image"]))
         daily_ledger = ledger(
@@ -281,7 +297,7 @@ class PricingPlanTests(unittest.TestCase):
         self.assertAlmostEqual(decision["sell_cny_per_call"], 1.05)
         self.assertAlmostEqual(result["options"]["ModelPrice"]["catalog-image"], 7.0)
 
-    def test_higher_catalog_cost_protects_against_stale_lower_actual_cost(self):
+    def test_recent_actual_cost_precedes_higher_catalog_for_same_source(self):
         entry = catalog_source(
             {
                 "model_name": "model",
@@ -300,12 +316,73 @@ class PricingPlanTests(unittest.TestCase):
             DAY,
             self.current_options(),
             max_change_ratio=50.0,
+            manual_evidence=self.manual_catalog(
+                "healthy",
+                "model",
+                {
+                    "kind": "text",
+                    "input_cost_cny_per_m": 500.0,
+                    "output_cost_cny_per_m": 4000.0,
+                },
+            ),
         )
 
         decision = result["decisions"][0]
-        self.assertEqual(decision["cost_basis"], "mixed_actual_catalog")
-        self.assertEqual(decision["worst_input_cost_cny_per_m"], 280.0)
-        self.assertEqual(decision["worst_output_cost_cny_per_m"], 2240.0)
+        self.assertEqual(decision["cost_basis"], "current_day_actual")
+        self.assertEqual(decision["worst_input_evidence_type"], "actual")
+        self.assertEqual(decision["worst_output_evidence_type"], "actual")
+        self.assertEqual(decision["worst_input_cost_cny_per_m"], 1.0)
+        self.assertEqual(decision["worst_output_cost_cny_per_m"], 4.0)
+
+    def test_manual_authenticated_catalog_fills_source_without_actual_or_api_catalog(self):
+        result = pricing.build_pricing_plan(
+            ledger(verified=source()),
+            audit(channel(1, "verified", ["model"])),
+            DAY,
+            self.current_options(),
+            max_change_ratio=50.0,
+            manual_evidence=self.manual_catalog(
+                "verified",
+                "model",
+                {
+                    "kind": "text",
+                    "input_cost_cny_per_m": 0.5,
+                    "output_cost_cny_per_m": 3.0,
+                },
+            ),
+        )
+
+        decision = result["decisions"][0]
+        self.assertEqual(decision["action"], "apply")
+        self.assertEqual(decision["cost_basis"], "authenticated_catalog")
+        self.assertEqual(
+            decision["worst_input_evidence_type"], "manual_authenticated_catalog"
+        )
+        self.assertEqual(decision["input_sell_cny_per_m"], 0.75)
+        self.assertEqual(decision["output_sell_cny_per_m"], 4.5)
+
+    def test_expired_manual_catalog_fails_closed(self):
+        result = pricing.build_pricing_plan(
+            ledger(verified=source()),
+            audit(channel(1, "verified", ["model"])),
+            DAY,
+            self.current_options(),
+            max_change_ratio=50.0,
+            manual_evidence=self.manual_catalog(
+                "verified",
+                "model",
+                {
+                    "kind": "fixed",
+                    "cost_cny_per_call": 0.1,
+                },
+                valid_through="2026-07-21",
+            ),
+        )
+
+        self.assertEqual(result["decisions"][0]["action"], "skip")
+        self.assertEqual(
+            result["decisions"][0]["reason"], "no_trusted_cost_evidence"
+        )
 
     def test_catalog_overflow_is_rejected_for_new_model_without_current_price(self):
         result = pricing.build_pricing_plan(
@@ -571,6 +648,7 @@ class PricingPlanTests(unittest.TestCase):
             pricing.LEDGER_PATH: daily_ledger,
             pricing.AUDIT_PATH: daily_audit,
             pricing.VIDEO_POLICY_PATH: {},
+            pricing.MANUAL_EVIDENCE_PATH: {"version": 1, "sources": {}},
             pricing.CREDENTIALS_PATH: {"good": {}, "bad": {}},
         }
         options = self.current_options()
