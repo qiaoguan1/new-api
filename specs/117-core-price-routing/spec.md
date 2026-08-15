@@ -13,8 +13,10 @@ highest trusted cost among the retained routes.
    channel must not participate in routing that model.
 3. Route priority uses comparable normalized costs and NewAPI's higher numeric
    priority is called first. Ties use a stable explicit order.
-4. A source's recent task-backed actual cost takes precedence. An authenticated
-   model-catalog price is used only when that source has no recent actual cost.
+4. For the three explicitly scoped models, a source's recent task-backed actual
+   cost takes precedence. An authenticated model-catalog price is used only
+   when that source has no recent actual cost. Every unlisted model retains the
+   existing conservative actual-plus-catalog maximum rule.
 5. The highest selected source cost determines the global model price. With
    the existing group ratio of `0.15`, the customer price is cost multiplied by
    `1.5`.
