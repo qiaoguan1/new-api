@@ -125,6 +125,25 @@ class PricingPlanTests(unittest.TestCase):
         self.assertEqual(decisions["brand-new-text"]["action"], "apply")
         self.assertEqual(decisions["brand-new-image"]["action"], "apply")
 
+    def test_target_models_limits_both_decisions_and_option_changes(self):
+        result = pricing.build_pricing_plan(
+            ledger(
+                healthy=source(
+                    first=text_cost(1.0, 2.0),
+                    second=text_cost(3.0, 6.0),
+                )
+            ),
+            audit(channel(1, "healthy", ["first", "second"])),
+            DAY,
+            self.current_options(),
+            max_change_ratio=5.0,
+            target_models={"first"},
+        )
+
+        self.assertEqual([item["model"] for item in result["decisions"]], ["first"])
+        self.assertIn("first", result["options"]["ModelRatio"])
+        self.assertNotIn("second", result["options"]["ModelRatio"])
+
     def test_video_model_is_never_priced_from_upstream_cost(self):
         daily_audit = audit(channel(42, "paisio", ["sd2-720p"]))
         options = self.current_options()

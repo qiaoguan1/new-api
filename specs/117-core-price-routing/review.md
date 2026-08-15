@@ -13,7 +13,7 @@
 
 | # | Criterion | Status | Findings |
 |---|-----------|--------|----------|
-| 1 | Blindspots | FIXED | 1 |
+| 1 | Blindspots | FIXED | 2 |
 | 2 | Clarity | PASS | 0 |
 | 3 | Maintainability | PASS | 0 |
 | 4 | Security | FIXED | 1 |
@@ -27,6 +27,7 @@
 |---|----------|---------|------------|
 | 1 | Minor | Python boolean `true` compares equal to integer schema version `1`. | Explicitly reject boolean versions before accepting manual pricing evidence. |
 | 2 | Major | Deploying actual-first selection globally would change prices for unrelated models outside Issue #117. | Added an explicit `actual_preferred_models` allowlist and a regression test proving every unlisted model retains the previous conservative maximum rule. |
+| 3 | Major | A production invocation of the worker would still write every model whose existing daily plan said `apply`, not only the three reviewed models. | Added a repeatable `--model` selector that limits both decisions and option mutations, with a regression test for untouched models. |
 
 ### Security Review
 
@@ -39,8 +40,8 @@
 
 ### Verification
 
-- Focused pricing tests: 35/35 passed.
-- Full channel-monitor tests: 151/151 passed.
+- Focused pricing tests: 36/36 passed.
+- Full channel-monitor tests: 152/152 passed.
 - Python compile and `git diff --check`: passed.
 
 ### Findings Deferred (With Tracking Issues)
@@ -51,7 +52,7 @@ None.
 
 | Category | Count |
 |----------|-------|
-| Fixed in PR | 2 |
+| Fixed in PR | 3 |
 | Deferred (with tracking) | 0 |
 | Unaddressed | 0 |
 

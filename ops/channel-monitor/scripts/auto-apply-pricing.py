@@ -745,6 +745,7 @@ def build_pricing_plan(
     max_change_ratio,
     protected_videos=(),
     manual_evidence=None,
+    target_models=None,
 ):
     """Build a pure, side-effect-free pricing plan for every discovered model."""
     for key in OPTION_KEYS + ("GroupRatio",):
@@ -765,6 +766,13 @@ def build_pricing_plan(
     # Current healthy channel configuration defines inventory. Old billing
     # history may price configured models but never resurrect retired models.
     discovered = set(policy["discovered_models"])
+    if target_models is not None:
+        if not isinstance(target_models, (set, frozenset)) or any(
+            not isinstance(model, str) or not model.strip()
+            for model in target_models
+        ):
+            raise PricingError("target models must be a set of non-empty strings")
+        discovered &= {model.strip() for model in target_models}
 
     new_model_ratio = dict(current_options["ModelRatio"])
     new_completion_ratio = dict(current_options["CompletionRatio"])
@@ -1026,6 +1034,12 @@ def _summary(plan, dry_run):
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--dry-run", action="store_true", help="calculate without database writes")
+    parser.add_argument(
+        "--model",
+        dest="models",
+        action="append",
+        help="limit this run to one model; repeat to select multiple models",
+    )
     args = parser.parse_args(argv)
     day = target_beijing_day()
     generated_at = int(time.time())
@@ -1051,6 +1065,7 @@ def main(argv=None):
             max_change_ratio=max_change_ratio,
             protected_videos=protected_video_models(daily_audit, video_policy),
             manual_evidence=manual_evidence,
+            target_models=set(args.models) if args.models else None,
         )
         run = {
             "date": plan["date"],
