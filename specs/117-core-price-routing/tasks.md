@@ -5,6 +5,6 @@
 - [x] T003 Add failing actual-first and manual-catalog tests.
 - [x] T004 Implement actual-first bounded evidence fallback.
 - [x] T005 Run focused and full channel-monitor tests.
-- [ ] T006 Back up and apply the reviewed production route/price plan.
-- [ ] T007 Verify database state, dry-run idempotence, and ten health rounds.
-- [ ] T008 Complete review, PR, merge, deployment record, and project closure.
+- [x] T006 Back up and apply the reviewed production route/price plan.
+- [x] T007 Verify database state, dry-run idempotence, and ten health rounds.
+- [x] T008 Complete review, PR, merge, deployment record, and project closure.
