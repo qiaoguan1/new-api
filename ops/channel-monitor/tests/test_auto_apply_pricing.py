@@ -92,6 +92,7 @@ class PricingPlanTests(unittest.TestCase):
     def manual_catalog(self, slug, model, row, *, valid_through=DAY):
         return {
             "version": 1,
+            "actual_preferred_models": [model],
             "sources": {
                 slug: {
                     "models": {
@@ -333,6 +334,37 @@ class PricingPlanTests(unittest.TestCase):
         self.assertEqual(decision["worst_output_evidence_type"], "actual")
         self.assertEqual(decision["worst_input_cost_cny_per_m"], 1.0)
         self.assertEqual(decision["worst_output_cost_cny_per_m"], 4.0)
+
+    def test_unlisted_model_keeps_higher_catalog_floor(self):
+        entry = catalog_source(
+            {
+                "model_name": "model",
+                "model_ratio": 100.0,
+                "completion_ratio": 8.0,
+                "quota_type": 0,
+            },
+            model=text_cost(1.0, 4.0),
+        )
+        entry["collection_status"] = "complete"
+        entry["actual_log_complete"] = True
+
+        result = pricing.build_pricing_plan(
+            ledger(healthy=entry),
+            audit(channel(1, "healthy", ["model"])),
+            DAY,
+            self.current_options(),
+            max_change_ratio=50.0,
+            manual_evidence={
+                "version": 1,
+                "actual_preferred_models": ["different-model"],
+                "sources": {},
+            },
+        )
+
+        decision = result["decisions"][0]
+        self.assertEqual(decision["cost_basis"], "mixed_actual_catalog")
+        self.assertEqual(decision["worst_input_cost_cny_per_m"], 280.0)
+        self.assertEqual(decision["worst_output_cost_cny_per_m"], 2240.0)
 
     def test_manual_authenticated_catalog_fills_source_without_actual_or_api_catalog(self):
         result = pricing.build_pricing_plan(
