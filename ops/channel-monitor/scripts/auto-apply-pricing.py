@@ -14,6 +14,7 @@ Pricing contract:
 """
 
 import argparse
+import datetime
 import json
 import math
 import os
@@ -26,7 +27,7 @@ SCRIPT_DIR = pathlib.Path(__file__).resolve().parent
 MODULE_ROOT = SCRIPT_DIR.parent
 sys.path.insert(0, str(MODULE_ROOT))
 
-from monitor_time import beijing_now, resolve_beijing_business_day
+from monitor_time import beijing_day_for_epoch, beijing_now, resolve_beijing_business_day
 from recent_actual_cost import collect_recent_model_costs
 from video_catalog_policy import normalize_model_name, validate_policy
 
@@ -46,6 +47,9 @@ MARKUP = BASE_MULTIPLIER * EXPECTED_GROUP_RATIO
 MIN_MARKUP = 1.2
 DEFAULT_MAX_CHANGE_RATIO = 5.0
 ACTUAL_COST_LOOKBACK_DAYS = 7
+MAX_TEXT_COST_CNY_PER_M = 100_000.0
+MAX_FIXED_COST_CNY_PER_CALL = 10_000.0
+MAX_COMPLETION_RATIO = 1_000.0
 RECOVERABLE_UNDERPRICING_ALERT_TYPES = frozenset(
     {
         "price_below_upstream_input",
@@ -383,6 +387,214 @@ def _base_decision(model):
     return {"model": model, "action": "skip", "reason": "no_trusted_actual_cost"}
 
 
+def _catalog_metadata_is_current(metadata, day):
+    """Accept catalog metadata captured for the business day or next morning."""
+    if not isinstance(metadata, dict) or metadata.get("status") != "complete":
+        return False
+    fetched_at = metadata.get("fetched_at")
+    if (
+        not isinstance(fetched_at, (int, float))
+        or isinstance(fetched_at, bool)
+        or not math.isfinite(fetched_at)
+        or fetched_at <= 0
+    ):
+        return False
+    try:
+        metadata_day = beijing_day_for_epoch(fetched_at)
+        target = datetime.date.fromisoformat(day)
+    except (TypeError, ValueError, OSError, OverflowError):
+        return False
+    return metadata_day in {day, (target + datetime.timedelta(days=1)).isoformat()}
+
+
+def _catalog_cost(entry, model, day):
+    """Normalize one authenticated NewAPI catalog row to CNY cost units."""
+    if not isinstance(entry, dict):
+        return None
+    metadata = entry.get("pricing_metadata")
+    if not _catalog_metadata_is_current(metadata, day):
+        return None
+    account_models = metadata.get("account_models")
+    if not isinstance(account_models, list) or model not in account_models:
+        return None
+    raw_rows = metadata.get("models")
+    if not isinstance(raw_rows, list):
+        return None
+    rows = [
+        row
+        for row in raw_rows
+        if isinstance(row, dict) and str(row.get("model_name") or "").strip() == model
+    ]
+    if len(rows) != 1:
+        return None
+    group = str(entry.get("group") or "").strip()
+    group_ratios = metadata.get("group_ratio")
+    rate = entry.get("rate")
+    if (
+        not group
+        or not isinstance(group_ratios, dict)
+        or not _positive_number(group_ratios.get(group))
+        or not _positive_number(rate)
+    ):
+        return None
+    group_ratio = float(group_ratios[group])
+    cny_rate = float(rate)
+    row = rows[0]
+    model_ratio = row.get("model_ratio")
+    completion_ratio = row.get("completion_ratio")
+    model_price = row.get("model_price")
+    billing_mode = str(row.get("billing_mode") or "").strip().lower()
+    quota_type = row.get("quota_type")
+    if isinstance(quota_type, bool) or quota_type not in {None, 0, 1}:
+        return None
+    per_second_modes = {"per_sec", "per_second", "second"}
+    fixed_mode = (
+        (quota_type == 1 or billing_mode in {"fixed", "per_call", "task"})
+        and billing_mode not in per_second_modes
+    )
+    has_fixed = _positive_number(model_price) and fixed_mode
+    has_text = (
+        _positive_number(model_ratio)
+        and _positive_number(completion_ratio)
+        and float(completion_ratio) <= MAX_COMPLETION_RATIO
+        and not _positive_number(model_price)
+        and quota_type != 1
+        and billing_mode in {"", "ratio", "token", "per_token"}
+    )
+    if has_fixed == has_text:
+        return None
+    fetched_at = int(float(metadata["fetched_at"]))
+    if has_fixed:
+        fixed_cost = float(model_price) * group_ratio * cny_rate
+        if not _positive_number(fixed_cost) or fixed_cost > MAX_FIXED_COST_CNY_PER_CALL:
+            return None
+        return {
+            "kind": "fixed",
+            "fixed": fixed_cost,
+            "sample_date": day,
+            "evidence_type": "authenticated_catalog",
+            "fetched_at": fetched_at,
+        }
+    input_cost = float(model_ratio) * 2.0 * group_ratio * cny_rate
+    output_cost = input_cost * float(completion_ratio)
+    if (
+        not _positive_number(input_cost)
+        or not _positive_number(output_cost)
+        or input_cost > MAX_TEXT_COST_CNY_PER_M
+        or output_cost > MAX_TEXT_COST_CNY_PER_M
+    ):
+        return None
+    return {
+        "kind": "text",
+        "input": input_cost,
+        "output": output_cost,
+        "sample_date": day,
+        "evidence_type": "authenticated_catalog",
+        "fetched_at": fetched_at,
+    }
+
+
+def _source_actual_cost(ledger, day, model, slug):
+    """Return the newest task-backed actual cost for one source and model."""
+    costs = collect_recent_model_costs(
+        ledger,
+        day,
+        model,
+        {slug},
+        lookback_days=ACTUAL_COST_LOOKBACK_DAYS,
+    )
+    if costs["kinds"] == {"text"} and costs["text_input"] and costs["text_output"]:
+        input_cost, _, input_day = costs["text_input"][0]
+        output_cost, _, output_day = costs["text_output"][0]
+        sample_day = max(input_day, output_day)
+        if (
+            input_cost > MAX_TEXT_COST_CNY_PER_M
+            or output_cost > MAX_TEXT_COST_CNY_PER_M
+        ):
+            return None
+        return {
+            "kind": "text",
+            "input": input_cost,
+            "output": output_cost,
+            "sample_date": sample_day,
+            "evidence_type": "actual",
+            "fetched_at": None,
+        }
+    if costs["kinds"] == {"fixed"} and costs["fixed"]:
+        fixed_cost, _, sample_day = costs["fixed"][0]
+        if fixed_cost > MAX_FIXED_COST_CNY_PER_CALL:
+            return None
+        return {
+            "kind": "fixed",
+            "fixed": fixed_cost,
+            "sample_date": sample_day,
+            "evidence_type": "actual",
+            "fetched_at": None,
+        }
+    return None
+
+
+def _collect_model_evidence(ledger, day_rows, day, model, eligible_sources):
+    """Collect actual and catalog evidence per source and return safe maxima."""
+    kinds = set()
+    text_input = []
+    text_output = []
+    fixed = []
+    missing = []
+    incomplete = []
+    evidence_types = set()
+    for slug in sorted(eligible_sources):
+        entry = day_rows.get(slug) or {}
+        evidence_rows = [
+            evidence
+            for evidence in (
+                _source_actual_cost(ledger, day, model, slug),
+                _catalog_cost(entry, model, day),
+            )
+            if evidence is not None
+        ]
+        if not evidence_rows:
+            missing.append(slug)
+            metadata = entry.get("pricing_metadata") if isinstance(entry, dict) else None
+            if not _collection_complete(entry) and not (
+                isinstance(metadata, dict) and metadata.get("status") == "complete"
+            ):
+                incomplete.append(slug)
+            continue
+        for evidence in evidence_rows:
+            kind = evidence["kind"]
+            kinds.add(kind)
+            evidence_types.add(evidence["evidence_type"])
+            common = (
+                slug,
+                evidence["sample_date"],
+                evidence["evidence_type"],
+                evidence["fetched_at"],
+            )
+            if kind == "text":
+                text_input.append((float(evidence["input"]), *common))
+                text_output.append((float(evidence["output"]), *common))
+            else:
+                fixed.append((float(evidence["fixed"]), *common))
+    return {
+        "kinds": kinds,
+        "text_input": sorted(text_input, key=lambda row: row[0], reverse=True),
+        "text_output": sorted(text_output, key=lambda row: row[0], reverse=True),
+        "fixed": sorted(fixed, key=lambda row: row[0], reverse=True),
+        "missing_sources": missing,
+        "incomplete_sources": incomplete,
+        "evidence_types": evidence_types,
+    }
+
+
+def _cost_basis(evidence_types, sample_dates, day):
+    if evidence_types == {"authenticated_catalog"}:
+        return "authenticated_catalog"
+    if "authenticated_catalog" in evidence_types:
+        return "mixed_actual_catalog"
+    return "current_day_actual" if all(value == day for value in sample_dates) else "recent_actual"
+
+
 def is_video_model(model):
     """Keep every recognized video SKU out of generic upstream-cost pricing."""
     value = str(model or "").strip().lower()
@@ -454,40 +666,66 @@ def build_pricing_plan(
             decision["reason"] = "critical_model_alert"
             decisions.append(decision)
             continue
-        expected_sources = policy["model_expected_sources"].get(model, set())
-        incomplete_sources = sorted(
-            slug for slug in expected_sources if not _collection_complete(day_rows.get(slug))
-        )
-        if incomplete_sources:
-            decision["reason"] = "upstream_collection_incomplete"
-            decision["incomplete_sources"] = incomplete_sources
-            decisions.append(decision)
-            continue
         eligible_sources = policy["model_sources"].get(model, set())
         if not eligible_sources:
             decision["reason"] = "no_healthy_enabled_channel"
             decisions.append(decision)
             continue
+        expected_sources = policy["model_expected_sources"].get(model, set())
+        failed_incomplete_sources = sorted(
+            slug
+            for slug in expected_sources - eligible_sources
+            if not _collection_complete(day_rows.get(slug))
+        )
+        if failed_incomplete_sources:
+            decision["reason"] = "upstream_collection_incomplete"
+            decision["incomplete_sources"] = failed_incomplete_sources
+            decision["missing_cost_sources"] = failed_incomplete_sources
+            decisions.append(decision)
+            continue
 
-        costs = collect_recent_model_costs(
+        costs = _collect_model_evidence(
             ledger,
+            day_rows,
             day,
             model,
             eligible_sources,
-            lookback_days=ACTUAL_COST_LOOKBACK_DAYS,
         )
+        if costs["missing_sources"]:
+            decision["reason"] = (
+                "upstream_collection_incomplete"
+                if costs["incomplete_sources"]
+                else "no_trusted_cost_evidence"
+            )
+            decision["missing_cost_sources"] = costs["missing_sources"]
+            if costs["incomplete_sources"]:
+                decision["incomplete_sources"] = costs["incomplete_sources"]
+            decisions.append(decision)
+            continue
         if len(costs["kinds"]) > 1:
             decision["reason"] = "ambiguous_billing_kind"
             decisions.append(decision)
             continue
 
         if costs["kinds"] == {"text"} and costs["text_input"] and costs["text_output"]:
-            worst_input, input_source, input_sample_date = costs["text_input"][0]
-            worst_output, output_source, output_sample_date = costs["text_output"][0]
-            cost_basis = (
-                "current_day_actual"
-                if input_sample_date == day and output_sample_date == day
-                else "recent_actual"
+            (
+                worst_input,
+                input_source,
+                input_sample_date,
+                input_evidence_type,
+                input_catalog_fetched_at,
+            ) = costs["text_input"][0]
+            (
+                worst_output,
+                output_source,
+                output_sample_date,
+                output_evidence_type,
+                output_catalog_fetched_at,
+            ) = costs["text_output"][0]
+            cost_basis = _cost_basis(
+                costs["evidence_types"],
+                (input_sample_date, output_sample_date),
+                day,
             )
             new_ratio = worst_input * BASE_MULTIPLIER / 2.0
             new_completion = worst_output / worst_input
@@ -519,9 +757,11 @@ def build_pricing_plan(
                         "worst_input_cost_cny_per_m": worst_input,
                         "worst_input_source": input_source,
                         "worst_input_sample_date": input_sample_date,
+                        "worst_input_evidence_type": input_evidence_type,
                         "worst_output_cost_cny_per_m": worst_output,
                         "worst_output_source": output_source,
                         "worst_output_sample_date": output_sample_date,
+                        "worst_output_evidence_type": output_evidence_type,
                         "cost_basis": cost_basis,
                         "actual_cost_lookback_days": ACTUAL_COST_LOOKBACK_DAYS,
                         "new_model_ratio": round(new_ratio, 12),
@@ -530,9 +770,13 @@ def build_pricing_plan(
                         "output_sell_cny_per_m": round(output_sell, 12),
                     }
                 )
+                if input_catalog_fetched_at is not None:
+                    decision["worst_input_catalog_fetched_at"] = input_catalog_fetched_at
+                if output_catalog_fetched_at is not None:
+                    decision["worst_output_catalog_fetched_at"] = output_catalog_fetched_at
         elif costs["kinds"] == {"fixed"} and costs["fixed"]:
-            worst_cost, source, sample_date = costs["fixed"][0]
-            cost_basis = "current_day_actual" if sample_date == day else "recent_actual"
+            worst_cost, source, sample_date, evidence_type, catalog_fetched_at = costs["fixed"][0]
+            cost_basis = _cost_basis(costs["evidence_types"], (sample_date,), day)
             new_price = worst_cost * BASE_MULTIPLIER
             sell = worst_cost * MARKUP
             if sell < worst_cost * MIN_MARKUP:
@@ -558,12 +802,15 @@ def build_pricing_plan(
                         "worst_cost_cny_per_call": worst_cost,
                         "worst_source": source,
                         "worst_cost_sample_date": sample_date,
+                        "worst_cost_evidence_type": evidence_type,
                         "cost_basis": cost_basis,
                         "actual_cost_lookback_days": ACTUAL_COST_LOOKBACK_DAYS,
                         "new_model_price": round(new_price, 12),
                         "sell_cny_per_call": round(sell, 12),
                     }
                 )
+                if catalog_fetched_at is not None:
+                    decision["worst_cost_catalog_fetched_at"] = catalog_fetched_at
         decisions.append(decision)
 
     return {
@@ -621,18 +868,25 @@ def _summary(plan, dry_run):
                     "reason",
                     "underpricing_alert_types",
                     "incomplete_sources",
+                    "missing_cost_sources",
                     "old_model_ratio",
                     "old_completion_ratio",
                     "old_model_price",
                     "worst_input_cost_cny_per_m",
                     "worst_input_source",
                     "worst_input_sample_date",
+                    "worst_input_evidence_type",
+                    "worst_input_catalog_fetched_at",
                     "worst_output_cost_cny_per_m",
                     "worst_output_source",
                     "worst_output_sample_date",
+                    "worst_output_evidence_type",
+                    "worst_output_catalog_fetched_at",
                     "worst_cost_cny_per_call",
                     "worst_source",
                     "worst_cost_sample_date",
+                    "worst_cost_evidence_type",
+                    "worst_cost_catalog_fetched_at",
                     "cost_basis",
                     "actual_cost_lookback_days",
                     "new_model_ratio",
