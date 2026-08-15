@@ -51,6 +51,23 @@ def source(**models):
     }
 
 
+def catalog_source(*rows, group="default", group_ratio=0.2, rate=7.0, **models):
+    return {
+        "collection_status": "incomplete",
+        "actual_log_complete": False,
+        "per_model_real_cost": models,
+        "group": group,
+        "rate": rate,
+        "pricing_metadata": {
+            "status": "complete",
+            "group_ratio": {group: group_ratio},
+            "models": list(rows),
+            "account_models": [row["model_name"] for row in rows],
+            "fetched_at": 1784766000,
+        },
+    }
+
+
 def text_cost(input_cost, output_cost):
     return {
         "kind": "text",
@@ -202,8 +219,253 @@ class PricingPlanTests(unittest.TestCase):
         )
 
         self.assertEqual(result["decisions"][0]["action"], "skip")
-        self.assertEqual(result["decisions"][0]["reason"], "no_trusted_actual_cost")
+        self.assertEqual(result["decisions"][0]["reason"], "no_trusted_cost_evidence")
         self.assertEqual(result["options"]["ModelRatio"]["unused-model"], 9.0)
+
+    def test_authenticated_catalog_prices_text_model_when_actual_is_unavailable(self):
+        daily_ledger = ledger(
+            healthy=catalog_source(
+                {
+                    "model_name": "catalog-text",
+                    "model_ratio": 2.5,
+                    "completion_ratio": 4.0,
+                    "quota_type": 0,
+                }
+            )
+        )
+
+        result = pricing.build_pricing_plan(
+            daily_ledger,
+            audit(channel(1, "healthy", ["catalog-text"])),
+            DAY,
+            self.current_options(),
+            max_change_ratio=50.0,
+        )
+
+        decision = result["decisions"][0]
+        self.assertEqual(decision["action"], "apply")
+        self.assertEqual(decision["billing_kind"], "text")
+        self.assertEqual(decision["cost_basis"], "authenticated_catalog")
+        self.assertEqual(decision["worst_input_cost_cny_per_m"], 7.0)
+        self.assertEqual(decision["worst_output_cost_cny_per_m"], 28.0)
+        self.assertEqual(decision["input_sell_cny_per_m"], 10.5)
+        self.assertEqual(decision["output_sell_cny_per_m"], 42.0)
+        self.assertEqual(result["options"]["ModelRatio"]["catalog-text"], 35.0)
+        self.assertEqual(result["options"]["CompletionRatio"]["catalog-text"], 4.0)
+
+    def test_authenticated_catalog_prices_fixed_image_per_call(self):
+        daily_ledger = ledger(
+            healthy=catalog_source(
+                {
+                    "model_name": "catalog-image",
+                    "model_price": 0.5,
+                    "quota_type": 1,
+                    "billing_mode": "per_call",
+                }
+            )
+        )
+
+        result = pricing.build_pricing_plan(
+            daily_ledger,
+            audit(channel(1, "healthy", ["catalog-image"])),
+            DAY,
+            self.current_options(),
+            max_change_ratio=50.0,
+        )
+
+        decision = result["decisions"][0]
+        self.assertEqual(decision["action"], "apply")
+        self.assertEqual(decision["billing_kind"], "fixed")
+        self.assertEqual(decision["cost_basis"], "authenticated_catalog")
+        self.assertAlmostEqual(decision["worst_cost_cny_per_call"], 0.7)
+        self.assertAlmostEqual(decision["sell_cny_per_call"], 1.05)
+        self.assertAlmostEqual(result["options"]["ModelPrice"]["catalog-image"], 7.0)
+
+    def test_higher_catalog_cost_protects_against_stale_lower_actual_cost(self):
+        entry = catalog_source(
+            {
+                "model_name": "model",
+                "model_ratio": 100.0,
+                "completion_ratio": 8.0,
+                "quota_type": 0,
+            },
+            model=text_cost(1.0, 4.0),
+        )
+        entry["collection_status"] = "complete"
+        entry["actual_log_complete"] = True
+
+        result = pricing.build_pricing_plan(
+            ledger(healthy=entry),
+            audit(channel(1, "healthy", ["model"])),
+            DAY,
+            self.current_options(),
+            max_change_ratio=50.0,
+        )
+
+        decision = result["decisions"][0]
+        self.assertEqual(decision["cost_basis"], "mixed_actual_catalog")
+        self.assertEqual(decision["worst_input_cost_cny_per_m"], 280.0)
+        self.assertEqual(decision["worst_output_cost_cny_per_m"], 2240.0)
+
+    def test_catalog_overflow_is_rejected_for_new_model_without_current_price(self):
+        result = pricing.build_pricing_plan(
+            ledger(
+                healthy=catalog_source(
+                    {
+                        "model_name": "model",
+                        "model_ratio": 1e308,
+                        "completion_ratio": 8.0,
+                        "quota_type": 0,
+                    }
+                )
+            ),
+            audit(channel(1, "healthy", ["model"])),
+            DAY,
+            self.current_options(),
+            max_change_ratio=50.0,
+        )
+
+        self.assertEqual(result["decisions"][0]["action"], "skip")
+        self.assertEqual(result["decisions"][0]["reason"], "no_trusted_cost_evidence")
+
+    def test_multi_source_uses_actual_per_source_then_highest_normalized_cost(self):
+        result = pricing.build_pricing_plan(
+            ledger(
+                actual=source(model=text_cost(1.0, 4.0)),
+                catalog=catalog_source(
+                    {
+                        "model_name": "model",
+                        "model_ratio": 1.0,
+                        "completion_ratio": 4.0,
+                        "quota_type": 0,
+                    }
+                ),
+            ),
+            audit(
+                channel(1, "actual", ["model"]),
+                channel(2, "catalog", ["model"]),
+            ),
+            DAY,
+            self.current_options(),
+            max_change_ratio=50.0,
+        )
+
+        decision = result["decisions"][0]
+        self.assertEqual(decision["action"], "apply")
+        self.assertEqual(decision["cost_basis"], "mixed_actual_catalog")
+        self.assertEqual(decision["worst_input_source"], "catalog")
+        self.assertAlmostEqual(decision["worst_input_cost_cny_per_m"], 2.8)
+        self.assertAlmostEqual(decision["worst_output_cost_cny_per_m"], 11.2)
+
+    def test_catalog_requires_current_authenticated_account_metadata(self):
+        entry = catalog_source(
+            {
+                "model_name": "model",
+                "model_ratio": 1.0,
+                "completion_ratio": 4.0,
+                "quota_type": 0,
+            }
+        )
+        entry["pricing_metadata"]["account_models"] = []
+
+        result = pricing.build_pricing_plan(
+            ledger(healthy=entry),
+            audit(channel(1, "healthy", ["model"])),
+            DAY,
+            self.current_options(),
+            max_change_ratio=50.0,
+        )
+
+        self.assertEqual(result["decisions"][0]["action"], "skip")
+        self.assertEqual(result["decisions"][0]["reason"], "no_trusted_cost_evidence")
+        self.assertEqual(result["decisions"][0]["missing_cost_sources"], ["healthy"])
+
+        entry["pricing_metadata"]["account_models"] = ["model"]
+        entry["pricing_metadata"]["fetched_at"] = 1
+        result = pricing.build_pricing_plan(
+            ledger(healthy=entry),
+            audit(channel(1, "healthy", ["model"])),
+            DAY,
+            self.current_options(),
+            max_change_ratio=50.0,
+        )
+        self.assertEqual(result["decisions"][0]["reason"], "no_trusted_cost_evidence")
+
+    def test_catalog_billing_kind_conflict_fails_closed(self):
+        result = pricing.build_pricing_plan(
+            ledger(
+                text=catalog_source(
+                    {
+                        "model_name": "model",
+                        "model_ratio": 1.0,
+                        "completion_ratio": 4.0,
+                        "quota_type": 0,
+                    }
+                ),
+                fixed=catalog_source(
+                    {
+                        "model_name": "model",
+                        "model_price": 0.5,
+                        "quota_type": 1,
+                        "billing_mode": "per_call",
+                    }
+                ),
+            ),
+            audit(channel(1, "text", ["model"]), channel(2, "fixed", ["model"])),
+            DAY,
+            self.current_options(),
+            max_change_ratio=50.0,
+        )
+
+        self.assertEqual(result["decisions"][0]["action"], "skip")
+        self.assertEqual(result["decisions"][0]["reason"], "ambiguous_billing_kind")
+
+    def test_per_second_catalog_price_is_never_treated_as_text_or_fixed(self):
+        result = pricing.build_pricing_plan(
+            ledger(
+                healthy=catalog_source(
+                    {
+                        "model_name": "model",
+                        "model_ratio": 1.0,
+                        "completion_ratio": 4.0,
+                        "model_price": 0.5,
+                        "quota_type": 1,
+                        "billing_mode": "per_sec",
+                    }
+                )
+            ),
+            audit(channel(1, "healthy", ["model"])),
+            DAY,
+            self.current_options(),
+            max_change_ratio=50.0,
+        )
+
+        self.assertEqual(result["decisions"][0]["action"], "skip")
+        self.assertEqual(result["decisions"][0]["reason"], "no_trusted_cost_evidence")
+
+    def test_catalog_summary_keeps_redacted_evidence_metadata(self):
+        plan = pricing.build_pricing_plan(
+            ledger(
+                healthy=catalog_source(
+                    {
+                        "model_name": "model",
+                        "model_ratio": 1.0,
+                        "completion_ratio": 4.0,
+                        "quota_type": 0,
+                    }
+                )
+            ),
+            audit(channel(1, "healthy", ["model"])),
+            DAY,
+            self.current_options(),
+            max_change_ratio=50.0,
+        )
+
+        decision = pricing._summary(plan, True)["decisions"][0]
+        self.assertEqual(decision["worst_input_evidence_type"], "authenticated_catalog")
+        self.assertEqual(decision["worst_output_evidence_type"], "authenticated_catalog")
+        self.assertEqual(decision["worst_input_catalog_fetched_at"], 1784766000)
+        self.assertNotIn("pricing_metadata", decision)
 
     def test_recent_actual_cost_is_used_only_for_current_configured_inventory(self):
         previous_day = "2026-07-21"
