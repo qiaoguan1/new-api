@@ -37,10 +37,28 @@
     },
     "jojocode": {
       "models": {
+        "gpt-5.5": {
+          "kind": "text",
+          "input_cost_cny_per_m": 0.8755,
+          "output_cost_cny_per_m": 5.253,
+          "verified_on": "2026-08-11",
+          "valid_through": "2026-08-31"
+        },
         "gpt-5.6-sol": {
           "kind": "text",
           "input_cost_cny_per_m": 0.8755,
           "output_cost_cny_per_m": 5.253,
+          "verified_on": "2026-08-11",
+          "valid_through": "2026-08-31"
+        },
+        "gpt-image-2": {
+          "kind": "fixed",
+          "cost_cny_per_call": 0.103,
+          "resolution_cost_cny_per_call": {
+            "1K": 0.103,
+            "2K": 0.103,
+            "4K": 0.103
+          },
           "verified_on": "2026-08-11",
           "valid_through": "2026-08-31"
         }
