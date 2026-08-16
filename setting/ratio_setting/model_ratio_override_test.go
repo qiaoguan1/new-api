@@ -26,7 +26,7 @@ func TestConfiguredCompletionRatioOverridesFamilyDefault(t *testing.T) {
 	}
 }
 
-func TestCompletionRatioKeepsHardcodedFallbackWhenUnconfigured(t *testing.T) {
+func TestCompletionRatioUsesUnlockedFamilyFallbackWhenUnconfigured(t *testing.T) {
 	original := CompletionRatio2JSONString()
 	t.Cleanup(func() {
 		if err := UpdateCompletionRatioByJSONString(original); err != nil {
@@ -38,11 +38,11 @@ func TestCompletionRatioKeepsHardcodedFallbackWhenUnconfigured(t *testing.T) {
 		t.Fatalf("clear completion ratios: %v", err)
 	}
 
-	if got := GetCompletionRatio("gpt-5.6-sol"); math.Abs(got-8) > 1e-9 {
-		t.Fatalf("hard-coded fallback changed: got %v, want 8", got)
+	if got := GetCompletionRatio("gpt-5.6-sol"); math.Abs(got-6) > 1e-9 {
+		t.Fatalf("family fallback changed: got %v, want 6", got)
 	}
 	info := GetCompletionRatioInfo("gpt-5.6-sol")
-	if !info.Locked {
-		t.Fatalf("fallback ratio must remain reported as locked: %+v", info)
+	if info.Locked {
+		t.Fatalf("gpt-5.5 and later family fallback must remain unlocked: %+v", info)
 	}
 }
