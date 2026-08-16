@@ -37,11 +37,31 @@ The exact empty volume IDs removed were:
 
 Measured filesystem use fell by 1,160,847,360 bytes (about 1.08 GiB).
 
+## User-approved second cleanup
+
+After the first-pass report, the user explicitly approved deletion of the five
+previously retained categories. Every target was revalidated immediately before
+deletion.
+
+| Approved target | Final validation | Result |
+|---|---|---|
+| Five named Go/Bun build-cache volumes | Zero container consumers; exact Docker mountpoints; no PostgreSQL markers | Removed; 4,025,842,552 bytes |
+| Dirty checkout `web/default/node_modules` | Exact resolved path, regular directory, lockfile present, zero process/container references | Removed; 1,590,337,381 bytes |
+| Historical Docker state | Exactly 32 non-running containers; image set excluded every running image ID | Removed 32 containers and 71 non-running image IDs individually |
+| Three historical PostgreSQL volumes | Exact IDs, zero consumers, PostgreSQL markers present | Removed after explicit approval |
+| Previous offline Windows client set | Two exact `.previous` directories, zero process/container references | Removed; 1,646,525,817 bytes |
+
+The eight approved Docker volumes (five build caches and three historical
+PostgreSQL data volumes) contained 4,306,241,053 bytes in total. The second pass
+reduced filesystem use by 13,129,687,040 bytes (about 12.23 GiB). Across both
+passes, measured filesystem use fell by 14,290,534,400 bytes (about 13.31 GiB).
+
 ## Post-cleanup verification
 
-- Root filesystem: 63 GB used, 32 GB available (67%); inode use 24%.
+- Root filesystem after the second pass: 51 GB used, 44 GB available (54%).
 - All 12 running containers remained up with `RestartCount=0`.
-- Ten consecutive verification rounds returned HTTP 200 for the main site,
+- Ten consecutive verification rounds after each cleanup pass returned HTTP
+  200 for the main site,
   API status, video gateway health, and video gateway readiness endpoints.
 - No failed systemd units.
 - `channel-monitor-admin.service`, `channel-monitor-patrol-repair.timer`, and
@@ -51,27 +71,26 @@ Measured filesystem use fell by 1,160,847,360 bytes (about 1.08 GiB).
 - Production `ENABLE_PPROF`, `TLS_INSECURE_SKIP_VERIFY`, and
   `SMTP_INSECURE_SKIP_VERIFY` all evaluated false; port 8005 was not listening.
 - Full Go test suite passed after correcting two pre-existing test defects.
+- Docker now contains 12 containers (all running), 11 images (all referenced by
+  running containers), and two volumes (the active PostgreSQL and Redis data
+  volumes). There are no unused images, stopped containers, or unused volumes.
 
-## Retained because deletion needs a user decision
+## Retained after the approved cleanup
 
 | Candidate | Approximate size | Reason retained |
 |---|---:|---|
-| Five named Go/Bun build-cache volumes | 4.23 GiB | Rebuildable, but deletion slows future production builds |
-| `topaz-test-issue7-npq3zW/web/default/node_modules` | 1.99 GB | Belongs to a dirty user-owned Git checkout |
-| 32 stopped rollback containers and 50 unreferenced tagged images | 5.99 GB Docker estimate | Rollback history; no approved retention count |
-| Three unmounted anonymous PostgreSQL volumes | about 280 MB | Contain real database data; never prune blindly |
-| Previous offline Windows client package set | about 1.65 GB | Client rollback asset |
 | Historical releases and maintenance backups | about 1.0 GB | Recovery evidence without an approved retention policy |
 | Go module download cache | about 1.19 GB | Speeds reproducible builds and requires network to restore |
 | systemd journal and application logs | about 670 MB | Operational and security evidence; no approved retention period |
+| BuildKit build cache | 40.86 GB reported reclaimable by Docker | Separate from the deleted named cache volumes; not included in the user's explicit five-item approval |
 
 ## Follow-up decisions
 
-1. Choose a rollback retention policy (recommended: current plus one verified
-   previous release) before removing old containers, images, releases, or
-   client packages.
-2. Decide whether to remove the five named build-cache volumes and the dirty
-   checkout's `node_modules`; they are rebuildable but affect build speed.
+1. Decide whether to remove the remaining BuildKit cache. It is rebuildable,
+   but Docker currently reports 40.86 GB reclaimable and deleting it will make
+   the next builds substantially slower.
+2. Choose a filesystem release/backup retention policy before removing old
+   release directories or maintenance backups.
 3. Approve a separate rolling deployment before enabling Docker JSON log
    rotation. All running containers currently use `json-file` without
    `max-size` or `max-file` limits.
