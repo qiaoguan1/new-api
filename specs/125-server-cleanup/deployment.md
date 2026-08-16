@@ -69,9 +69,21 @@ containers, volumes, source, backups, or business data. Docker reported
 freed (about 38.01 GiB). Across all cleanup passes, measured filesystem use fell
 by 55,106,715,648 bytes (about 51.32 GiB).
 
+## Final rebuildable-cache cleanup
+
+The Go module download cache was resolved with
+`/usr/local/go/bin/go env GOMODCACHE` to the exact regular directory
+`/root/go/pkg/mod`. It had no process references and no Go compiler process was
+active. `go clean -modcache` removed 1,100,013,524 bytes of cache content; the
+filesystem measurement showed 1,185,849,344 additional bytes freed. The next Go
+build must download modules again.
+
+Across every pass, measured filesystem use fell by 56,292,564,992 bytes (about
+52.42 GiB).
+
 ## Post-cleanup verification
 
-- Root filesystem after the BuildKit pass: 13 GB used, 82 GB available (14%).
+- Root filesystem after the final cache pass: 12 GB used, 83 GB available (12%).
 - All 12 running containers remained up with `RestartCount=0`.
 - Ten consecutive verification rounds after each of the three cleanup passes
   (120 checks total) returned HTTP
@@ -95,7 +107,6 @@ by 55,106,715,648 bytes (about 51.32 GiB).
 | Candidate | Approximate size | Reason retained |
 |---|---:|---|
 | Historical releases and maintenance backups | about 1.0 GB | Recovery evidence without an approved retention policy |
-| Go module download cache | about 1.19 GB | Speeds reproducible builds and requires network to restore |
 | systemd journal and application logs | about 670 MB | Operational and security evidence; no approved retention period |
 
 ## Follow-up decisions
@@ -107,6 +118,9 @@ by 55,106,715,648 bytes (about 51.32 GiB).
    `max-size` or `max-file` limits.
 3. Approve a separate HTTP hardening change for response security headers,
    server timeouts, and safer diagnostic-listener defaults.
+
+The prioritized evidence and remediation details are in
+`security_best_practices_report.md`.
 
 ## Security hardening findings (not changed in this cleanup)
 

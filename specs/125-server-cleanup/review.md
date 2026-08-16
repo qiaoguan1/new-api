@@ -26,13 +26,18 @@
 - `go test ./service -count=1`: pass.
 - `go test ./setting/ratio_setting -count=1`: pass.
 - `go test ./... -count=1`: pass.
-- Ten production endpoint verification rounds: 40 of 40 HTTP checks passed.
+- Forty production endpoint verification rounds across the cleanup stages: 160
+  of 160 HTTP checks passed.
 - Containers after cleanup: 12 running, 0 unexpected restarts.
 - systemd failed units after cleanup: 0.
+- Security report evidence was checked against production runtime values and
+  exact source/configuration lines; no credential value was read into or copied
+  into the report.
 
 ## Findings
 
 No finding remains in the changed code or cleanup actions. Operational and
 security hardening opportunities discovered during the broader audit are
-documented in `deployment.md`; they require separate user-approved changes and
-were not silently mixed into this cleanup.
+documented in `security_best_practices_report.md`; they require separate,
+user-approved compatibility-tested changes and were not silently mixed into
+this cleanup.
