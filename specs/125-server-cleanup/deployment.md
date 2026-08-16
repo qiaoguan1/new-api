@@ -56,11 +56,25 @@ PostgreSQL data volumes) contained 4,306,241,053 bytes in total. The second pass
 reduced filesystem use by 13,129,687,040 bytes (about 12.23 GiB). Across both
 passes, measured filesystem use fell by 14,290,534,400 bytes (about 13.31 GiB).
 
+## User-approved BuildKit cleanup
+
+The user separately approved removal of the remaining BuildKit cache after its
+purpose and rebuild-time tradeoff were explained. Immediately before deletion,
+Docker reported 449 cache records, zero active records, 41.34 GB reclaimable,
+and no running `docker build` or `docker buildx` process.
+
+`docker builder prune -af` removed the BuildKit cache without touching images,
+containers, volumes, source, backups, or business data. Docker reported
+41.34 GB removed and the filesystem measurement showed 40,816,181,248 bytes
+freed (about 38.01 GiB). Across all cleanup passes, measured filesystem use fell
+by 55,106,715,648 bytes (about 51.32 GiB).
+
 ## Post-cleanup verification
 
-- Root filesystem after the second pass: 51 GB used, 44 GB available (54%).
+- Root filesystem after the BuildKit pass: 13 GB used, 82 GB available (14%).
 - All 12 running containers remained up with `RestartCount=0`.
-- Ten consecutive verification rounds after each cleanup pass returned HTTP
+- Ten consecutive verification rounds after each of the three cleanup passes
+  (120 checks total) returned HTTP
   200 for the main site,
   API status, video gateway health, and video gateway readiness endpoints.
 - No failed systemd units.
@@ -73,7 +87,8 @@ passes, measured filesystem use fell by 14,290,534,400 bytes (about 13.31 GiB).
 - Full Go test suite passed after correcting two pre-existing test defects.
 - Docker now contains 12 containers (all running), 11 images (all referenced by
   running containers), and two volumes (the active PostgreSQL and Redis data
-  volumes). There are no unused images, stopped containers, or unused volumes.
+  volumes). BuildKit has zero cache records. There are no unused images,
+  stopped containers, or unused volumes.
 
 ## Retained after the approved cleanup
 
@@ -82,19 +97,15 @@ passes, measured filesystem use fell by 14,290,534,400 bytes (about 13.31 GiB).
 | Historical releases and maintenance backups | about 1.0 GB | Recovery evidence without an approved retention policy |
 | Go module download cache | about 1.19 GB | Speeds reproducible builds and requires network to restore |
 | systemd journal and application logs | about 670 MB | Operational and security evidence; no approved retention period |
-| BuildKit build cache | 40.86 GB reported reclaimable by Docker | Separate from the deleted named cache volumes; not included in the user's explicit five-item approval |
 
 ## Follow-up decisions
 
-1. Decide whether to remove the remaining BuildKit cache. It is rebuildable,
-   but Docker currently reports 40.86 GB reclaimable and deleting it will make
-   the next builds substantially slower.
-2. Choose a filesystem release/backup retention policy before removing old
+1. Choose a filesystem release/backup retention policy before removing old
    release directories or maintenance backups.
-3. Approve a separate rolling deployment before enabling Docker JSON log
+2. Approve a separate rolling deployment before enabling Docker JSON log
    rotation. All running containers currently use `json-file` without
    `max-size` or `max-file` limits.
-4. Approve a separate HTTP hardening change for response security headers,
+3. Approve a separate HTTP hardening change for response security headers,
    server timeouts, and safer diagnostic-listener defaults.
 
 ## Security hardening findings (not changed in this cleanup)
