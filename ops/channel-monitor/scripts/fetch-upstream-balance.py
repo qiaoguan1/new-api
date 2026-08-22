@@ -46,6 +46,19 @@ TIMEOUT = 25
 PAGE_SIZE = 100
 MAX_PAGES = 100
 QUOTA_PER_USD = 500000.0
+MIN_EXCHANGE_RATE = 0.01
+MAX_EXCHANGE_RATE = 100.0
+MIN_BILLED_RATIO = 0.01
+MAX_BILLED_RATIO = 1.000001
+MAX_CLASSIC_REFERENCE_RATIO = 2.0
+USAGE_COST_COMPONENT_FIELDS = (
+    "input_cost",
+    "output_cost",
+    "cache_creation_cost",
+    "cache_read_cost",
+    "image_input_cost",
+    "image_output_cost",
+)
 UA = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/126 Safari/537.36"
 PRICING_MODEL_FIELDS = (
     "model_name",
@@ -91,6 +104,14 @@ def safe_float(value, default=None):
         return number if math.isfinite(number) else default
     except (TypeError, ValueError):
         return default
+
+
+def validated_exchange_rate(value):
+    """Return a bounded positive CNY conversion rate or fail closed."""
+    rate = safe_float(value)
+    if rate is None or rate < MIN_EXCHANGE_RATE or rate > MAX_EXCHANGE_RATE:
+        raise RuntimeError("upstream exchange rate is outside the approved range")
+    return rate
 
 
 def _positive_sample_price(value):
@@ -534,7 +555,7 @@ def collect_toonflow(credential, website, ledger, day):
     ):
         raise RuntimeError("refusing to send Toonflow web token to an unapproved host")
     token = _toonflow_token(credential)
-    rate = safe_float(credential.get("rate"), 1.0) or 1.0
+    rate = validated_exchange_rate(credential.get("rate", 1.0))
     session = requests.Session()
     session.headers.update(
         {
@@ -737,7 +758,12 @@ def classic_model_real_costs(details, rate):
                 result[model] = {
                     "kind": "fixed",
                     "calls": calls,
-                    "cost_cny_per_call": round(amount / calls, 6),
+                    "cost_cny_per_call": round(amount / calls, 12),
+                    "pricing_source": "classic_usage_actual_quota",
+                    "billing_unit": "request",
+                    "billed_units": calls,
+                    "billed_cost_total_cny": round(amount, 8),
+                    "evidence_closed": True,
                 }
             continue
         candidates = []
@@ -759,16 +785,37 @@ def classic_model_real_costs(details, rate):
             "kind": "text",
             "calls": calls,
             "effective_cost_cny_per_m_input": round(amount / prompt * 1_000_000, 6),
+            "billed_cost_total_cny": round(amount, 8),
+            "input_tokens": prompt,
+            "output_tokens": int(detail.get("completion_tokens") or 0),
         }
         if candidates:
             input_price, output_price, source = max(candidates, key=lambda row: (row[0], row[1]))
-            info.update(
-                {
-                    "input_cost_cny_per_m": round(input_price, 6),
-                    "output_cost_cny_per_m": round(output_price, 6),
-                    "pricing_source": source,
-                }
-            )
+            reference_cost = (
+                input_price * prompt
+                + output_price * int(detail.get("completion_tokens") or 0)
+            ) / 1_000_000
+            reference_ratio = amount / reference_cost if reference_cost > 0 else 0.0
+            if (
+                reference_cost > 0
+                and MIN_BILLED_RATIO
+                <= reference_ratio
+                <= MAX_CLASSIC_REFERENCE_RATIO
+            ):
+                billed_input_price = input_price * reference_ratio
+                billed_output_price = output_price * reference_ratio
+                info.update(
+                    {
+                        "input_cost_cny_per_m": round(billed_input_price, 12),
+                        "output_cost_cny_per_m": round(billed_output_price, 12),
+                        "pricing_source": "classic_usage_actual_pricing",
+                        "pricing_formula": source,
+                        "reference_cost_total_cny": round(reference_cost, 8),
+                        "evidence_closed": True,
+                    }
+                )
+            else:
+                info["pricing_source"] = "classic_usage_reference_mismatch"
         else:
             info["input_cost_cny_per_m"] = info["effective_cost_cny_per_m_input"]
             info["pricing_source"] = "effective_fallback"
@@ -824,7 +871,7 @@ def _probe_toonflow_balance(credential, website):
     ):
         raise RuntimeError("refusing to send Toonflow web token to an unapproved host")
     token = _toonflow_token(credential)
-    rate = safe_float(credential.get("rate"), 1.0) or 1.0
+    rate = validated_exchange_rate(credential.get("rate", 1.0))
     session = requests.Session()
     session.headers.update(
         {
@@ -852,7 +899,7 @@ def probe_balance(slug, credential, website):
     username = credential.get("username")
     password = credential.get("password")
     origin = origin_of(credential.get("website_url") or website)
-    rate = safe_float(credential.get("rate"), 1.0) or 1.0
+    rate = validated_exchange_rate(credential.get("rate", 1.0))
     if not username or not password or not origin:
         raise RuntimeError("missing username/password/website_url")
     if urlsplit(origin).scheme != "https":
@@ -923,59 +970,190 @@ def v1_logs(session, origin, day):
 
 
 def aggregate_v1_rows(rows, rate):
-    """Aggregate account deductions; total_cost is the amount charged to this account."""
+    """Aggregate billed usage while retaining undiscounted reference totals.
+
+    The v1 usage contract exposes ``actual_cost`` as the amount deducted from
+    the authenticated account and ``total_cost`` as the undiscounted reference
+    amount. Input and output component costs are reference amounts, so each row
+    is scaled by its billed-to-reference ratio before deriving effective token
+    prices. Missing or malformed billed cost fails closed instead of silently
+    substituting list price.
+    """
+    rate = validated_exchange_rate(rate)
     per_model = {}
     total = 0.0
     for item in rows:
         model = item.get("model") or "unknown"
-        charged = safe_float(item.get("total_cost"), 0.0) or 0.0
+        charged = safe_float(item.get("actual_cost"))
+        reference = safe_float(item.get("total_cost"))
+        if charged is None or charged < 0:
+            raise RuntimeError("v1 usage actual_cost is missing or invalid")
+        if reference is None or reference < 0:
+            raise RuntimeError("v1 usage total_cost is missing or invalid")
+        if reference > 0:
+            billed_ratio = charged / reference
+        elif charged == 0:
+            billed_ratio = 0.0
+        else:
+            raise RuntimeError("v1 usage actual_cost has no reference cost")
+        if charged > 0 and not MIN_BILLED_RATIO <= billed_ratio <= MAX_BILLED_RATIO:
+            raise RuntimeError("v1 usage billed-to-reference ratio is outside the approved range")
+
+        components = {}
+        for field in USAGE_COST_COMPONENT_FIELDS:
+            component = safe_float(item.get(field), 0.0)
+            if component is None or component < 0:
+                raise RuntimeError(f"v1 usage {field} is invalid")
+            components[field] = component
+        component_total = sum(components.values())
+        if not math.isclose(component_total, reference, rel_tol=0.000001, abs_tol=0.00000001):
+            raise RuntimeError("v1 usage cost components do not reconcile to total_cost")
+
+        billing_mode = str(item.get("billing_mode") or "").strip().lower()
+        if billing_mode == "token":
+            row_kind = "text"
+            billing_unit = "token"
+        elif billing_mode == "image":
+            row_kind = "fixed"
+            billing_unit = "image"
+        elif billing_mode in {"per_request", "request"}:
+            row_kind = "fixed"
+            billing_unit = "request"
+        else:
+            raise RuntimeError("v1 usage billing_mode is missing or unsupported")
+
+        input_tokens = int(item.get("input_tokens") or 0)
+        output_tokens = int(item.get("output_tokens") or 0)
+        image_count = int(item.get("image_count") or 0)
+        if min(input_tokens, output_tokens, image_count) < 0:
+            raise RuntimeError("v1 usage token or image count is invalid")
+        if row_kind == "text" and image_count:
+            raise RuntimeError("v1 token billing conflicts with image_count")
+        if billing_unit == "image" and image_count < 1:
+            raise RuntimeError("v1 image billing requires a positive image_count")
         total += charged
         detail = per_model.setdefault(
             model,
             {
                 "calls": 0,
-                "total_cost": 0.0,
+                "billed_cost": 0.0,
+                "reference_cost": 0.0,
                 "input_cost": 0.0,
                 "output_cost": 0.0,
+                "cache_cost": 0.0,
+                "image_component_cost": 0.0,
                 "input_tokens": 0,
                 "output_tokens": 0,
                 "image_count": 0,
+                "kind": row_kind,
+                "billing_unit": billing_unit,
+                "pricing_calls": 0,
+                "pricing_billed_cost": 0.0,
+                "pricing_reference_cost": 0.0,
+                "pricing_input_cost": 0.0,
+                "pricing_output_cost": 0.0,
+                "pricing_input_tokens": 0,
+                "pricing_output_tokens": 0,
             },
         )
+        if detail["kind"] != row_kind or detail["billing_unit"] != billing_unit:
+            raise RuntimeError("v1 usage mixes billing units for one model")
         detail["calls"] += 1
-        detail["total_cost"] += charged
-        detail["input_cost"] += safe_float(item.get("input_cost"), 0.0) or 0.0
-        detail["output_cost"] += safe_float(item.get("output_cost"), 0.0) or 0.0
-        detail["input_tokens"] += int(item.get("input_tokens") or 0)
-        detail["output_tokens"] += int(item.get("output_tokens") or 0)
-        detail["image_count"] += int(item.get("image_count") or 0)
+        detail["billed_cost"] += charged
+        detail["reference_cost"] += reference
+        detail["input_cost"] += components["input_cost"] * billed_ratio
+        detail["output_cost"] += components["output_cost"] * billed_ratio
+        detail["cache_cost"] += (
+            components["cache_creation_cost"] + components["cache_read_cost"]
+        ) * billed_ratio
+        detail["image_component_cost"] += (
+            components["image_input_cost"] + components["image_output_cost"]
+        ) * billed_ratio
+        detail["input_tokens"] += input_tokens
+        detail["output_tokens"] += output_tokens
+        detail["image_count"] += image_count
+        auxiliary_reference_cost = (
+            components["cache_creation_cost"]
+            + components["cache_read_cost"]
+            + components["image_input_cost"]
+            + components["image_output_cost"]
+        )
+        if (
+            row_kind == "text"
+            and charged > 0
+            and reference > 0
+            and input_tokens + output_tokens > 0
+            and math.isclose(
+                auxiliary_reference_cost, 0.0, rel_tol=0.0, abs_tol=0.00000001
+            )
+        ):
+            detail["pricing_calls"] += 1
+            detail["pricing_billed_cost"] += charged
+            detail["pricing_reference_cost"] += reference
+            detail["pricing_input_cost"] += components["input_cost"] * billed_ratio
+            detail["pricing_output_cost"] += components["output_cost"] * billed_ratio
+            detail["pricing_input_tokens"] += input_tokens
+            detail["pricing_output_tokens"] += output_tokens
 
     model_totals = {}
     model_real = {}
     for model, detail in per_model.items():
-        model_totals[model] = round(detail["total_cost"], 8)
-        input_tokens = detail["input_tokens"]
-        output_tokens = detail["output_tokens"]
+        model_totals[model] = round(detail["billed_cost"], 8)
+        input_tokens = detail["pricing_input_tokens"]
+        output_tokens = detail["pricing_output_tokens"]
         calls = detail["calls"]
-        if input_tokens or output_tokens:
-            info = {"kind": "text", "calls": calls, "pricing_source": "v1_usage_total_cost"}
+        pricing_calls = detail["pricing_calls"]
+        if detail["kind"] == "text" and pricing_calls and (input_tokens or output_tokens):
+            info = {
+                "kind": "text",
+                "calls": pricing_calls,
+                "pricing_source": "v1_usage_actual_cost",
+                "billed_cost_total_cny": round(detail["pricing_billed_cost"] * rate, 8),
+                "reference_cost_total_cny": round(
+                    detail["pricing_reference_cost"] * rate, 8
+                ),
+                "billed_input_cost_total_cny": round(
+                    detail["pricing_input_cost"] * rate, 8
+                ),
+                "billed_output_cost_total_cny": round(
+                    detail["pricing_output_cost"] * rate, 8
+                ),
+                "billed_cache_cost_total_cny": 0.0,
+                "billed_image_component_cost_total_cny": 0.0,
+                "input_tokens": input_tokens,
+                "output_tokens": output_tokens,
+                "evidence_closed": True,
+            }
             if input_tokens:
                 info["input_cost_cny_per_m"] = round(
-                    detail["input_cost"] / input_tokens * 1_000_000 * rate, 6
+                    detail["pricing_input_cost"] / input_tokens * 1_000_000 * rate, 12
                 )
             if output_tokens:
                 info["output_cost_cny_per_m"] = round(
-                    detail["output_cost"] / output_tokens * 1_000_000 * rate, 6
+                    detail["pricing_output_cost"] / output_tokens * 1_000_000 * rate, 12
                 )
             model_real[model] = info
-        elif calls:
-            divisor = detail["image_count"] or calls
-            model_real[model] = {
+        elif detail["kind"] == "fixed" and calls:
+            divisor = detail["image_count"] if detail["billing_unit"] == "image" else calls
+            fixed_info = {
                 "kind": "fixed",
                 "calls": calls,
-                "cost_cny_per_call": round(detail["total_cost"] / divisor * rate, 6),
-                "pricing_source": "v1_usage_total_cost",
+                "pricing_source": "v1_usage_actual_cost",
+                "billed_cost_total_cny": round(detail["billed_cost"] * rate, 8),
+                "reference_cost_total_cny": round(detail["reference_cost"] * rate, 8),
+                "billing_unit": detail["billing_unit"],
+                "billed_units": divisor,
+                "evidence_closed": True,
             }
+            unit_price_key = (
+                "cost_cny_per_image"
+                if detail["billing_unit"] == "image"
+                else "cost_cny_per_call"
+            )
+            fixed_info[unit_price_key] = round(
+                detail["billed_cost"] / divisor * rate, 12
+            )
+            model_real[model] = fixed_info
     return round(total, 8), model_totals, model_real
 
 
@@ -1037,7 +1215,7 @@ def collect_one(slug, credential, website, ledger, day):
     username = credential.get("username")
     password = credential.get("password")
     origin = origin_of(credential.get("website_url") or website)
-    rate = safe_float(credential.get("rate"), 1.0) or 1.0
+    rate = validated_exchange_rate(credential.get("rate", 1.0))
     if not username or not password or not origin:
         raise RuntimeError("missing username/password/website_url")
     if urlsplit(origin).scheme != "https":

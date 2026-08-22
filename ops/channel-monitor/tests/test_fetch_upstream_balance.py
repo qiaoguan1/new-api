@@ -241,13 +241,14 @@ class UsageV1AggregationTests(unittest.TestCase):
         self.assertEqual(entry["pricing_metadata"]["status"], "unavailable")
         self.assertNotIn("super-secret", entry["pricing_metadata"]["error"])
 
-    def test_uses_account_total_cost_not_internal_actual_cost(self):
+    def test_usage_v1_uses_actual_cost_and_keeps_total_cost_as_reference(self):
         total, per_model, real = collector.aggregate_v1_rows(
             [
                 {
                     "model": "gpt-test",
                     "total_cost": 0.75,
-                    "actual_cost": 0.10,
+                    "actual_cost": 0.15,
+                    "billing_mode": "token",
                     "input_cost": 0.50,
                     "output_cost": 0.25,
                     "input_tokens": 100_000,
@@ -257,10 +258,104 @@ class UsageV1AggregationTests(unittest.TestCase):
             rate=1.0,
         )
 
-        self.assertEqual(total, 0.75)
-        self.assertEqual(per_model["gpt-test"], 0.75)
-        self.assertEqual(real["gpt-test"]["input_cost_cny_per_m"], 5.0)
-        self.assertEqual(real["gpt-test"]["output_cost_cny_per_m"], 25.0)
+        self.assertEqual(total, 0.15)
+        self.assertEqual(per_model["gpt-test"], 0.15)
+        self.assertEqual(real["gpt-test"]["input_cost_cny_per_m"], 1.0)
+        self.assertEqual(real["gpt-test"]["output_cost_cny_per_m"], 5.0)
+        self.assertEqual(real["gpt-test"]["billed_cost_total_cny"], 0.15)
+        self.assertEqual(real["gpt-test"]["reference_cost_total_cny"], 0.75)
+        self.assertEqual(real["gpt-test"]["pricing_source"], "v1_usage_actual_cost")
+
+    def test_usage_v1_fixed_price_uses_actual_cost_per_image(self):
+        total, per_model, real = collector.aggregate_v1_rows(
+            [
+                {
+                    "model": "gpt-image-test",
+                    "total_cost": 0.50,
+                    "actual_cost": 0.10,
+                    "billing_mode": "image",
+                    "image_output_cost": 0.50,
+                    "input_tokens": 5,
+                    "image_count": 2,
+                }
+            ],
+            rate=7.0,
+        )
+
+        self.assertEqual(total, 0.10)
+        self.assertEqual(per_model["gpt-image-test"], 0.10)
+        self.assertEqual(real["gpt-image-test"]["cost_cny_per_image"], 0.35)
+        self.assertNotIn("cost_cny_per_call", real["gpt-image-test"])
+        self.assertEqual(real["gpt-image-test"]["billed_cost_total_cny"], 0.70)
+        self.assertEqual(real["gpt-image-test"]["reference_cost_total_cny"], 3.50)
+
+    def test_usage_v1_missing_actual_cost_fails_closed(self):
+        with self.assertRaisesRegex(RuntimeError, "actual_cost"):
+            collector.aggregate_v1_rows(
+                [{"model": "gpt-test", "total_cost": 0.75}],
+                rate=1.0,
+            )
+
+    def test_usage_v1_reconciles_cache_components_before_scaling(self):
+        total, _, real = collector.aggregate_v1_rows(
+            [
+                {
+                    "model": "gpt-test",
+                    "billing_mode": "token",
+                    "total_cost": 1.0,
+                    "actual_cost": 0.2,
+                    "input_cost": 0.4,
+                    "output_cost": 0.1,
+                    "cache_read_cost": 0.5,
+                    "input_tokens": 100_000,
+                    "output_tokens": 10_000,
+                }
+            ],
+            rate=1.0,
+        )
+
+        self.assertEqual(total, 0.2)
+        self.assertNotIn("gpt-test", real)
+
+    def test_usage_v1_component_mismatch_fails_closed(self):
+        with self.assertRaisesRegex(RuntimeError, "components"):
+            collector.aggregate_v1_rows(
+                [
+                    {
+                        "model": "gpt-test",
+                        "billing_mode": "token",
+                        "total_cost": 1.0,
+                        "actual_cost": 0.2,
+                        "input_cost": 0.01,
+                        "output_cost": 0.01,
+                        "input_tokens": 100_000,
+                        "output_tokens": 10_000,
+                    }
+                ],
+                rate=1.0,
+            )
+
+    def test_usage_v1_ambiguous_or_extreme_units_fail_closed(self):
+        base = {
+            "model": "gpt-test",
+            "billing_mode": "token",
+            "total_cost": 1.0,
+            "actual_cost": 0.001,
+            "input_cost": 1.0,
+            "input_tokens": 100_000,
+        }
+        with self.assertRaisesRegex(RuntimeError, "ratio"):
+            collector.aggregate_v1_rows([base], rate=1.0)
+        with self.assertRaisesRegex(RuntimeError, "billing_mode"):
+            collector.aggregate_v1_rows(
+                [{**base, "actual_cost": 0.2, "billing_mode": ""}],
+                rate=1.0,
+            )
+        with self.assertRaisesRegex(RuntimeError, "exchange rate"):
+            collector.aggregate_v1_rows(
+                [{**base, "actual_cost": 0.2}],
+                rate=0.0001,
+            )
 
     def test_successful_empty_query_is_complete_zero(self):
         entry = collector.complete_entry(
@@ -580,6 +675,58 @@ class UsageV1AggregationTests(unittest.TestCase):
         self.assertEqual(cost["successful_calls"], 2)
         self.assertEqual(cost["net_cost_cny"], 5.0)
         self.assertEqual(cost["cost_cny_per_call"], 2.5)
+
+    def test_classic_text_actual_pricing_is_bound_to_billed_quota(self):
+        details = {
+            "gpt-test": {
+                "calls": 1,
+                "sum_quota": 250_000,
+                "prompt_tokens": 1_000_000,
+                "completion_tokens": 0,
+                "pricing_samples": [
+                    {
+                        "billing_mode": "ratio",
+                        "model_ratio": 2.5,
+                        "completion_ratio": 6.0,
+                        "group_ratio": 0.1,
+                    }
+                ],
+            }
+        }
+
+        cost = collector.classic_model_real_costs(details, 1.0)["gpt-test"]
+
+        self.assertEqual(cost["input_cost_cny_per_m"], 0.5)
+        self.assertEqual(cost["output_cost_cny_per_m"], 3.0)
+        self.assertEqual(cost["pricing_source"], "classic_usage_actual_pricing")
+        self.assertEqual(cost["billed_cost_total_cny"], 0.5)
+        self.assertEqual(cost["reference_cost_total_cny"], 0.5)
+        self.assertTrue(cost["evidence_closed"])
+
+    def test_classic_text_scales_reference_prices_to_actual_deduction(self):
+        details = {
+            "gpt-test": {
+                "calls": 1,
+                "sum_quota": 500_000,
+                "prompt_tokens": 1_000_000,
+                "completion_tokens": 0,
+                "pricing_samples": [
+                    {
+                        "billing_mode": "ratio",
+                        "model_ratio": 2.5,
+                        "completion_ratio": 6.0,
+                        "group_ratio": 0.1,
+                    }
+                ],
+            }
+        }
+
+        cost = collector.classic_model_real_costs(details, 1.0)["gpt-test"]
+
+        self.assertEqual(cost["input_cost_cny_per_m"], 1.0)
+        self.assertEqual(cost["output_cost_cny_per_m"], 6.0)
+        self.assertEqual(cost["billed_cost_total_cny"], 1.0)
+        self.assertEqual(cost["reference_cost_total_cny"], 0.5)
 
     def test_request_ledgers_are_grouped_by_exact_task_id(self):
         details = {

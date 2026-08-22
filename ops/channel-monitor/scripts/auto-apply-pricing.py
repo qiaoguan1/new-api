@@ -606,24 +606,6 @@ def _manual_catalog_cost(manual_evidence, slug, model, day):
     return None
 
 
-def _actual_preferred_models(manual_evidence):
-    """Return the explicitly scoped models allowed to use actual-first evidence."""
-    if (
-        not isinstance(manual_evidence, dict)
-        or isinstance(manual_evidence.get("version"), bool)
-        or manual_evidence.get("version") != 1
-    ):
-        return set()
-    models = manual_evidence.get("actual_preferred_models")
-    if not isinstance(models, list):
-        return set()
-    return {
-        model.strip()
-        for model in models
-        if isinstance(model, str) and model.strip()
-    }
-
-
 def _collect_model_evidence(
     ledger,
     day_rows,
@@ -631,11 +613,10 @@ def _collect_model_evidence(
     model,
     eligible_sources,
     manual_evidence=None,
-    prefer_actual=False,
 ):
     """Collect one best evidence row per source and return cross-source maxima.
 
-    A recent task-backed actual cost is authoritative for that source. The
+    A recent request-backed actual cost is authoritative for that source. The
     authenticated catalog is a fallback only when no recent actual sample is
     available, so a displayed list price cannot replace what the account was
     demonstrably charged.
@@ -651,14 +632,9 @@ def _collect_model_evidence(
         entry = day_rows.get(slug) or {}
         actual = _source_actual_cost(ledger, day, model, slug)
         catalog = _catalog_cost(entry, model, day)
-        if prefer_actual:
-            evidence_rows = [actual] if actual is not None else []
-            if not evidence_rows and catalog is not None:
-                evidence_rows.append(catalog)
-        else:
-            evidence_rows = [
-                evidence for evidence in (actual, catalog) if evidence is not None
-            ]
+        evidence_rows = [actual] if actual is not None else []
+        if not evidence_rows and catalog is not None:
+            evidence_rows.append(catalog)
         if not evidence_rows:
             manual_catalog = _manual_catalog_cost(
                 manual_evidence, slug, model, day
@@ -761,8 +737,6 @@ def build_pricing_plan(
     _validate_group_ratios(current_options["GroupRatio"])
     policy = build_audit_policy(daily_audit, day)
     day_rows = _ledger_day(ledger, day)
-    actual_preferred_models = _actual_preferred_models(manual_evidence)
-
     # Current healthy channel configuration defines inventory. Old billing
     # history may price configured models but never resurrect retired models.
     discovered = set(policy["discovered_models"])
@@ -817,7 +791,6 @@ def build_pricing_plan(
             model,
             eligible_sources,
             manual_evidence,
-            model in actual_preferred_models,
         )
         if costs["missing_sources"]:
             decision["reason"] = (
