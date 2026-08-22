@@ -30,6 +30,11 @@ sys.path.insert(0, str(MODULE_ROOT))
 
 from monitor_time import beijing_day_for_epoch, beijing_now, resolve_beijing_business_day
 from recent_actual_cost import collect_recent_model_costs
+from channel_audit_policy import (
+    STABLE_MAPPED_MODELS,
+    parse_model_mapping,
+    resolve_model_mapping,
+)
 from video_catalog_policy import normalize_model_name, validate_policy
 
 
@@ -222,6 +227,35 @@ def _model_names(channel):
     }
 
 
+def _channel_price_keys(channel, models):
+    """Return stable downstream model to audited upstream price-key mapping."""
+    audited_models = channel.get("models")
+    mapping = parse_model_mapping(channel.get("model_mapping"))
+    result = {}
+    for model in models:
+        if model not in STABLE_MAPPED_MODELS:
+            result[model] = model
+            continue
+        try:
+            mapped_model = resolve_model_mapping(model, mapping)
+        except ValueError as exc:
+            raise PricingError(f"invalid model mapping for {model}: {exc}") from exc
+        detail = audited_models.get(model) if isinstance(audited_models, dict) else None
+        upstream_model = detail.get("upstream_model") if isinstance(detail, dict) else None
+        audited_upstream_model = (
+            upstream_model.strip()
+            if isinstance(upstream_model, str) and upstream_model.strip()
+            else model
+        )
+        if audited_upstream_model != mapped_model:
+            raise PricingError(
+                f"audit model mapping mismatch for {model}: "
+                f"request={mapped_model}, audit={audited_upstream_model}"
+            )
+        result[model] = mapped_model
+    return result
+
+
 def build_audit_policy(daily_audit, day):
     """Return discovered models and model-specific eligible upstream sources."""
     if not isinstance(daily_audit, dict) or daily_audit.get("date") != day:
@@ -254,15 +288,20 @@ def build_audit_policy(daily_audit, day):
     healthy_sources = set()
     model_sources = {}
     model_expected_sources = {}
+    model_price_keys = {}
     for channel in daily_audit.get("channels") or []:
         if not isinstance(channel, dict) or channel.get("status") != 1:
             continue
         models = _model_names(channel)
+        price_keys = _channel_price_keys(channel, models)
         discovered_models.update(models)
         slug = channel.get("upstream_slug")
         if isinstance(slug, str) and slug:
             for model in models:
                 model_expected_sources.setdefault(model, set()).add(slug)
+                model_price_keys.setdefault(model, {}).setdefault(slug, set()).add(
+                    price_keys[model]
+                )
         if (
             not isinstance(slug, str)
             or not slug
@@ -280,6 +319,7 @@ def build_audit_policy(daily_audit, day):
         "healthy_sources": healthy_sources,
         "model_sources": model_sources,
         "model_expected_sources": model_expected_sources,
+        "model_price_keys": model_price_keys,
         "blocked_models": blocked_models,
         "blocked_channels": blocked_channels,
         "underpricing_alerts": underpricing_alerts,
@@ -612,6 +652,7 @@ def _collect_model_evidence(
     day,
     model,
     eligible_sources,
+    source_price_keys,
     manual_evidence=None,
 ):
     """Collect one best evidence row per source and return cross-source maxima.
@@ -630,14 +671,15 @@ def _collect_model_evidence(
     evidence_types = set()
     for slug in sorted(eligible_sources):
         entry = day_rows.get(slug) or {}
-        actual = _source_actual_cost(ledger, day, model, slug)
-        catalog = _catalog_cost(entry, model, day)
+        price_model = source_price_keys.get(slug, model)
+        actual = _source_actual_cost(ledger, day, price_model, slug)
+        catalog = _catalog_cost(entry, price_model, day)
         evidence_rows = [actual] if actual is not None else []
         if not evidence_rows and catalog is not None:
             evidence_rows.append(catalog)
         if not evidence_rows:
             manual_catalog = _manual_catalog_cost(
-                manual_evidence, slug, model, day
+                manual_evidence, slug, price_model, day
             )
             if manual_catalog is not None:
                 evidence_rows.append(manual_catalog)
@@ -672,6 +714,7 @@ def _collect_model_evidence(
         "missing_sources": missing,
         "incomplete_sources": incomplete,
         "evidence_types": evidence_types,
+        "source_price_keys": dict(sorted(source_price_keys.items())),
     }
 
 
@@ -784,12 +827,29 @@ def build_pricing_plan(
             decisions.append(decision)
             continue
 
+        price_key_sets = policy["model_price_keys"].get(model, {})
+        ambiguous_price_key_sources = sorted(
+            slug
+            for slug in eligible_sources
+            if len(price_key_sets.get(slug, set())) != 1
+        )
+        if ambiguous_price_key_sources:
+            decision["reason"] = "ambiguous_price_key"
+            decision["ambiguous_price_key_sources"] = ambiguous_price_key_sources
+            decisions.append(decision)
+            continue
+        source_price_keys = {
+            slug: next(iter(price_key_sets[slug]))
+            for slug in eligible_sources
+        }
+
         costs = _collect_model_evidence(
             ledger,
             day_rows,
             day,
             model,
             eligible_sources,
+            source_price_keys,
             manual_evidence,
         )
         if costs["missing_sources"]:
@@ -865,6 +925,7 @@ def build_pricing_plan(
                         "worst_output_evidence_type": output_evidence_type,
                         "cost_basis": cost_basis,
                         "actual_cost_lookback_days": ACTUAL_COST_LOOKBACK_DAYS,
+                        "source_price_keys": costs["source_price_keys"],
                         "new_model_ratio": round(new_ratio, 12),
                         "new_completion_ratio": round(new_completion, 12),
                         "input_sell_cny_per_m": round(input_sell, 12),
@@ -906,6 +967,7 @@ def build_pricing_plan(
                         "worst_cost_evidence_type": evidence_type,
                         "cost_basis": cost_basis,
                         "actual_cost_lookback_days": ACTUAL_COST_LOOKBACK_DAYS,
+                        "source_price_keys": costs["source_price_keys"],
                         "new_model_price": round(new_price, 12),
                         "sell_cny_per_call": round(sell, 12),
                     }
@@ -970,6 +1032,7 @@ def _summary(plan, dry_run):
                     "underpricing_alert_types",
                     "incomplete_sources",
                     "missing_cost_sources",
+                    "ambiguous_price_key_sources",
                     "old_model_ratio",
                     "old_completion_ratio",
                     "old_model_price",
@@ -990,6 +1053,7 @@ def _summary(plan, dry_run):
                     "worst_cost_catalog_fetched_at",
                     "cost_basis",
                     "actual_cost_lookback_days",
+                    "source_price_keys",
                     "new_model_ratio",
                     "new_completion_ratio",
                     "new_model_price",

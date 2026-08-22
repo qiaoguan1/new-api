@@ -339,6 +339,143 @@ class PricingPlanTests(unittest.TestCase):
         self.assertAlmostEqual(decision["sell_cny_per_call"], 1.05)
         self.assertAlmostEqual(result["options"]["ModelPrice"]["catalog-image"], 7.0)
 
+    def test_stable_model_uses_mapped_upstream_catalog_price_key(self):
+        mapped = channel(38, "codeplan", ["gpt-image-2"])
+        mapped["models"] = {
+            "gpt-image-2": {
+                "available": True,
+                "upstream_model": "gpt-image-2-auto",
+            }
+        }
+        mapped["model_mapping"] = {"gpt-image-2": "gpt-image-2-auto"}
+        entry = catalog_source(
+            {
+                "model_name": "gpt-image-2-auto",
+                "model_price": 0.1,
+                "model_ratio": 0,
+                "completion_ratio": 0,
+                "quota_type": 1,
+            },
+            group_ratio=1.0,
+            rate=1.0,
+        )
+
+        result = pricing.build_pricing_plan(
+            ledger(codeplan=entry),
+            audit(mapped),
+            DAY,
+            self.current_options(),
+            max_change_ratio=50.0,
+        )
+
+        decision = result["decisions"][0]
+        self.assertEqual(decision["model"], "gpt-image-2")
+        self.assertEqual(decision["action"], "apply")
+        self.assertEqual(decision["worst_source"], "codeplan")
+        self.assertEqual(decision["source_price_keys"], {"codeplan": "gpt-image-2-auto"})
+        self.assertAlmostEqual(decision["sell_cny_per_call"], 0.15)
+
+    def test_conflicting_price_keys_for_same_source_fail_closed(self):
+        first = channel(38, "codeplan", ["gpt-image-2"])
+        first["models"] = {
+            "gpt-image-2": {"available": True, "upstream_model": "gpt-image-2-auto"}
+        }
+        first["model_mapping"] = {"gpt-image-2": "gpt-image-2-auto"}
+        second = channel(138, "codeplan", ["gpt-image-2"])
+        second["models"] = {
+            "gpt-image-2": {"available": True, "upstream_model": "gpt-image-2-adobe"}
+        }
+        second["model_mapping"] = {"gpt-image-2": "gpt-image-2-adobe"}
+        entry = catalog_source(
+            {
+                "model_name": "gpt-image-2-auto",
+                "model_price": 0.1,
+                "model_ratio": 0,
+                "completion_ratio": 0,
+                "quota_type": 1,
+            },
+            group_ratio=1.0,
+            rate=1.0,
+        )
+
+        result = pricing.build_pricing_plan(
+            ledger(codeplan=entry),
+            audit(first, second),
+            DAY,
+            self.current_options(),
+            max_change_ratio=50.0,
+        )
+
+        decision = result["decisions"][0]
+        self.assertEqual(decision["action"], "skip")
+        self.assertEqual(decision["reason"], "ambiguous_price_key")
+        self.assertEqual(decision["ambiguous_price_key_sources"], ["codeplan"])
+
+    def test_request_and_audit_mapping_mismatch_fails_closed(self):
+        mapped = channel(38, "codeplan", ["gpt-image-2"])
+        mapped["model_mapping"] = {"gpt-image-2": "gpt-image-2-auto"}
+        mapped["models"] = {
+            "gpt-image-2": {"available": True, "upstream_model": "gpt-image-2-adobe"}
+        }
+
+        with self.assertRaisesRegex(pricing.PricingError, "mapping mismatch"):
+            pricing.build_pricing_plan(
+                ledger(codeplan=source()),
+                audit(mapped),
+                DAY,
+                self.current_options(),
+                max_change_ratio=50.0,
+            )
+
+    def test_mapped_model_uses_only_mapped_manual_price_key(self):
+        mapped = channel(38, "codeplan", ["gpt-image-2"])
+        mapped["model_mapping"] = {"gpt-image-2": "gpt-image-2-auto"}
+        mapped["models"] = {
+            "gpt-image-2": {"available": True, "upstream_model": "gpt-image-2-auto"}
+        }
+        manual = {
+            "version": 1,
+            "sources": {
+                "codeplan": {
+                    "models": {
+                        "gpt-image-2": {
+                            "kind": "fixed",
+                            "cost_cny_per_call": 0.01,
+                            "verified_on": DAY,
+                            "valid_through": DAY,
+                        },
+                        "gpt-image-2-auto": {
+                            "kind": "fixed",
+                            "cost_cny_per_call": 0.1,
+                            "verified_on": DAY,
+                            "valid_through": DAY,
+                        },
+                    }
+                }
+            },
+        }
+
+        result = pricing.build_pricing_plan(
+            ledger(codeplan=source()),
+            audit(mapped),
+            DAY,
+            self.current_options(),
+            max_change_ratio=50.0,
+            manual_evidence=manual,
+        )
+
+        self.assertEqual(result["decisions"][0]["worst_cost_cny_per_call"], 0.1)
+
+    def test_topaz_upstream_detail_does_not_change_price_key(self):
+        topaz = channel(43, "topaz", ["aaa-9"])
+        topaz["models"] = {
+            "aaa-9": {"available": True, "upstream_model": "different-upstream-name"}
+        }
+
+        policy = pricing.build_audit_policy(audit(topaz), DAY)
+
+        self.assertEqual(policy["model_price_keys"]["aaa-9"]["topaz"], {"aaa-9"})
+
     def test_recent_actual_cost_precedes_higher_catalog_for_same_source(self):
         entry = catalog_source(
             {
