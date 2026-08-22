@@ -5,6 +5,6 @@
 - [x] T003 Add failing mapping-aware pricing and ambiguity tests.
 - [x] T004 Implement stable-to-upstream price-key resolution.
 - [x] T005 Review and merge source changes.
-- [ ] T006 Back up and apply production text/image mappings and abilities.
-- [ ] T007 Recollect, audit, dry-run/apply prices, and verify idempotence.
-- [ ] T008 Complete ten no-charge health rounds and deployment record.
+- [x] T006 Back up and apply production text/image mappings and abilities.
+- [x] T007 Recollect, audit, dry-run/apply prices, and verify idempotence.
+- [x] T008 Complete ten no-charge health rounds and deployment record.
