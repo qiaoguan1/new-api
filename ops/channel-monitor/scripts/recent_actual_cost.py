@@ -9,6 +9,17 @@ from typing import Any, Iterable
 
 
 DEFAULT_LOOKBACK_DAYS = 7
+APPROVED_TEXT_SOURCES = {
+    "v1_usage_actual_cost",
+    "classic_usage_actual_pricing",
+}
+APPROVED_FIXED_SOURCES = {
+    "v1_usage_actual_cost",
+    "classic_usage_actual_quota",
+}
+MIN_EVIDENCE_RATIO = 0.01
+MAX_CLASSIC_EVIDENCE_RATIO = 2.0
+MAX_V1_EVIDENCE_RATIO = 1.000001
 
 
 def _positive_number(value: Any) -> bool:
@@ -28,21 +39,108 @@ def _collection_complete(entry: Any) -> bool:
     )
 
 
+def _positive_integer(value: Any) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and value > 0
+
+
+def _close(first: float, second: float) -> bool:
+    return math.isclose(first, second, rel_tol=0.000001, abs_tol=0.000001)
+
+
 def _valid_cost(info: Any) -> tuple[str, float, float | None] | None:
     if not isinstance(info, dict):
         return None
+    source = info.get("pricing_source")
+    calls = info.get("calls")
+    billed_total = info.get("billed_cost_total_cny")
+    reference_total = info.get("reference_cost_total_cny")
+    if (
+        info.get("evidence_closed") is not True
+        or not _positive_integer(calls)
+        or not _positive_number(billed_total)
+    ):
+        return None
     kind = info.get("kind")
     if kind == "text":
+        if source not in APPROVED_TEXT_SOURCES or not _positive_number(reference_total):
+            return None
         input_cost = info.get("input_cost_cny_per_m")
         output_cost = info.get("output_cost_cny_per_m")
-        if _positive_number(input_cost) and _positive_number(output_cost):
-            return "text", float(input_cost), float(output_cost)
-        return None
-    if kind in {"fixed", "image", "video"}:
-        for key in ("cost_cny_per_call", "cost_cny_per_image"):
-            value = info.get(key)
-            if _positive_number(value):
-                return "fixed", float(value), None
+        input_tokens = info.get("input_tokens")
+        output_tokens = info.get("output_tokens")
+        if not (
+            _positive_number(input_cost)
+            and _positive_number(output_cost)
+            and isinstance(input_tokens, int)
+            and not isinstance(input_tokens, bool)
+            and input_tokens >= 0
+            and isinstance(output_tokens, int)
+            and not isinstance(output_tokens, bool)
+            and output_tokens >= 0
+            and input_tokens + output_tokens > 0
+        ):
+            return None
+        if source == "v1_usage_actual_cost":
+            billed_ratio = float(billed_total) / float(reference_total)
+            if not MIN_EVIDENCE_RATIO <= billed_ratio <= MAX_V1_EVIDENCE_RATIO:
+                return None
+            component_keys = (
+                "billed_input_cost_total_cny",
+                "billed_output_cost_total_cny",
+                "billed_cache_cost_total_cny",
+                "billed_image_component_cost_total_cny",
+            )
+            components = [info.get(key) for key in component_keys]
+            if any(
+                not isinstance(value, (int, float))
+                or isinstance(value, bool)
+                or not math.isfinite(value)
+                or value < 0
+                for value in components
+            ):
+                return None
+            if not _close(sum(float(value) for value in components), float(billed_total)):
+                return None
+            if input_tokens and not _close(
+                float(input_cost) * input_tokens / 1_000_000,
+                float(info["billed_input_cost_total_cny"]),
+            ):
+                return None
+            if output_tokens and not _close(
+                float(output_cost) * output_tokens / 1_000_000,
+                float(info["billed_output_cost_total_cny"]),
+            ):
+                return None
+        else:
+            reconstructed = (
+                float(input_cost) * input_tokens
+                + float(output_cost) * output_tokens
+            ) / 1_000_000
+            if not _close(reconstructed, float(billed_total)):
+                return None
+            ratio = float(billed_total) / float(reference_total)
+            if not MIN_EVIDENCE_RATIO <= ratio <= MAX_CLASSIC_EVIDENCE_RATIO:
+                return None
+        return "text", float(input_cost), float(output_cost)
+    if kind == "fixed" and source in APPROVED_FIXED_SOURCES:
+        units = info.get("billed_units")
+        billing_unit = info.get("billing_unit")
+        price_key = "cost_cny_per_image" if billing_unit == "image" else "cost_cny_per_call"
+        value = info.get(price_key)
+        if (
+            not _positive_number(value)
+            or not _positive_integer(units)
+            or billing_unit not in {"request", "image"}
+            or not _close(float(value) * units, float(billed_total))
+        ):
+            return None
+        if source == "v1_usage_actual_cost":
+            if not _positive_number(reference_total):
+                return None
+            billed_ratio = float(billed_total) / float(reference_total)
+            if not MIN_EVIDENCE_RATIO <= billed_ratio <= MAX_V1_EVIDENCE_RATIO:
+                return None
+        return "fixed", float(value), None
     return None
 
 

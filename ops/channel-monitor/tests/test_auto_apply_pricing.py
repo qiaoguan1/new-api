@@ -69,15 +69,38 @@ def catalog_source(*rows, group="default", group_ratio=0.2, rate=7.0, **models):
 
 
 def text_cost(input_cost, output_cost):
+    billed_input = input_cost / 2
+    billed_output = output_cost / 2
+    billed_total = billed_input + billed_output
     return {
         "kind": "text",
         "input_cost_cny_per_m": input_cost,
         "output_cost_cny_per_m": output_cost,
+        "pricing_source": "v1_usage_actual_cost",
+        "calls": 1,
+        "input_tokens": 500_000,
+        "output_tokens": 500_000,
+        "billed_input_cost_total_cny": billed_input,
+        "billed_output_cost_total_cny": billed_output,
+        "billed_cache_cost_total_cny": 0.0,
+        "billed_image_component_cost_total_cny": 0.0,
+        "billed_cost_total_cny": billed_total,
+        "reference_cost_total_cny": billed_total,
+        "evidence_closed": True,
     }
 
 
 def fixed_cost(cost):
-    return {"kind": "fixed", "cost_cny_per_call": cost}
+    return {
+        "kind": "fixed",
+        "cost_cny_per_call": cost,
+        "pricing_source": "classic_usage_actual_quota",
+        "calls": 1,
+        "billing_unit": "request",
+        "billed_units": 1,
+        "billed_cost_total_cny": cost,
+        "evidence_closed": True,
+    }
 
 
 class PricingPlanTests(unittest.TestCase):
@@ -92,7 +115,6 @@ class PricingPlanTests(unittest.TestCase):
     def manual_catalog(self, slug, model, row, *, valid_through=DAY):
         return {
             "version": 1,
-            "actual_preferred_models": [model],
             "sources": {
                 slug: {
                     "models": {
@@ -204,7 +226,7 @@ class PricingPlanTests(unittest.TestCase):
             a=source(
                 **{
                     "text-model": text_cost(2.0, 7.0),
-                    "image-model": {"kind": "image", "cost_cny_per_image": 0.4},
+                    "image-model": fixed_cost(0.4),
                 }
             )
         )
@@ -354,7 +376,7 @@ class PricingPlanTests(unittest.TestCase):
         self.assertEqual(decision["worst_input_cost_cny_per_m"], 1.0)
         self.assertEqual(decision["worst_output_cost_cny_per_m"], 4.0)
 
-    def test_unlisted_model_keeps_higher_catalog_floor(self):
+    def test_every_routed_model_prefers_recent_actual_over_catalog(self):
         entry = catalog_source(
             {
                 "model_name": "model",
@@ -375,15 +397,94 @@ class PricingPlanTests(unittest.TestCase):
             max_change_ratio=50.0,
             manual_evidence={
                 "version": 1,
-                "actual_preferred_models": ["different-model"],
                 "sources": {},
             },
         )
 
         decision = result["decisions"][0]
-        self.assertEqual(decision["cost_basis"], "mixed_actual_catalog")
-        self.assertEqual(decision["worst_input_cost_cny_per_m"], 280.0)
-        self.assertEqual(decision["worst_output_cost_cny_per_m"], 2240.0)
+        self.assertEqual(decision["cost_basis"], "current_day_actual")
+        self.assertEqual(decision["worst_input_cost_cny_per_m"], 1.0)
+        self.assertEqual(decision["worst_output_cost_cny_per_m"], 4.0)
+
+    def test_unapproved_legacy_actual_evidence_cannot_override_catalog(self):
+        legacy = {
+            "kind": "text",
+            "calls": 1,
+            "input_cost_cny_per_m": 0.001,
+            "output_cost_cny_per_m": 0.001,
+            "pricing_source": "ratio",
+        }
+        entry = catalog_source(
+            {
+                "model_name": "model",
+                "model_ratio": 2.5,
+                "completion_ratio": 6.0,
+                "quota_type": 0,
+            },
+            model=legacy,
+        )
+        entry["collection_status"] = "complete"
+        entry["actual_log_complete"] = True
+
+        result = pricing.build_pricing_plan(
+            ledger(healthy=entry),
+            audit(channel(1, "healthy", ["model"])),
+            DAY,
+            self.current_options(),
+            max_change_ratio=50.0,
+        )
+
+        decision = result["decisions"][0]
+        self.assertEqual(decision["cost_basis"], "authenticated_catalog")
+        self.assertEqual(decision["worst_input_evidence_type"], "authenticated_catalog")
+        self.assertGreater(decision["worst_input_cost_cny_per_m"], 0.001)
+
+    def test_repeating_decimal_actual_evidence_keeps_text_and_image_closure(self):
+        repeating_text = {
+            "kind": "text",
+            "calls": 3,
+            "input_cost_cny_per_m": 0.333333333333,
+            "output_cost_cny_per_m": 0.666666666667,
+            "pricing_source": "v1_usage_actual_cost",
+            "input_tokens": 3_000_000,
+            "output_tokens": 3_000_000,
+            "billed_input_cost_total_cny": 1.0,
+            "billed_output_cost_total_cny": 2.0,
+            "billed_cache_cost_total_cny": 0.0,
+            "billed_image_component_cost_total_cny": 0.0,
+            "billed_cost_total_cny": 3.0,
+            "reference_cost_total_cny": 3.0,
+            "evidence_closed": True,
+        }
+        repeating_image = {
+            "kind": "fixed",
+            "calls": 1,
+            "cost_cny_per_image": 0.033333333,
+            "pricing_source": "v1_usage_actual_cost",
+            "billing_unit": "image",
+            "billed_units": 30,
+            "billed_cost_total_cny": 0.99999999,
+            "reference_cost_total_cny": 0.99999999,
+            "evidence_closed": True,
+        }
+        result = pricing.build_pricing_plan(
+            ledger(
+                healthy=source(
+                    **{
+                        "repeating-text": repeating_text,
+                        "repeating-image": repeating_image,
+                    }
+                )
+            ),
+            audit(channel(1, "healthy", ["repeating-text", "repeating-image"])),
+            DAY,
+            self.current_options(),
+            max_change_ratio=50.0,
+        )
+
+        decisions = {item["model"]: item for item in result["decisions"]}
+        self.assertEqual(decisions["repeating-text"]["action"], "apply")
+        self.assertEqual(decisions["repeating-image"]["action"], "apply")
 
     def test_manual_authenticated_catalog_fills_source_without_actual_or_api_catalog(self):
         result = pricing.build_pricing_plan(
