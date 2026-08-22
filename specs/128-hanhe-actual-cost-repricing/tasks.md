@@ -6,5 +6,5 @@
 - [x] T004 Implement Hanhe billed-cost parsing and auditable reference totals.
 - [x] T005 Extend safe actual-first repricing to all enabled routed text/image models.
 - [x] T006 Run focused and full channel-monitor tests and comprehensive review.
-- [ ] T007 Back up production, deploy, recollect, review dry-run, and apply prices.
-- [ ] T008 Verify idempotence and ten no-charge health rounds; merge and close Issue #128.
+- [x] T007 Back up production, deploy, recollect, review dry-run, and apply prices.
+- [x] T008 Verify idempotence and ten no-charge health rounds; merge and close Issue #128.
