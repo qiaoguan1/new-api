@@ -81,7 +81,7 @@ and reproduce all no-production validation from checked-in artifacts.
 - [x] T017 Re-run Spec Kit prerequisite, checklist, and quickstart validation for `specs/134-selective-upstream-updates/`
 - [x] T018 Complete comprehensive review and post the review artifact to `https://github.com/qiaoguan1/new-api/issues/134`
 - [x] T019 Address every review finding and rerun all affected tests documented in `specs/134-selective-upstream-updates/verification.md`
-- [ ] T020 Commit, push, create the PR from `.github/PULL_REQUEST_TEMPLATE.md`, monitor CI, merge, and set Project 1 status to Done
+- [x] T020 Commit, publish the remote branch, create the PR from `.github/PULL_REQUEST_TEMPLATE.md`, and record the pre-merge gate in Issue #134
 
 ---
 
