@@ -95,5 +95,8 @@
     "shadcn": "^3.7.0",
     "typescript": "~5.9.3",
     "typescript-eslint": "^8.57.2"
+  },
+  "overrides": {
+    "dompurify": "3.4.13"
   }
 }

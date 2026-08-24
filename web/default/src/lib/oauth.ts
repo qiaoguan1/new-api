@@ -1,3 +1,6 @@
+import {
+  markAndNavigateOAuthBindPopup,
+} from '@/features/auth/lib/oauth-callback-mode'
 import { api } from './api'
 
 // ============================================================================
@@ -78,26 +81,50 @@ export async function getOAuthState(): Promise<string | null> {
   }
 }
 
+async function openOAuthBindFlow(
+  provider: string,
+  buildUrl: (state: string) => string
+): Promise<void> {
+  const popup = window.open('', '_blank')
+  if (!popup) return
+
+  try {
+    const state = await getOAuthState()
+    if (!state || popup.closed) {
+      popup.close()
+      return
+    }
+    if (
+      !markAndNavigateOAuthBindPopup(
+        popup,
+        provider,
+        state,
+        buildUrl(state)
+      )
+    ) {
+      popup.close()
+    }
+  } catch {
+    popup.close()
+  }
+}
+
 /**
  * Handle GitHub OAuth binding/login
  */
 export async function handleGitHubOAuth(clientId: string): Promise<void> {
-  const state = await getOAuthState()
-  if (!state) return
-
-  const url = buildGitHubOAuthUrl(clientId, state)
-  window.open(url, '_blank')
+  await openOAuthBindFlow('github', (state) =>
+    buildGitHubOAuthUrl(clientId, state)
+  )
 }
 
 /**
  * Handle Discord OAuth binding/login
  */
 export async function handleDiscordOAuth(clientId: string): Promise<void> {
-  const state = await getOAuthState()
-  if (!state) return
-
-  const url = buildDiscordOAuthUrl(clientId, state)
-  window.open(url, '_blank')
+  await openOAuthBindFlow('discord', (state) =>
+    buildDiscordOAuthUrl(clientId, state)
+  )
 }
 
 /**
@@ -107,20 +134,16 @@ export async function handleOIDCOAuth(
   authUrl: string,
   clientId: string
 ): Promise<void> {
-  const state = await getOAuthState()
-  if (!state) return
-
-  const url = buildOIDCOAuthUrl(authUrl, clientId, state)
-  window.open(url, '_blank')
+  await openOAuthBindFlow('oidc', (state) =>
+    buildOIDCOAuthUrl(authUrl, clientId, state)
+  )
 }
 
 /**
  * Handle LinuxDO OAuth binding/login
  */
 export async function handleLinuxDOOAuth(clientId: string): Promise<void> {
-  const state = await getOAuthState()
-  if (!state) return
-
-  const url = buildLinuxDOOAuthUrl(clientId, state)
-  window.open(url, '_blank')
+  await openOAuthBindFlow('linuxdo', (state) =>
+    buildLinuxDOOAuthUrl(clientId, state)
+  )
 }
