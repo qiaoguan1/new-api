@@ -33,6 +33,10 @@ import {
   OAUTH_BIND_RESULT_MESSAGE,
 } from '@/features/auth/constants'
 import { watchOAuthPopupClosed } from '@/features/auth/lib/oauth-bind-window'
+import {
+  getOAuthSessionStorage,
+  markOAuthBindPopup,
+} from '@/features/auth/lib/oauth-callback-mode'
 import type { CustomOAuthProviderInfo } from '@/features/auth/types'
 import { useDialogs } from '@/hooks/use-dialog'
 import { useStatus } from '@/hooks/use-status'
@@ -175,6 +179,13 @@ export function AccountBindingsTab({
       try {
         const state = await createOAuthFlow(provider, 'bind')
         if (pendingOAuthBinding.current !== pending || popup.closed) return
+        // Stamp the popup while it is still the same-origin about:blank page.
+        // Privacy modes that block storage fail closed before provider navigation.
+        if (
+          !markOAuthBindPopup(getOAuthSessionStorage(popup), provider, state)
+        ) {
+          throw new Error('OAuth bind popup storage is unavailable')
+        }
         pending.state = state
         popup.location.replace(buildUrl(state))
       } catch {
