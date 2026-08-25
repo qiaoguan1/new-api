@@ -7,17 +7,17 @@
 
 ## Phase 2: Test-First Contracts
 
-- [ ] T003 Add failing eligibility and max-five budget tests in `controller/topup_wechat_test.go`
-- [ ] T004 Add failing SUCCESS, CLOSED and non-terminal mapping tests in `controller/topup_wechat_test.go`
-- [ ] T005 Add failing deadline/error fail-open tests in `controller/topup_wechat_test.go`
-- [ ] T006 Add failing current-user list integration test in `controller/topup_test.go`
+- [x] T003 Add failing eligibility and max-five budget tests in `controller/topup_wechat_test.go`
+- [x] T004 Add failing SUCCESS, CLOSED and non-terminal mapping tests in `controller/topup_wechat_test.go`
+- [x] T005 Add failing deadline/error fail-open tests in `controller/topup_wechat_test.go`
+- [x] T006 Add failing current-user list integration test in `controller/topup_test.go`
 
 ## Phase 3: Implementation
 
-- [ ] T007 [US1] Define the minimal WeChat order query interface and bounded reconciliation helper in `controller/topup_wechat.go`
-- [ ] T008 [US1] Reuse existing validation, idempotent credit and pending-status transition paths in `controller/topup_wechat.go`
-- [ ] T009 [US2] Apply max-five/shared-deadline/fail-open behavior in `controller/topup_wechat.go`
-- [ ] T010 [US3] Invoke reconciliation only for authenticated current-user list results in `controller/topup.go`
+- [x] T007 [US1] Define the minimal WeChat order query interface and bounded reconciliation helper in `controller/topup_wechat.go`
+- [x] T008 [US1] Reuse existing validation, idempotent credit and pending-status transition paths in `controller/topup_wechat.go`
+- [x] T009 [US2] Apply max-five/shared-deadline/fail-open behavior in `controller/topup_wechat.go`
+- [x] T010 [US3] Invoke reconciliation only for authenticated current-user list results in `controller/topup.go`
 
 ## Phase 4: Verification and Delivery
 
