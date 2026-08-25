@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
+	"strings"
 
 	"github.com/QuantumNous/new-api/common"
 	appconstant "github.com/QuantumNous/new-api/constant"
@@ -24,6 +26,16 @@ const maxStandaloneSearchUpstreamResponseSize = 32 << 20
 // response does not contain token usage.
 func SearchHelper(c *gin.Context, info *relaycommon.RelayInfo) *types.NewAPIError {
 	info.InitChannelMeta(c)
+	if backendURL := configuredStandaloneSearchBackendURL(); backendURL != "" {
+		searchResponse, err := service.ExecuteSearxStandaloneSearch(c.Request.Context(), backendURL, searchRequest(info))
+		if err != nil {
+			return types.NewOpenAIError(err, types.ErrorCodeDoRequestFailed, http.StatusBadGateway, types.ErrOptionWithSkipRetry())
+		}
+		markStandaloneSearchInternal(info)
+		c.JSON(http.StatusOK, searchResponse)
+		settleStandaloneSearch(c, info)
+		return nil
+	}
 	if !supportsStandaloneSearchAPIType(info.ApiType) {
 		return types.NewErrorWithStatusCode(
 			fmt.Errorf("standalone search is only supported by Codex or explicitly routed Advanced Custom channels"),
@@ -96,6 +108,29 @@ func SearchHelper(c *gin.Context, info *relaycommon.RelayInfo) *types.NewAPIErro
 	service.IOCopyBytesGracefully(c, response, responseBody)
 	settleStandaloneSearch(c, info)
 	return nil
+}
+
+func searchRequest(info *relaycommon.RelayInfo) *dto.SearchRequest {
+	if info == nil {
+		return nil
+	}
+	request, _ := info.Request.(*dto.SearchRequest)
+	return request
+}
+
+func configuredStandaloneSearchBackendURL() string {
+	return strings.TrimRight(strings.TrimSpace(os.Getenv("XT_STANDALONE_SEARCH_BASE_URL")), "/")
+}
+
+func markStandaloneSearchInternal(info *relaycommon.RelayInfo) {
+	if info == nil || info.ChannelMeta == nil {
+		return
+	}
+	info.ChannelId = 0
+	info.ChannelType = 0
+	info.ChannelBaseUrl = ""
+	info.ApiKey = ""
+	info.UpstreamModelName = info.OriginModelName
 }
 
 func settleStandaloneSearch(c *gin.Context, info *relaycommon.RelayInfo) {

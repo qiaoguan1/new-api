@@ -42,3 +42,10 @@ official command envelope and provides bounded search/open/click/find/time
 operations. Ordinary `/v1/responses` excludes the channel through the existing
 path-aware channel filter. Generic OpenAI-compatible channels remain
 fail-closed.
+
+Production currently runs a selectively backported source baseline that
+predates Advanced Custom channels. For this deployment only, an explicit
+`XT_STANDALONE_SEARCH_BASE_URL` opt-in provides the same SearXNG execution path
+without importing unrelated channel infrastructure. The middleware still
+applies token model access and pricing, while successful internal search clears
+the selected provider channel ID before usage accounting.

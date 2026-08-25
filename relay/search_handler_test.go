@@ -8,6 +8,7 @@ import (
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
+	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	"github.com/QuantumNous/new-api/service"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/require"
@@ -69,4 +70,30 @@ func TestStandaloneSearchSupportsOnlyExplicitSearchCapableAPITypes(t *testing.T)
 	require.True(t, supportsStandaloneSearchAPIType(constant.APITypeCodex))
 	require.True(t, supportsStandaloneSearchAPIType(constant.APITypeAdvancedCustom))
 	require.False(t, supportsStandaloneSearchAPIType(constant.APITypeOpenAI))
+}
+
+func TestConfiguredStandaloneSearchBackendURLIsExplicitAndNormalized(t *testing.T) {
+	t.Setenv("XT_STANDALONE_SEARCH_BASE_URL", "  http://searxng:8080/// ")
+	require.Equal(t, "http://searxng:8080", configuredStandaloneSearchBackendURL())
+	t.Setenv("XT_STANDALONE_SEARCH_BASE_URL", "")
+	require.Empty(t, configuredStandaloneSearchBackendURL())
+}
+
+func TestMarkStandaloneSearchInternalDoesNotCreditSelectedModelChannel(t *testing.T) {
+	info := &relaycommon.RelayInfo{
+		OriginModelName: "gpt-5.6-sol",
+		ChannelMeta: &relaycommon.ChannelMeta{
+			ChannelId:         30,
+			ChannelType:       1,
+			ChannelBaseUrl:    "https://provider.example",
+			ApiKey:            "secret",
+			UpstreamModelName: "gpt-5.6-sol",
+		},
+	}
+	markStandaloneSearchInternal(info)
+	require.Zero(t, info.ChannelId)
+	require.Zero(t, info.ChannelType)
+	require.Empty(t, info.ChannelBaseUrl)
+	require.Empty(t, info.ApiKey)
+	require.Equal(t, info.OriginModelName, info.UpstreamModelName)
 }
