@@ -38,6 +38,8 @@ func GetAndValidateRequest(c *gin.Context, format types.RelayFormat) (request dt
 		request, err = GetAndValidateResponsesRequest(c)
 	case types.RelayFormatOpenAIResponsesCompaction:
 		request, err = GetAndValidateResponsesCompactionRequest(c)
+	case types.RelayFormatOpenAISearch:
+		request, err = GetAndValidateSearchRequest(c)
 
 	case types.RelayFormatOpenAIImage:
 		request, err = GetAndValidOpenAIImageRequest(c, relayMode)
@@ -53,6 +55,23 @@ func GetAndValidateRequest(c *gin.Context, format types.RelayFormat) (request dt
 		return nil, fmt.Errorf("unsupported relay format: %s", format)
 	}
 	return request, err
+}
+
+func GetAndValidateSearchRequest(c *gin.Context) (*dto.SearchRequest, error) {
+	request := &dto.SearchRequest{}
+	if err := common.UnmarshalBodyReusable(c, request); err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(request.ID) == "" {
+		return nil, errors.New("id is required")
+	}
+	if strings.TrimSpace(request.Model) == "" {
+		return nil, errors.New("model is required")
+	}
+	if exceedsMaxTokensLimit(request.MaxOutputTokens) {
+		return nil, errors.New("max_output_tokens is invalid")
+	}
+	return request, nil
 }
 
 func GetAndValidAudioRequest(c *gin.Context, relayMode int) (*dto.AudioRequest, error) {

@@ -1,0 +1,13 @@
+{
+  "method": "POST",
+  "path": "/v1/alpha/search",
+  "authentication": "bearer token",
+  "request": {
+    "required": ["id", "model"],
+    "optional": ["reasoning", "input", "commands", "settings", "max_output_tokens"]
+  },
+  "response": {
+    "required": ["output"],
+    "optional": ["encrypted_output", "results"]
+  }
+}
