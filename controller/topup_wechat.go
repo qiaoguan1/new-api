@@ -95,12 +95,36 @@ type wechatOrderSyncBudget struct {
 	Timeout time.Duration
 }
 
+type wechatOrderSyncSummary struct {
+	Queried int
+	Updated int
+	Errors  int
+}
+
+func validWechatPayTradeNo(tradeNo string) bool {
+	if len(tradeNo) == 0 || len(tradeNo) > 32 {
+		return false
+	}
+	for _, character := range tradeNo {
+		if !((character >= 'a' && character <= 'z') ||
+			(character >= 'A' && character <= 'Z') ||
+			(character >= '0' && character <= '9') ||
+			character == '-' || character == '_') {
+			return false
+		}
+	}
+	return true
+}
+
 func eligiblePendingWechatTopUp(topUp *model.TopUp, userID int) bool {
 	return topUp != nil &&
 		topUp.UserId == userID &&
 		topUp.Status == common.TopUpStatusPending &&
 		topUp.PaymentMethod == model.PaymentMethodWechatPay &&
-		topUp.PaymentProvider == model.PaymentProviderWechatPay
+		topUp.PaymentProvider == model.PaymentProviderWechatPay &&
+		validWechatPayTradeNo(topUp.TradeNo) &&
+		topUp.CreateTime > 0 &&
+		time.Now().Unix()-topUp.CreateTime >= int64(wechatPayOrderTTL/time.Second)
 }
 
 func reconcileWechatPendingTopUpsWithBudget(
@@ -112,21 +136,25 @@ func reconcileWechatPendingTopUpsWithBudget(
 	store wechatOrderSyncStore,
 	clientIP string,
 	budget wechatOrderSyncBudget,
-) {
+) wechatOrderSyncSummary {
+	summary := wechatOrderSyncSummary{}
 	if ctx == nil || querier == nil || store == nil || budget.Limit <= 0 || budget.Timeout <= 0 {
-		return
+		return summary
 	}
-	syncCtx, cancel := context.WithTimeout(ctx, budget.Timeout)
+	limit := min(budget.Limit, wechatPayListSyncLimit)
+	timeout := min(budget.Timeout, wechatPayListSyncTimeout)
+	syncCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	queried := 0
 	for _, topUp := range topups {
-		if queried >= budget.Limit || syncCtx.Err() != nil {
+		if queried >= limit || syncCtx.Err() != nil {
 			break
 		}
 		if !eligiblePendingWechatTopUp(topUp, userID) {
 			continue
 		}
 		queried++
+		summary.Queried++
 		transaction, _, err := querier.QueryOrderByOutTradeNo(
 			syncCtx,
 			native.QueryOrderByOutTradeNoRequest{
@@ -135,6 +163,7 @@ func reconcileWechatPendingTopUpsWithBudget(
 			},
 		)
 		if err != nil || transaction == nil || transaction.TradeState == nil {
+			summary.Errors++
 			continue
 		}
 
@@ -142,6 +171,7 @@ func reconcileWechatPendingTopUpsWithBudget(
 		switch *transaction.TradeState {
 		case "SUCCESS":
 			if validateWechatTransaction(transaction, topUp, cfg) != nil {
+				summary.Errors++
 				continue
 			}
 			transactionID := ""
@@ -156,8 +186,12 @@ func reconcileWechatPendingTopUpsWithBudget(
 		}
 		if err == nil && refreshed != nil {
 			*topUp = *refreshed
+			summary.Updated++
+		} else if err != nil {
+			summary.Errors++
 		}
 	}
+	return summary
 }
 
 func reconcileWechatPendingTopUps(
@@ -174,7 +208,7 @@ func reconcileWechatPendingTopUps(
 	if err != nil {
 		return
 	}
-	reconcileWechatPendingTopUpsWithBudget(
+	summary := reconcileWechatPendingTopUpsWithBudget(
 		ctx,
 		userID,
 		topups,
@@ -184,6 +218,17 @@ func reconcileWechatPendingTopUps(
 		clientIP,
 		wechatOrderSyncBudget{Limit: wechatPayListSyncLimit, Timeout: wechatPayListSyncTimeout},
 	)
+	if summary.Errors > 0 {
+		logger.LogWarn(
+			ctx,
+			fmt.Sprintf(
+				"微信支付列表状态同步未完全成功 queried=%d updated=%d errors=%d",
+				summary.Queried,
+				summary.Updated,
+				summary.Errors,
+			),
+		)
+	}
 }
 
 func ptr[T any](value T) *T { return &value }

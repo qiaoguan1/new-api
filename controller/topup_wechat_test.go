@@ -83,7 +83,7 @@ func pendingWechatTopUp(userID int, tradeNo string) *model.TopUp {
 		TradeNo:         tradeNo,
 		PaymentMethod:   model.PaymentMethodWechatPay,
 		PaymentProvider: model.PaymentProviderWechatPay,
-		CreateTime:      common.GetTimestamp(),
+		CreateTime:      common.GetTimestamp() - int64(wechatPayOrderTTL/time.Second) - 1,
 		Status:          common.TopUpStatusPending,
 	}
 }
@@ -175,6 +175,16 @@ func TestReconcileWechatPendingTopUpsFiltersCurrentUserAndCapsQueries(t *testing
 			UserId: 7, TradeNo: "WX-DONE", Status: common.TopUpStatusSuccess,
 			PaymentMethod: model.PaymentMethodWechatPay, PaymentProvider: model.PaymentProviderWechatPay,
 		},
+		&model.TopUp{
+			UserId: 7, TradeNo: "WX-RECENT", Status: common.TopUpStatusPending,
+			PaymentMethod: model.PaymentMethodWechatPay, PaymentProvider: model.PaymentProviderWechatPay,
+			CreateTime: common.GetTimestamp(),
+		},
+		&model.TopUp{
+			UserId: 7, TradeNo: "WX/INVALID", Status: common.TopUpStatusPending,
+			PaymentMethod: model.PaymentMethodWechatPay, PaymentProvider: model.PaymentProviderWechatPay,
+			CreateTime: common.GetTimestamp() - 600,
+		},
 	)
 	querier := &fakeWechatOrderQuerier{query: func(
 		ctx context.Context,
@@ -184,9 +194,9 @@ func TestReconcileWechatPendingTopUpsFiltersCurrentUserAndCapsQueries(t *testing
 	}}
 	store := &fakeWechatOrderSyncStore{}
 
-	reconcileWechatPendingTopUpsWithBudget(
+	summary := reconcileWechatPendingTopUpsWithBudget(
 		context.Background(), 7, topups, cfg, querier, store, "127.0.0.1",
-		wechatOrderSyncBudget{Limit: 5, Timeout: time.Second},
+		wechatOrderSyncBudget{Limit: 100, Timeout: time.Hour},
 	)
 
 	require.Equal(t, []string{
@@ -194,6 +204,7 @@ func TestReconcileWechatPendingTopUpsFiltersCurrentUserAndCapsQueries(t *testing
 	}, querier.calls)
 	require.Empty(t, store.credited)
 	require.Empty(t, store.failed)
+	require.Equal(t, wechatOrderSyncSummary{Queried: 5}, summary)
 }
 
 func TestReconcileWechatPendingTopUpsAppliesOnlyTrustedTerminalStates(t *testing.T) {
