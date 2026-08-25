@@ -49,6 +49,8 @@ func relayHandler(c *gin.Context, info *relaycommon.RelayInfo) *types.NewAPIErro
 		err = relay.EmbeddingHelper(c, info)
 	case relayconstant.RelayModeResponses, relayconstant.RelayModeResponsesCompact:
 		err = relay.ResponsesHelper(c, info)
+	case relayconstant.RelayModeSearch:
+		err = relay.SearchHelper(c, info)
 	default:
 		err = relay.TextHelper(c, info)
 	}
@@ -278,6 +280,8 @@ func fastTokenCountMetaForPricing(request dto.Request) *types.TokenCountMeta {
 			meta.MaxTokens = int(maxTokens)
 		}
 	case *dto.OpenAIResponsesRequest:
+		meta.MaxTokens = int(lo.FromPtrOr(r.MaxOutputTokens, uint(0)))
+	case *dto.SearchRequest:
 		meta.MaxTokens = int(lo.FromPtrOr(r.MaxOutputTokens, uint(0)))
 	case *dto.ClaudeRequest:
 		meta.MaxTokens = int(lo.FromPtr(r.MaxTokens))

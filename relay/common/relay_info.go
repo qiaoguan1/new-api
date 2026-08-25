@@ -416,6 +416,22 @@ func GenRelayInfoResponses(c *gin.Context, request *dto.OpenAIResponsesRequest) 
 	return info
 }
 
+func GenRelayInfoSearch(c *gin.Context, request *dto.SearchRequest) *RelayInfo {
+	info := genBaseRelayInfo(c, request)
+	info.RelayMode = relayconstant.RelayModeSearch
+	info.RelayFormat = types.RelayFormatOpenAISearch
+	info.ResponsesUsageInfo = &ResponsesUsageInfo{
+		BuiltInTools: map[string]*BuildInToolInfo{
+			dto.BuildInToolWebSearchPreview: {
+				ToolName:          dto.BuildInToolWebSearchPreview,
+				CallCount:         1,
+				SearchContextSize: request.SearchContextSize(),
+			},
+		},
+	}
+	return info
+}
+
 func GenRelayInfoGemini(c *gin.Context, request dto.Request) *RelayInfo {
 	info := genBaseRelayInfo(c, request)
 	info.RelayFormat = types.RelayFormatGemini
@@ -575,6 +591,12 @@ func GenRelayInfo(c *gin.Context, relayFormat types.RelayFormat, request dto.Req
 			return GenRelayInfoResponsesCompaction(c, request), nil
 		}
 		return nil, errors.New("request is not a OpenAIResponsesCompactionRequest")
+	case types.RelayFormatOpenAISearch:
+		if request, ok := request.(*dto.SearchRequest); ok {
+			info = GenRelayInfoSearch(c, request)
+			break
+		}
+		err = errors.New("request is not a SearchRequest")
 	case types.RelayFormatTask:
 		info = genBaseRelayInfo(c, nil)
 		info.TaskRelayInfo = &TaskRelayInfo{}

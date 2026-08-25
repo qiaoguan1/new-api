@@ -1,0 +1,13 @@
+use_default_settings: true
+
+search:
+  safe_search: 0
+  formats:
+    - html
+    - json
+
+server:
+  limiter: false
+  image_proxy: false
+  # Deployment replaces this placeholder in a root-only generated file.
+  secret_key: "CHANGE_ME"

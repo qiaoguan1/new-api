@@ -101,7 +101,7 @@ func Distribute() func(c *gin.Context) {
 					}
 				}
 
-				if preferredChannelID, found := service.GetPreferredChannelByAffinity(c, modelRequest.Model, usingGroup); found {
+				if preferredChannelID, found := service.GetPreferredChannelByAffinity(c, modelRequest.Model, usingGroup); found && !isStandaloneSearchPath(c.Request.URL.Path) {
 					affinityUsable := false
 					preferred, err := model.CacheGetChannel(preferredChannelID)
 					if err == nil && preferred != nil && preferred.Status == common.ChannelStatusEnabled &&
@@ -163,10 +163,14 @@ func Distribute() func(c *gin.Context) {
 		common.SetContextKey(c, constant.ContextKeyRequestStartTime, time.Now())
 		SetupContextForSelectedChannel(c, channel, modelRequest.Model)
 		c.Next()
-		if channel != nil && c.Writer != nil && c.Writer.Status() < http.StatusBadRequest {
+		if channel != nil && c.Writer != nil && c.Writer.Status() < http.StatusBadRequest && !isStandaloneSearchPath(c.Request.URL.Path) {
 			service.RecordChannelAffinity(c, channel.Id)
 		}
 	}
+}
+
+func isStandaloneSearchPath(path string) bool {
+	return path == "/v1/alpha/search"
 }
 
 // channelSupportsRequestPath reports whether a channel can serve the request path.
