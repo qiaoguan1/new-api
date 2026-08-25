@@ -35,6 +35,10 @@ error logging.
    bounded.
 9. Search query count, total operation count, query length, result count, page
    text, redirects, and in-memory reference cache are bounded.
+10. A deployment may explicitly set `XT_STANDALONE_SEARCH_BASE_URL` to use an
+    internal SearXNG service without requiring the Advanced Custom channel
+    infrastructure. When used, successful search accounting is not credited to
+    the model channel selected only for access-control and price lookup.
 
 ## Non-goals
 
