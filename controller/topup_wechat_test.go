@@ -43,6 +43,7 @@ type fakeWechatOrderSyncStore struct {
 	failed    []string
 	creditErr error
 	failErr   error
+	creditNil bool
 }
 
 func (f *fakeWechatOrderSyncStore) credit(
@@ -53,6 +54,9 @@ func (f *fakeWechatOrderSyncStore) credit(
 	f.credited = append(f.credited, tradeNo)
 	if f.creditErr != nil {
 		return nil, f.creditErr
+	}
+	if f.creditNil {
+		return nil, nil
 	}
 	return &model.TopUp{
 		TradeNo:         tradeNo,
@@ -302,4 +306,20 @@ func TestReconcileWechatPendingTopUpsFailsOpenOnErrorsAndSharedDeadline(t *testi
 	)
 	require.Equal(t, common.TopUpStatusPending, success.Status)
 	require.Equal(t, common.TopUpStatusPending, closed.Status)
+
+	nilRefresh := pendingWechatTopUp(7, "WX-NIL-REFRESH")
+	nilRefreshStore := &fakeWechatOrderSyncStore{creditNil: true}
+	nilRefreshQuerier := &fakeWechatOrderQuerier{query: func(
+		ctx context.Context,
+		req native.QueryOrderByOutTradeNoRequest,
+	) (*payments.Transaction, error) {
+		return wechatTransaction(cfg, nilRefresh.TradeNo, "SUCCESS", 2000), nil
+	}}
+	summary := reconcileWechatPendingTopUpsWithBudget(
+		context.Background(), 7, []*model.TopUp{nilRefresh}, cfg,
+		nilRefreshQuerier, nilRefreshStore, "127.0.0.1",
+		wechatOrderSyncBudget{Limit: 5, Timeout: time.Second},
+	)
+	require.Equal(t, wechatOrderSyncSummary{Queried: 1, Errors: 1}, summary)
+	require.Equal(t, common.TopUpStatusPending, nilRefresh.Status)
 }

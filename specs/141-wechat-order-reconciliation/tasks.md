@@ -21,9 +21,9 @@
 
 ## Phase 4: Verification and Delivery
 
-- [ ] T011 Run focused controller/model tests and full `go test ./...`
+- [x] T011 Run focused controller/model tests and full `go test ./...`
 - [ ] T012 Complete production read-only state-count verification without exposing order IDs
-- [ ] T013 Post comprehensive/security review artifact to Issue #230 and resolve every finding
+- [x] T013 Post comprehensive/security review artifact to Issue #230 and resolve every finding
 - [ ] T014 Commit, push, pass new-api CI, merge, update Project and separately decide production deployment
 
 ## Dependencies

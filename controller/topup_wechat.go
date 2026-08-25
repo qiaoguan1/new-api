@@ -187,7 +187,7 @@ func reconcileWechatPendingTopUpsWithBudget(
 		if err == nil && refreshed != nil {
 			*topUp = *refreshed
 			summary.Updated++
-		} else if err != nil {
+		} else {
 			summary.Errors++
 		}
 	}
