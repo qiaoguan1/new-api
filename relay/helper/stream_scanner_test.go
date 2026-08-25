@@ -243,16 +243,15 @@ func TestStreamScannerHandler_DataWithExtraSpaces(t *testing.T) {
 func TestStreamScannerHandler_ScannerDecoupledFromSlowHandler(t *testing.T) {
 	t.Parallel()
 
-	const numChunks = 50
-	const upstreamDelay = 10 * time.Millisecond
-	const handlerDelay = 20 * time.Millisecond
+	const numChunks = 5
 
 	pr, pw := io.Pipe()
+	writerDone := make(chan struct{})
 	go func() {
 		defer pw.Close()
+		defer close(writerDone)
 		for i := 0; i < numChunks; i++ {
 			fmt.Fprintf(pw, "data: {\"id\":%d}\n", i)
-			time.Sleep(upstreamDelay)
 		}
 		fmt.Fprint(pw, "data: [DONE]\n")
 	}()
@@ -261,38 +260,40 @@ func TestStreamScannerHandler_ScannerDecoupledFromSlowHandler(t *testing.T) {
 	c, _ := gin.CreateTestContext(recorder)
 	c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
 
-	oldTimeout := constant.StreamingTimeout
-	constant.StreamingTimeout = 30
-	t.Cleanup(func() { constant.StreamingTimeout = oldTimeout })
-
 	resp := &http.Response{Body: pr}
 	info := &relaycommon.RelayInfo{ChannelMeta: &relaycommon.ChannelMeta{}}
 
 	var count atomic.Int64
-	start := time.Now()
+	handlerStarted := make(chan struct{})
+	releaseHandler := make(chan struct{})
+	var startOnce sync.Once
 	done := make(chan struct{})
 	go func() {
 		StreamScannerHandler(c, resp, info, func(data string, sr *StreamResult) {
-			time.Sleep(handlerDelay)
+			startOnce.Do(func() { close(handlerStarted) })
+			<-releaseHandler
 			count.Add(1)
 		})
 		close(done)
 	}()
 
 	select {
-	case <-done:
-	case <-time.After(15 * time.Second):
-		t.Fatal("StreamScannerHandler did not complete in time")
+	case <-handlerStarted:
+	case <-time.After(time.Second):
+		t.Fatal("data handler did not start")
 	}
-
-	elapsed := time.Since(start)
+	select {
+	case <-writerDone:
+	case <-time.After(time.Second):
+		t.Fatal("scanner did not drain the upstream while the handler was blocked")
+	}
+	close(releaseHandler)
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("StreamScannerHandler did not complete after releasing the handler")
+	}
 	assert.Equal(t, int64(numChunks), count.Load())
-
-	coupledTime := time.Duration(numChunks) * (upstreamDelay + handlerDelay)
-	t.Logf("elapsed=%v, coupled_estimate=%v", elapsed, coupledTime)
-
-	assert.Less(t, elapsed, coupledTime*85/100,
-		"decoupled elapsed time (%v) should be significantly less than coupled estimate (%v)", elapsed, coupledTime)
 }
 
 func TestStreamScannerHandler_SlowUpstreamFastHandler(t *testing.T) {
