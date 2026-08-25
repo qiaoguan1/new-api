@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -458,7 +459,18 @@ func RequestAmount(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"message": "success", "data": strconv.FormatFloat(payMoney, 'f', 2, 64)})
 }
 
+type userTopUpReconciler func(
+	context.Context,
+	int,
+	[]*model.TopUp,
+	string,
+)
+
 func GetUserTopUps(c *gin.Context) {
+	getUserTopUps(c, reconcileWechatPendingTopUps)
+}
+
+func getUserTopUps(c *gin.Context, reconcile userTopUpReconciler) {
 	userId := c.GetInt("id")
 	pageInfo := common.GetPageQuery(c)
 	keyword := c.Query("keyword")
@@ -476,6 +488,9 @@ func GetUserTopUps(c *gin.Context) {
 	if err != nil {
 		common.ApiError(c, err)
 		return
+	}
+	if reconcile != nil {
+		reconcile(c.Request.Context(), userId, topups, c.ClientIP())
 	}
 
 	pageInfo.SetTotal(int(total))
