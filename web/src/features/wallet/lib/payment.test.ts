@@ -20,12 +20,40 @@ import assert from 'node:assert/strict'
 import { describe, test } from 'node:test'
 
 import { PAYMENT_TYPES } from '../constants'
+import type { TopupInfo } from '../types'
 import {
   dispatchSelectedPayment,
+  getInitialTopupAmount,
   isStripePayment,
   isWaffoPayment,
   isWaffoPancakePayment,
 } from './payment'
+
+function createTopupInfo(amountOptions: number[]): TopupInfo {
+  return {
+    enable_online_topup: true,
+    enable_stripe_topup: false,
+    pay_methods: [],
+    min_topup: 1,
+    stripe_min_topup: 1,
+    amount_options: amountOptions,
+    discount: {},
+  }
+}
+
+describe('initial top-up amount', () => {
+  test('uses the first configured preset instead of the minimum amount', () => {
+    const topupInfo = createTopupInfo([20, 50, 100])
+
+    assert.equal(getInitialTopupAmount(topupInfo), 20)
+  })
+
+  test('falls back to the existing minimum when presets are unavailable', () => {
+    const topupInfo = createTopupInfo([])
+
+    assert.equal(getInitialTopupAmount(topupInfo), 1)
+  })
+})
 
 describe('payment type classification', () => {
   test('keeps Waffo and Waffo Pancake on their dedicated flows', () => {

@@ -175,6 +175,22 @@ export function getMinTopupAmount(topupInfo: TopupInfo | null): number {
 }
 
 /**
+ * Get the initial amount shown on the recharge form.
+ *
+ * A configured preset is a display preference, while the minimum amount is a
+ * validation boundary. Keep those concepts separate so administrators can
+ * suggest a common recharge amount without raising the minimum payment.
+ */
+export function getInitialTopupAmount(topupInfo: TopupInfo | null): number {
+  const firstPreset = topupInfo?.amount_options?.[0]
+  if (Number.isFinite(firstPreset) && Number(firstPreset) > 0) {
+    return Number(firstPreset)
+  }
+
+  return getMinTopupAmount(topupInfo)
+}
+
+/**
  * Generate preset amounts based on minimum topup
  */
 export function generatePresetAmounts(minAmount: number): PresetAmount[] {
