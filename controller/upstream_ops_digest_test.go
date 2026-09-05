@@ -2,6 +2,7 @@ package controller
 
 import (
 	"bytes"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -67,5 +68,43 @@ func TestSendUpstreamOpsDigestRejectsInvalidAndOversizedPayloads(t *testing.T) {
 				t.Fatalf("expected 400, got %d", response.Code)
 			}
 		})
+	}
+}
+
+func TestUpstreamOpsDigestContentRespectsSMTPLineLimit(t *testing.T) {
+	channels := make([]upstreamOpsDigestChannel, 100)
+	for index := range channels {
+		balance := 1.25
+		dailyCost := 0.5
+		channels[index] = upstreamOpsDigestChannel{
+			Name:             strings.Repeat("渠", 80),
+			CollectionStatus: "complete",
+			AuditStatus:      "ok",
+			BalanceStatus:    "complete",
+			Balance:          &balance,
+			DailyCalls:       10,
+			DailyCostCNY:     &dailyCost,
+			MonthCalls:       100,
+			MonthCostCNY:     5,
+		}
+	}
+	reasons := make(map[string]int, 30)
+	for index := 0; index < 30; index++ {
+		reasons[fmt.Sprintf("reason_%02d_%s", index, strings.Repeat("x", 68))] = index
+	}
+	_, content := upstreamOpsDigestContent(upstreamOpsDigestRequest{
+		Date:        "2026-09-05",
+		GeneratedAt: 1,
+		Channels:    channels,
+		Pricing: upstreamOpsDigestPricing{
+			Status:  "complete",
+			Reasons: reasons,
+		},
+	})
+
+	for lineNumber, line := range strings.Split(content, "\r\n") {
+		if len([]byte(line)) > 998 {
+			t.Fatalf("SMTP line %d is %d bytes; maximum is 998", lineNumber+1, len([]byte(line)))
+		}
 	}
 }
