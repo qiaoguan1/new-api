@@ -61,6 +61,40 @@ func TestSendUpstreamBalanceAlertRejectsArbitraryKind(t *testing.T) {
 	}
 }
 
+func TestSendUpstreamBalanceAlertAcceptsSanitizedPatrolRecovery(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	t.Setenv("UPSTREAM_BALANCE_ALERT_EMAIL", "961246161@qq.com")
+	original := sendUpstreamBalanceAlertEmail
+	t.Cleanup(func() { sendUpstreamBalanceAlertEmail = original })
+
+	sendUpstreamBalanceAlertEmail = func(subject, recipient, content string) error {
+		if recipient != "961246161@qq.com" {
+			t.Fatalf("unexpected recipient %q", recipient)
+		}
+		if !strings.Contains(subject, "巡检异常已恢复") ||
+			!strings.Contains(content, "systemd.regenerate_path") ||
+			!strings.Contains(content, "ok") {
+			t.Fatalf("unexpected patrol email: subject=%q content=%q", subject, content)
+		}
+		return nil
+	}
+
+	router := gin.New()
+	router.POST("/alert", SendUpstreamBalanceAlert)
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(
+		http.MethodPost,
+		"/alert",
+		bytes.NewBufferString(`{"kind":"patrol_incident_recovered","name":"systemd.regenerate_path","code":"ok","severity":"info","threshold":0,"occurred_at":1786407600}`),
+	)
+	request.Header.Set("Content-Type", "application/json")
+	router.ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", recorder.Code, recorder.Body.String())
+	}
+}
+
 func TestSendUpstreamBalanceAlertRejectsOversizedPayload(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	router := gin.New()

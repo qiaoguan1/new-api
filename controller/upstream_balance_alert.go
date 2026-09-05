@@ -26,15 +26,34 @@ var upstreamBalanceAlertTitles = map[string]string{
 	"balance_recovered":            "上游账户余额已恢复",
 	"balance_collection_failed":    "上游余额监控连续采集失败",
 	"balance_collection_recovered": "上游余额监控已恢复",
+	"patrol_incident_open":         "中转站巡检发现异常",
+	"patrol_incident_reminder":     "中转站巡检异常仍未恢复",
+	"patrol_incident_recovered":    "中转站巡检异常已恢复",
 	"test":                         "上游余额监控测试邮件",
 }
 
 type upstreamBalanceAlertRequest struct {
 	Kind       string   `json:"kind"`
 	Name       string   `json:"name"`
+	Code       string   `json:"code"`
+	Severity   string   `json:"severity"`
 	Balance    *float64 `json:"balance"`
 	Threshold  float64  `json:"threshold"`
 	OccurredAt int64    `json:"occurred_at"`
+}
+
+func validPatrolAlertCode(value string) bool {
+	if value == "" || len(value) > 80 {
+		return false
+	}
+	for _, character := range value {
+		if !((character >= 'a' && character <= 'z') ||
+			(character >= '0' && character <= '9') ||
+			character == '_' || character == '-' || character == '.') {
+			return false
+		}
+	}
+	return true
 }
 
 func validUpstreamBalanceAlertRequest(request upstreamBalanceAlertRequest) bool {
@@ -54,6 +73,10 @@ func validUpstreamBalanceAlertRequest(request upstreamBalanceAlertRequest) bool 
 		math.Abs(*request.Balance) > 1_000_000_000) {
 		return false
 	}
+	if strings.HasPrefix(request.Kind, "patrol_incident_") {
+		return validPatrolAlertCode(request.Code) &&
+			(request.Severity == "info" || request.Severity == "warning" || request.Severity == "critical")
+	}
 	needsBalance := request.Kind == "balance_depleted" ||
 		request.Kind == "balance_depleted_reminder" || request.Kind == "balance_recovered"
 	return !needsBalance || request.Balance != nil
@@ -63,16 +86,24 @@ func upstreamBalanceAlertContent(request upstreamBalanceAlertRequest) (string, s
 	title := upstreamBalanceAlertTitles[request.Kind]
 	plainName := strings.TrimSpace(request.Name)
 	name := html.EscapeString(plainName)
-	balance := "未知"
-	if request.Balance != nil {
-		balance = fmt.Sprintf("%.6f", *request.Balance)
-	}
 	location, err := time.LoadLocation(upstreamBalanceAlertTimeZone)
 	if err != nil {
 		location = time.FixedZone("Asia/Shanghai", 8*60*60)
 	}
 	timestamp := time.Unix(request.OccurredAt, 0).In(location).Format(time.RFC3339)
 	subject := fmt.Sprintf("[星途监控] %s：%s", title, plainName)
+	if strings.HasPrefix(request.Kind, "patrol_incident_") {
+		content := fmt.Sprintf(
+			"<p>%s</p><p>巡检项：%s<br>状态代码：%s<br>严重程度：%s<br>北京时间：%s</p><p>本邮件不包含登录账号、密码、Token 或接口地址。</p>",
+			html.EscapeString(title), name, html.EscapeString(request.Code),
+			html.EscapeString(request.Severity), html.EscapeString(timestamp),
+		)
+		return subject, content
+	}
+	balance := "未知"
+	if request.Balance != nil {
+		balance = fmt.Sprintf("%.6f", *request.Balance)
+	}
 	content := fmt.Sprintf(
 		"<p>%s</p><p>上游渠道：%s<br>账户余额：%s（上游原始计费单位）<br>告警阈值：%.6f<br>北京时间：%s</p><p>本邮件不包含登录账号、密码、Token 或渠道接口地址。</p>",
 		html.EscapeString(title), name, balance, request.Threshold, html.EscapeString(timestamp),
