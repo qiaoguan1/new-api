@@ -1,0 +1,9 @@
+[Unit]
+Description=Watch for authenticated channel monitor regeneration requests
+
+[Path]
+PathChanged=/opt/ai-api-stack/channel-monitor/data/.admin-regenerate-request
+Unit=channel-monitor-regenerate.service
+
+[Install]
+WantedBy=multi-user.target

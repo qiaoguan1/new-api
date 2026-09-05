@@ -1,0 +1,30 @@
+[Unit]
+Description=Regenerate XingTu channel monitor data
+After=docker.service channel-monitor-admin.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/ai-api-stack
+ExecStart=/usr/bin/python3 /opt/ai-api-stack/channel-monitor/scripts/generate-monitor-data.py
+UMask=0027
+
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+LockPersonality=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+SystemCallArchitectures=native
+CapabilityBoundingSet=CAP_DAC_OVERRIDE CAP_FOWNER
+AmbientCapabilities=
+ReadWritePaths=/opt/ai-api-stack/channel-monitor/data
