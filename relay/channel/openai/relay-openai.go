@@ -110,6 +110,11 @@ func OaiStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Re
 	}
 
 	defer service.CloseResponseBodyGracefully(resp)
+	// RelayInfo is reused across channel attempts. Each upstream stream must
+	// start with independent status so a failed first channel cannot taint a
+	// successful fallback attempt.
+	info.StreamStatus = relaycommon.NewStreamStatus()
+	info.ReceivedResponseCount = 0
 
 	model := info.UpstreamModelName
 	var responseId string
@@ -122,15 +127,37 @@ func OaiStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Re
 	var streamItems []string // store stream items
 	var lastStreamData string
 	var secondLastStreamData string // 存储倒数第二个stream data，用于音频模型
+	var initialStreamError *types.NewAPIError
+	var partialStreamError bool
+	var downstreamStarted bool
 
 	// 检查是否为音频模型
 	isAudioModel := strings.Contains(strings.ToLower(model), "audio")
 
 	helper.StreamScannerHandler(c, resp, info, func(data string, sr *helper.StreamResult) {
+		if streamError := parseOpenAIStreamError(data); streamError != nil {
+			if !downstreamStarted {
+				initialStreamError = streamError
+			} else {
+				if lastStreamData != "" {
+					if err := HandleStreamFormat(c, info, lastStreamData, info.ChannelSetting.ForceFormat, info.ChannelSetting.ThinkingToContent); err != nil {
+						sr.Error(err)
+					}
+				}
+				if err := helper.StringData(c, data); err != nil {
+					sr.Error(err)
+				}
+				partialStreamError = true
+			}
+			sr.Stop(streamError)
+			return
+		}
 		if lastStreamData != "" {
 			if err := HandleStreamFormat(c, info, lastStreamData, info.ChannelSetting.ForceFormat, info.ChannelSetting.ThinkingToContent); err != nil {
 				common.SysLog("error handling stream format: " + err.Error())
 				sr.Error(err)
+			} else {
+				downstreamStarted = true
 			}
 		}
 		if len(data) > 0 {
@@ -143,6 +170,9 @@ func OaiStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Re
 			streamItems = append(streamItems, data)
 		}
 	})
+	if initialStreamError != nil {
+		return nil, initialStreamError
+	}
 
 	// 对音频模型，从倒数第二个stream data中提取usage信息
 	if isAudioModel && secondLastStreamData != "" {
@@ -167,6 +197,9 @@ func OaiStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Re
 	if err := handleLastResponse(lastStreamData, &responseId, &createAt, &systemFingerprint, &model, &usage,
 		&containStreamUsage, info, &shouldSendLastResp); err != nil {
 		logger.LogError(c, fmt.Sprintf("error handling last response: %s, lastStreamData: [%s]", err.Error(), lastStreamData))
+	}
+	if partialStreamError {
+		shouldSendLastResp = false
 	}
 
 	if info.RelayFormat == types.RelayFormatOpenAI {
