@@ -31,9 +31,9 @@ ALLOWED_REPAIR_ACTIONS = {
     "start.docker", "restart.admin", "start.regenerate_path", "restart.new_api",
     "restart.nginx", "restart.video_gateway", "run.backup",
     "run.fetch_upstream_balance", "run.scan_daily_audit", "run.balance_monitor",
-    "run.generate_monitor",
+    "run.generate_monitor", "restart.resolved",
 }
-ALLOWED_CHECK_KINDS = {"systemd", "docker", "http", "disk", "backup", "artifact", "video_sqlite"}
+ALLOWED_CHECK_KINDS = {"systemd", "docker", "http", "disk", "path_mode", "backup", "artifact", "video_sqlite"}
 MAX_JSON_BYTES = 32 * 1024 * 1024
 
 
@@ -192,6 +192,7 @@ class CommandRunner:
         "run.scan_daily_audit": (("/usr/bin/flock", "-n", "/run/lock/scan-upstream-daily.lock", "/usr/bin/python3", "/opt/ai-api-stack/channel-monitor/scripts/scan-upstream-daily.py"), 300),
         "run.balance_monitor": (("/bin/bash", "-c", "set -a; . /opt/ai-api-stack/channel-monitor/balance-alert.env; set +a; exec /usr/bin/python3 /opt/ai-api-stack/channel-monitor/scripts/monitor-upstream-balances.py"), 300),
         "run.generate_monitor": (("/usr/bin/systemctl", "start", "channel-monitor-regenerate.service"), 300),
+        "restart.resolved": (("/usr/bin/systemctl", "restart", "systemd-resolved.service"), 60),
     }
 
     def command(self, arguments: Sequence[str], *, timeout: int = 30) -> subprocess.CompletedProcess[str]:
@@ -213,7 +214,7 @@ class PatrolChecks:
 
     @staticmethod
     def _result(item: Mapping[str, Any], status: str, code: str, evidence: Mapping[str, Any]) -> CheckResult:
-        allowed = {"state", "age_seconds", "percent", "count", "date", "http_status"}
+        allowed = {"state", "age_seconds", "percent", "count", "date", "http_status", "mode"}
         return CheckResult(
             check_id=str(item["id"]), status=status, severity=str(item.get("severity", "critical")),
             code=_safe_identifier(code), repair_action=item.get("repair_action") if status != "healthy" else None,
@@ -265,6 +266,20 @@ class PatrolChecks:
         status = "failed" if percent >= critical else "warning" if percent >= warning else "healthy"
         code = "disk_critical" if status == "failed" else "disk_warning" if status == "warning" else "ok"
         return self._result(item, status, code, {"percent": percent})
+
+    def _path_mode(self, item: Mapping[str, Any], now: int) -> CheckResult:
+        path = pathlib.Path(str(item["path"]))
+        expected = int(str(item.get("expected_mode", "755")), 8)
+        if not path.is_absolute() or expected not in {0o700, 0o750, 0o755}:
+            raise PatrolError("path_mode_policy_invalid")
+        current = stat.S_IMODE(path.stat().st_mode)
+        healthy = current == expected
+        return self._result(
+            item,
+            "healthy" if healthy else "failed",
+            "ok" if healthy else "path_mode_mismatch",
+            {"mode": format(current, "03o")},
+        )
 
     def _backup(self, item: Mapping[str, Any], now: int) -> CheckResult:
         manifests = list(pathlib.Path(str(item["root"])).glob(str(item.get("glob", "*/SHA256SUMS"))))
