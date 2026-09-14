@@ -9,4 +9,4 @@
 - [x] T007 Dark-run Haina Flash and Rolldek Pro through the adapter.
 - [x] T008 Deploy the isolated service, Nginx route, and Flash-only NewAPI channel.
 - [x] T009 Verify production health, Flash model visibility, and rollback.
-- [ ] T010 Merge the reviewed PR and synchronize Issue/Project status.
+- [x] T010 Merge the reviewed PR and synchronize Issue/Project status.
