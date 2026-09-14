@@ -28,7 +28,7 @@ services:
     tmpfs:
       - /tmp:rw,noexec,nosuid,size=16m
     networks:
-      - stack-internal
+      - app-net
     healthcheck:
       test:
         - CMD
@@ -42,6 +42,6 @@ services:
       retries: 5
 
 networks:
-  stack-internal:
+  app-net:
     external: true
-    name: ai-api-stack_stack-internal
+    name: app-net

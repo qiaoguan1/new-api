@@ -18,6 +18,8 @@ are never replayed because the first provider may already have billed or generat
   host address.
 - Provider keys are read from regular 0600 files and never logged.
 - The container runs as UID/GID 10001, read-only, with every Linux capability dropped.
+- The container joins only the existing `app-net` network used by Nginx and the isolated media
+  gateways.
 - Prompts, response bodies, image URLs, and generated image bodies are never logged.
 - Only one image and URL response mode are supported.
 
