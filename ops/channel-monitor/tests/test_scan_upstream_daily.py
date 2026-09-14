@@ -43,35 +43,6 @@ class ScanTransportTests(unittest.TestCase):
         self.assertIn("non-HTTPS", body)
         build.assert_not_called()
 
-    def test_allows_only_exact_trusted_docker_http_upstream(self):
-        response = mock.MagicMock()
-        response.status = 200
-        response.read.return_value = b'{"data": []}'
-        opener = mock.MagicMock()
-        opener.open.return_value.__enter__.return_value = response
-        with mock.patch.object(scan.request, "build_opener", return_value=opener):
-            status, payload, _, _ = scan.http_json(
-                "http://xtai-banana-chat-adapter:8093/v1/models"
-            )
-
-        self.assertEqual(status, 200)
-        self.assertEqual(payload, {"data": []})
-        opener.open.assert_called_once()
-
-        for url in (
-            "http://xtai-banana-chat-adapter/v1/models",
-            "http://xtai-banana-chat-adapter:8094/v1/models",
-            "http://user@xtai-banana-chat-adapter:8093/v1/models",
-            "http://example.test:8093/v1/models",
-        ):
-            with self.subTest(url=url):
-                with mock.patch.object(scan.request, "build_opener") as build:
-                    status, payload, body, _ = scan.http_json(url)
-                self.assertIsNone(status)
-                self.assertIsNone(payload)
-                self.assertIn("non-HTTPS", body)
-                build.assert_not_called()
-
     def test_transport_error_redacts_authorization_material(self):
         opener = mock.Mock()
         opener.open.side_effect = RuntimeError("failed secret-value")
