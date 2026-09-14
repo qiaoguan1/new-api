@@ -1,0 +1,47 @@
+services:
+  banana-chat-adapter:
+    build:
+      context: .
+    image: xtai/banana-chat-adapter:issue160
+    container_name: xtai-banana-chat-adapter
+    restart: unless-stopped
+    user: "10001:10001"
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    environment:
+      BANANA_ADAPTER_HOST: 0.0.0.0
+      BANANA_ADAPTER_PORT: 8093
+      BANANA_ADAPTER_TOKEN_FILE: /run/secrets/adapter-token
+      BANANA_HAINA_KEY_FILE: /run/secrets/haina-key
+      BANANA_ROLLDEK_KEY_FILE: /run/secrets/rolldek-key
+      BANANA_HAINA_BASE_URL: https://ai.0809.one/v1
+      BANANA_ROLLDEK_BASE_URL: https://rolldek.com/v1
+      BANANA_UPSTREAM_TIMEOUT_SECONDS: 180
+      BANANA_MAX_ACTIVE_REQUESTS: 8
+    volumes:
+      - ${BANANA_ADAPTER_TOKEN_HOST_FILE:?required}:/run/secrets/adapter-token:ro
+      - ${BANANA_HAINA_KEY_HOST_FILE:?required}:/run/secrets/haina-key:ro
+      - ${BANANA_ROLLDEK_KEY_HOST_FILE:?required}:/run/secrets/rolldek-key:ro
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=16m
+    networks:
+      - app-net
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - >-
+          import urllib.request;
+          urllib.request.urlopen('http://127.0.0.1:8093/ready', timeout=2).read()
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+networks:
+  app-net:
+    external: true
+    name: app-net
