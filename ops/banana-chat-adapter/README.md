@@ -14,6 +14,8 @@ are never replayed because the first provider may already have billed or generat
 ## Security
 
 - The service accepts a file-backed internal bearer token.
+- The Nginx location also denies clients outside localhost, the Docker bridge, and the production
+  host address.
 - Provider keys are read from regular 0600 files and never logged.
 - The container runs as UID/GID 10001, read-only, with every Linux capability dropped.
 - Prompts, response bodies, image URLs, and generated image bodies are never logged.
