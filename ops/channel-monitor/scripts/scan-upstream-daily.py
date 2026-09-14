@@ -39,6 +39,7 @@ COST_DELTA_ALERT_RATIO = float(os.environ.get("UPSTREAM_COST_DELTA_ALERT_RATIO",
 MIN_GROSS_MARGIN = float(os.environ.get("MIN_GROSS_MARGIN", "0.2"))
 SELL_MARKUP_RATIO = float(os.environ.get("UPSTREAM_SELL_MARKUP_RATIO", "1.5"))
 MIN_BASELINE_PRIORITY = int(os.environ.get("UPSTREAM_BASELINE_MIN_PRIORITY", "1"))
+TRUSTED_HTTP_UPSTREAM = ("xtai-banana-chat-adapter", 8093)
 
 ENDPOINT_BY_TYPE = {
     1: "/v1/chat/completions",
@@ -189,7 +190,17 @@ def redact_http_text(value, headers):
 
 def http_json(url, method="GET", payload=None, headers=None, timeout=25):
     parsed_url = parse.urlsplit(url or "")
-    if parsed_url.scheme != "https" or not parsed_url.hostname:
+    try:
+        trusted_internal_http = (
+            parsed_url.scheme == "http"
+            and parsed_url.hostname == TRUSTED_HTTP_UPSTREAM[0]
+            and parsed_url.port == TRUSTED_HTTP_UPSTREAM[1]
+            and parsed_url.username is None
+            and parsed_url.password is None
+        )
+    except ValueError:
+        trusted_internal_http = False
+    if (parsed_url.scheme != "https" or not parsed_url.hostname) and not trusted_internal_http:
         return None, None, "refusing non-HTTPS upstream request", 0
     data = None
     final_headers = {"User-Agent": "xingtu-upstream-monitor/1.0"}
