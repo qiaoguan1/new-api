@@ -1,7 +1,7 @@
 # Banana Chat-Image Adapter Specification
 
 **Issue**: #160
-**Status**: In Progress
+**Status**: Flash Deployed; Pro Gated
 
 ## Goal
 
@@ -27,6 +27,15 @@ validated upstreams.
 
 - Unit tests cover the request, response, routing, fallback, and masking contracts.
 - Haina Flash and Rolldek Pro each pass one bounded adapter-level generation.
-- A new production channel exposes both stable model names through the adapter.
+- A new production channel exposes `banana-flash` through the adapter.
+- `banana-pro` remains implemented but is not published until production-path stability evidence
+  satisfies the operator's stability-first policy.
 - Existing image gateway identity, environment, and container remain unchanged.
 - Rollback removes the new channel, Nginx location, and adapter container without touching data.
+
+## Production Outcome
+
+- `banana-flash`: deployed through channel #53, Haina vip primary and Rolldek explicit-safe fallback.
+- `banana-pro`: direct and dark-run tests succeeded, but the production-path test failed after 132
+  seconds without billing. It remains hidden from NewAPI abilities.
+- Original Paisio Banana channel #44 remains disabled.
