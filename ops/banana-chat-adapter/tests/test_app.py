@@ -81,7 +81,7 @@ class RequestValidationTests(unittest.TestCase):
             ({"model": "other", "prompt": "x"}, "unsupported_model"),
             ({"model": "banana-flash", "prompt": "x", "n": 2}, "invalid_n"),
             (
-                {"model": "banana-flash", "prompt": "x", "response_format": "b64_json"},
+                {"model": "banana-flash", "prompt": "x", "response_format": "invalid"},
                 "unsupported_response_format",
             ),
             ({"model": "banana-flash", "prompt": "x", "size": "9000x9000"}, "invalid_size"),
@@ -109,6 +109,59 @@ class AuthorizationTests(unittest.TestCase):
 
 
 class ResponseParsingTests(unittest.TestCase):
+    def test_image_download_is_pinned_and_checks_content(self):
+        png = b'\x89PNG\r\n\x1a\n' + b'fixture'
+        response = mock.Mock(status=200)
+        response.getheader.side_effect = lambda name: str(len(png)) if name == 'Content-Length' else 'image/png'
+        response.read1.side_effect = [png, b'']
+        connection = mock.Mock()
+        connection.getresponse.return_value = response
+        tls = mock.Mock()
+        with mock.patch.object(app.socket,'getaddrinfo',return_value=[(2,1,6,'',('8.8.8.8',443))]), mock.patch.object(app.socket,'create_connection') as connect, mock.patch.object(app.ssl,'create_default_context',return_value=tls), mock.patch.object(app.http.client,'HTTPSConnection',return_value=connection):
+            self.assertEqual(app.image_bytes('https://cdn.example/a.png?signature=x'), png)
+        connect.assert_called_once_with(('8.8.8.8',443),timeout=25)
+        tls.wrap_socket.assert_called_once_with(connect.return_value,server_hostname='cdn.example')
+        self.assertEqual(connection.request.call_args.args[:2], ('GET','/a.png?signature=x'))
+        connection.close.assert_called_once()
+
+    def test_image_download_refuses_redirect_and_oversized_body(self):
+        for status, size in [(302, 1),(200, app.MAX_IMAGE_BYTES+1)]:
+            response = mock.Mock(status=status)
+            response.getheader.return_value = str(size)
+            connection = mock.Mock()
+            connection.getresponse.return_value = response
+            with mock.patch.object(app.socket,'getaddrinfo',return_value=[(2,1,6,'',('8.8.8.8',443))]), mock.patch.object(app.socket,'create_connection'), mock.patch.object(app.ssl,'create_default_context'), mock.patch.object(app.http.client,'HTTPSConnection',return_value=connection):
+                with self.assertRaises(app.AdapterError):
+                    app.image_bytes('https://cdn.example/a.png')
+            response.read1.assert_not_called()
+
+    def test_accepts_base64_request_and_converts_url(self):
+        req = app.validate_generation_request({"model":"banana-flash", "prompt":"circle", "response_format":"b64_json"})
+        self.assertEqual(req.response_format, "b64_json")
+        with mock.patch.object(app, "image_bytes", return_value=b"test-image") as download:
+            response = app.image_response(app.UpstreamResult("haina", ["https://cdn.example/a.png"],200,1), req.response_format)
+        self.assertEqual(base64.b64decode(response['data'][0]['b64_json']), b'test-image')
+        download.assert_called_once()
+
+    def test_base64_inline_image_needs_no_download(self):
+        with mock.patch.object(app, "image_bytes") as download:
+            result = app.image_response(app.UpstreamResult("haina", ["data:image/png;base64,aGVsbG8="],200,1), "b64_json")
+        self.assertEqual(result['data'], [{'b64_json':'aGVsbG8='}])
+        download.assert_not_called()
+
+    def test_private_and_mixed_dns_image_hosts_are_rejected_before_connect(self):
+        for addresses in (["127.0.0.1"], ["169.254.169.254"], ["8.8.8.8", "10.0.0.1"], ["::1"]):
+            answers = [(2,1,6,'',(ip,443)) for ip in addresses]
+            with mock.patch.object(app.socket, 'getaddrinfo', return_value=answers), mock.patch.object(app.socket, 'create_connection') as connect:
+                with self.assertRaises(app.AdapterError):
+                    app.image_bytes('https://cdn.example/a.png')
+                connect.assert_not_called()
+
+    def test_invalid_image_url_is_rejected(self):
+        for url in ['http://cdn.example/a.png','https://user:pass@cdn.example/a.png','https://cdn.example:9443/a.png']:
+            with self.assertRaises(app.AdapterError):
+                app.image_bytes(url)
+
     def test_extracts_markdown_https_image(self):
         parsed = app.extract_image_references("Created: ![image](https://cdn.example/a.png)")
         self.assertEqual(parsed, ["https://cdn.example/a.png"])

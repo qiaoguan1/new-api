@@ -296,18 +296,21 @@ def collect_classic(balance_collector, credential, website):
             "Content-Type": "application/json",
         }
     )
-    balance_collector.standard_login(session, origin, username, password)
-    self_data = balance_collector.standard_self(session, origin)
-    records = fetch_classic_recharges(session, origin)
-    result = summarize_recharges(records)
-    result.update(
-        {
-            "status": "complete",
-            "adapter": "newapi_classic_topup_self",
-            "current_balance_usd": balance_collector.q2usd(self_data.get("quota")),
-        }
-    )
-    return result
+    try:
+        balance_collector.standard_login(session, origin, username, password)
+        self_data = balance_collector.standard_self(session, origin)
+        records = fetch_classic_recharges(session, origin)
+        result = summarize_recharges(records)
+        result.update(
+            {
+                "status": "complete",
+                "adapter": "newapi_classic_topup_self",
+                "current_balance_usd": balance_collector.q2usd(self_data.get("quota")),
+            }
+        )
+        return result
+    finally:
+        balance_collector.standard_logout(session, origin)
 
 
 def collect_provider(balance_collector, slug, credential, website):
