@@ -152,10 +152,16 @@ def standard_login(session, origin, username, password):
     )
     body = json_response(response, "classic login")
     if response.status_code != 200 or not body.get("success"):
+        code = clean_error(body.get("code"), (username, password))
+        message = clean_error(body.get("message"), (username, password))
+        detail = f"{code}: {message}" if code and code != "unknown error" else message
         raise RuntimeError(
-            f"classic login failed (http {response.status_code}): {clean_error(body.get('message'))}"
+            f"classic login failed (http {response.status_code}): {detail}"
         )
     data = body.get("data") or {}
+    # Keep the session identity only long enough to revoke this login in finally.
+    session._monitor_login_origin = origin
+    session._monitor_login_sid = (data.get("session") or {}).get("sid")
     # Support both legacy direct-user login responses and newer token+nested-user responses.
     user = data.get("user") if isinstance(data.get("user"), dict) else data
     access_token = data.get("access_token")
@@ -166,6 +172,31 @@ def standard_login(session, origin, username, password):
         raise RuntimeError("classic login succeeded without user id")
     session.headers.update({"New-Api-User": str(user_id)})
     return user.get("group") or ""
+
+
+def standard_logout(session, origin):
+    """Revoke only this collector's login, including when collection raised."""
+    try:
+        if getattr(session, "_monitor_login_origin", None) != origin:
+            return
+        sid = getattr(session, "_monitor_login_sid", None)
+        if sid:
+            response = session.post(
+                origin + "/api/user/auth/logout",
+                headers={"Origin": origin, "Referer": origin + "/", "X-Auth-Session": sid},
+                timeout=TIMEOUT, allow_redirects=False,
+            )
+        else:
+            response = session.get(origin + "/api/user/logout", timeout=TIMEOUT, allow_redirects=False)
+        payload = response.json() if response.status_code == 200 else {}
+        if response.status_code != 200 or payload.get("success") is not True:
+            print("collector logout was not acknowledged for " + urlsplit(origin).hostname, file=sys.stderr)
+    except Exception:
+        print("collector logout failed for " + urlsplit(origin).hostname, file=sys.stderr)
+    finally:
+        session._monitor_login_origin = None
+        session._monitor_login_sid = None
+        session.close()
 
 
 def standard_self(session, origin):
@@ -916,6 +947,8 @@ def probe_balance(slug, credential, website):
         return _balance_probe_result("newapi_classic", q2usd(self_data.get("quota")), rate)
     except Exception as exc:
         errors.append(clean_error(exc, (username, password)))
+    finally:
+        standard_logout(session, origin)
 
     session = requests.Session()
     session.headers.update(
@@ -1283,6 +1316,8 @@ def collect_one(slug, credential, website, ledger, day):
         )
     except Exception as exc:
         errors.append(clean_error(exc, (username, password)))
+    finally:
+        standard_logout(session, origin)
 
     session = requests.Session()
     session.headers.update(
