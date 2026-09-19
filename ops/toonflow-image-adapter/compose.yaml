@@ -1,0 +1,24 @@
+services:
+  image-adapter:
+    image: xtai/toonflow-image-adapter:issue165
+    build: .
+    container_name: xtai-toonflow-image-adapter
+    restart: unless-stopped
+    read_only: true
+    user: '10001:10001'
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    mem_limit: 512m
+    volumes:
+      - /opt/ai-api-stack/secrets/upstreams/toonflow-image-adapter.key:/run/secrets/adapter:ro
+      - /opt/ai-api-stack/secrets/upstreams/toonflow-image-upstream.key:/run/secrets/upstream:ro
+      - /opt/xtai-toonflow-image-adapter/data:/data
+    networks: [app-net]
+    healthcheck:
+      test: [CMD, python, '-c', "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8094/health',timeout=2).read()"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+networks:
+  app-net:
+    external: true
