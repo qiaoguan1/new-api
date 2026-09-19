@@ -5,10 +5,14 @@ from __future__ import annotations
 
 import base64
 import hmac
+import http.client
+import ipaddress
 import json
 import os
 import re
 import stat
+import socket
+import ssl
 import threading
 import time
 import urllib.error
@@ -25,6 +29,7 @@ from typing import Any, Callable, Mapping
 MAX_REQUEST_BYTES = 64 * 1024
 MAX_PROMPT_CHARACTERS = 32_000
 MAX_UPSTREAM_RESPONSE_BYTES = 2 * 1024 * 1024
+MAX_IMAGE_BYTES = 20 * 1024 * 1024
 SUPPORTED_MODELS = ("banana-flash", "banana-pro")
 SAFE_REJECTION_MARKERS = (
     "no available channel",
@@ -91,6 +96,7 @@ class GenerationRequest:
     model: str
     prompt: str
     size: str
+    response_format: str = "url"
 
 
 @dataclass(frozen=True)
@@ -184,17 +190,18 @@ def validate_generation_request(raw: Any) -> GenerationRequest:
         raise AdapterError(HTTPStatus.BAD_REQUEST, "invalid_prompt", "prompt is missing or too long")
     if isinstance(raw.get("n", 1), bool) or raw.get("n", 1) != 1:
         raise AdapterError(HTTPStatus.BAD_REQUEST, "invalid_n", "only n=1 is supported")
-    if str(raw.get("response_format") or "url") != "url":
+    response_format = str(raw.get("response_format") or "url")
+    if response_format not in {"url", "b64_json"}:
         raise AdapterError(
             HTTPStatus.BAD_REQUEST,
             "unsupported_response_format",
-            "only URL responses are supported",
+            "response_format must be url or b64_json",
         )
     size = str(raw.get("size") or "1024x1024").strip().lower()
     match = SIZE_RE.fullmatch(size)
     if not match or any(not 256 <= int(value) <= 4096 for value in match.groups()):
         raise AdapterError(HTTPStatus.BAD_REQUEST, "invalid_size", "image size is invalid")
-    return GenerationRequest(model=model, prompt=prompt.strip(), size=size)
+    return GenerationRequest(model=model, prompt=prompt.strip(), size=size, response_format=response_format)
 
 
 def validate_content_length(value: str) -> int:
@@ -354,11 +361,73 @@ def generate_with_routes(
     raise AdapterError(HTTPStatus.BAD_GATEWAY, "upstream_failed", "upstream request failed")
 
 
-def image_response(result: UpstreamResult) -> dict[str, Any]:
+def image_bytes(reference: str) -> bytes:
+    """Read a bounded public HTTPS image; pin DNS and never follow redirects."""
+    connection = None
+    try:
+        parsed = urllib.parse.urlsplit(reference)
+        if (parsed.scheme != "https" or not parsed.hostname or parsed.username
+                or parsed.password or parsed.port not in (None, 443)
+                or parsed.fragment):
+            raise ValueError("invalid image URL")
+        addresses = socket.getaddrinfo(parsed.hostname, 443, type=socket.SOCK_STREAM)
+        if not addresses or any(not ipaddress.ip_address(row[4][0]).is_global for row in addresses):
+            raise ValueError("non-public image address")
+        # Connect to the validated numeric address, retaining the original TLS hostname.
+        context = ssl.create_default_context()
+        connection = http.client.HTTPSConnection(parsed.hostname, timeout=25, context=context)
+        raw_socket = socket.create_connection((addresses[0][4][0], 443), timeout=25)
+        try:
+            connection.sock = context.wrap_socket(raw_socket, server_hostname=parsed.hostname)
+        except Exception:
+            raw_socket.close()
+            raise
+        path = urllib.parse.urlunsplit(("", "", parsed.path or "/", parsed.query, ""))
+        connection.request("GET", path, headers={"Accept": "image/png,image/jpeg,image/webp"})
+        response = connection.getresponse()
+        if response.status != 200:
+            raise ValueError("image fetch did not return 200")
+        length = response.getheader("Content-Length")
+        if length is not None and not 0 < int(length) <= MAX_IMAGE_BYTES:
+            raise ValueError("image length outside limit")
+        content_type = (response.getheader("Content-Type") or "").split(";", 1)[0].strip().lower()
+        if content_type not in {"image/png", "image/jpeg", "image/webp", "application/octet-stream"}:
+            raise ValueError("unexpected image content type")
+        deadline = time.monotonic() + 25
+        chunks = []
+        total = 0
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError("image download deadline")
+            if connection.sock is not None:
+                connection.sock.settimeout(remaining)
+            chunk = response.read1(min(65536, MAX_IMAGE_BYTES + 1 - total))
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > MAX_IMAGE_BYTES:
+                raise ValueError("image too large")
+            chunks.append(chunk)
+        image = b"".join(chunks)
+        if not (image.startswith(b"\x89PNG\r\n\x1a\n") or image.startswith(b"\xff\xd8\xff")
+                or (image.startswith(b"RIFF") and image[8:12] == b"WEBP")):
+            raise ValueError("invalid image bytes")
+        return image
+    except (ValueError, OSError, http.client.HTTPException) as error:
+        raise AdapterError(HTTPStatus.BAD_GATEWAY, "image_download_failed", "generated image could not be retrieved") from error
+    finally:
+        if connection is not None:
+            connection.close()
+
+
+def image_response(result: UpstreamResult, response_format: str = "url") -> dict[str, Any]:
     data = []
     for reference in result.image_references:
         if reference.startswith("data:image/"):
             data.append({"b64_json": reference.split(",", 1)[1]})
+        elif response_format == "b64_json":
+            data.append({"b64_json": base64.b64encode(image_bytes(reference)).decode("ascii")})
         else:
             data.append({"url": reference})
     return {"created": int(time.time()), "data": data}
@@ -485,7 +554,7 @@ def handler_class(runtime: Runtime) -> type[BaseHTTPRequestHandler]:
                         route, generation, runtime.config.upstream_timeout_seconds
                     ),
                 )
-                success = True
+                response_payload = image_response(result, request.response_format)
                 print(
                     json.dumps(
                         {
@@ -499,7 +568,8 @@ def handler_class(runtime: Runtime) -> type[BaseHTTPRequestHandler]:
                     ),
                     flush=True,
                 )
-                self.send_json(HTTPStatus.OK, image_response(result))
+                self.send_json(HTTPStatus.OK, response_payload)
+                success = True
             except AdapterError as error:
                 print(
                     json.dumps(
