@@ -418,14 +418,12 @@ class PricingPlanTests(unittest.TestCase):
             "gpt-image-2": {"available": True, "upstream_model": "gpt-image-2-adobe"}
         }
 
-        with self.assertRaisesRegex(pricing.PricingError, "mapping mismatch"):
-            pricing.build_pricing_plan(
-                ledger(codeplan=source()),
-                audit(mapped),
-                DAY,
-                self.current_options(),
-                max_change_ratio=50.0,
-            )
+        plan = pricing.build_pricing_plan(
+            ledger(codeplan=source()), audit(mapped), DAY,
+            self.current_options(), max_change_ratio=50.0,
+        )
+        self.assertEqual(plan["decisions"][0]["action"], "skip")
+        self.assertEqual(plan["decisions"][0]["reason"], "critical_model_alert")
 
     def test_mapped_model_uses_only_mapped_manual_price_key(self):
         mapped = channel(38, "codeplan", ["gpt-image-2"])
@@ -954,7 +952,7 @@ class PricingPlanTests(unittest.TestCase):
             mock.patch.object(pricing, "read_json", side_effect=lambda path, *a, **k: paths[path]),
             mock.patch.object(pricing, "get_option", side_effect=lambda key: options[key]),
             mock.patch.object(pricing, "protected_video_models", return_value=set()),
-            mock.patch.object(pricing, "build_pricing_plan", return_value=plan) as build,
+            mock.patch.object(pricing, "build_isolated_pricing_plan", return_value=plan) as build,
             mock.patch.object(pricing, "append_run_log"),
         ):
             code = pricing.main(["--dry-run"])

@@ -6,6 +6,7 @@ import json
 import math
 import os
 import pathlib
+import signal
 import sys
 import time
 from urllib.parse import urlsplit
@@ -20,6 +21,7 @@ OUTPUT_PATH = ROOT / "data" / "upstream-recharge-summary.json"
 BALANCE_SCRIPT_PATH = pathlib.Path(__file__).with_name("fetch-upstream-balance.py")
 PAGE_SIZE = 100
 MAX_PAGES = 100
+PROVIDER_DEADLINE_SECONDS = 120
 
 
 def _load_balance_collector():
@@ -296,21 +298,24 @@ def collect_classic(balance_collector, credential, website):
             "Content-Type": "application/json",
         }
     )
-    balance_collector.standard_login(session, origin, username, password)
-    self_data = balance_collector.standard_self(session, origin)
-    records = fetch_classic_recharges(session, origin)
-    result = summarize_recharges(records)
-    result.update(
-        {
-            "status": "complete",
-            "adapter": "newapi_classic_topup_self",
-            "current_balance_usd": balance_collector.q2usd(self_data.get("quota")),
-        }
-    )
-    return result
+    try:
+        balance_collector.standard_login(session, origin, username, password)
+        self_data = balance_collector.standard_self(session, origin)
+        records = fetch_classic_recharges(session, origin)
+        result = summarize_recharges(records)
+        result.update(
+            {
+                "status": "complete",
+                "adapter": "newapi_classic_topup_self",
+                "current_balance_usd": balance_collector.q2usd(self_data.get("quota")),
+            }
+        )
+        return result
+    finally:
+        balance_collector.standard_logout(session, origin)
 
 
-def collect_provider(balance_collector, slug, credential, website):
+def _collect_provider(balance_collector, slug, credential, website):
     if slug == "toonflow":
         origin = validate_toonflow_origin(
             balance_collector.origin_of(credential.get("website_url") or website)
@@ -336,26 +341,34 @@ def collect_provider(balance_collector, slug, credential, website):
             }
         )
         return result
+    return collect_classic(balance_collector, credential, website)
+
+
+def unavailable_provider():
+    """Never log upstream exception text: it may contain credentials or orders."""
+    return {"status": "unavailable", "adapter": "unknown",
+            "current_balance_usd": None, "unavailable_reason": "provider_collection_failed"}
+
+
+def collect_provider(balance_collector, slug, credential, website):
+    """An expired login or malformed response affects only this provider."""
+    def deadline_expired(signum, frame):
+        raise TimeoutError("provider_deadline_exceeded")
+
+    previous_handler = None
     try:
-        return collect_classic(balance_collector, credential, website)
-    except Exception as exc:
-        # A usage-v1 account may still expose a balance, but no recharge-history
-        # contract is known. Never infer recharge from that balance.
-        balance = None
-        try:
-            balance = balance_collector.probe_balance(slug, credential, website).get(
-                "balance_usd"
-            )
-        except Exception:
-            pass
-        return {
-            "status": "unavailable",
-            "adapter": "unknown",
-            "current_balance_usd": balance,
-            "unavailable_reason": balance_collector.clean_error(
-                exc, (credential.get("username"), credential.get("password"))
-            ),
-        }
+        # Cron runs on Linux in the main thread. Bound pagination and even a
+        # slowly trickling response; socket timeouts alone are not deadlines.
+        if hasattr(signal, "SIGALRM"):
+            previous_handler = signal.signal(signal.SIGALRM, deadline_expired)
+            signal.alarm(PROVIDER_DEADLINE_SECONDS)
+        return _collect_provider(balance_collector, slug, credential, website)
+    except Exception:
+        return unavailable_provider()
+    finally:
+        if previous_handler is not None:
+            signal.alarm(0)
+            signal.signal(signal.SIGALRM, previous_handler)
 
 
 def main():
@@ -364,7 +377,12 @@ def main():
     credentials = read_json(CREDENTIALS_PATH, required=True)
     providers = {}
     for slug, name, website, credential in select_targets(upstreams, credentials):
-        result = collect_provider(balance_collector, slug, credential, website)
+        try:
+            result = collect_provider(balance_collector, slug, credential, website)
+            if not isinstance(result, dict):
+                result = unavailable_provider()
+        except Exception:
+            result = unavailable_provider()
         providers[slug] = {"name": name, **result}
     payload = {
         "generated_at": int(time.time()),
@@ -376,7 +394,7 @@ def main():
         ),
     }
     write_private_json(OUTPUT_PATH, payload)
-    print(json.dumps(payload, ensure_ascii=False, sort_keys=True))
+    print(json.dumps({key: payload[key] for key in ("generated_at", "complete", "unavailable")}, sort_keys=True))
     return 0
 
 

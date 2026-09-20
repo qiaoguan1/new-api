@@ -293,8 +293,14 @@ def build_audit_policy(daily_audit, day):
         if not isinstance(channel, dict) or channel.get("status") != 1:
             continue
         models = _model_names(channel)
-        price_keys = _channel_price_keys(channel, models)
         discovered_models.update(models)
+        try:
+            price_keys = _channel_price_keys(channel, models)
+        except (PricingError, ValueError, TypeError):
+            # Preserve fail-closed pricing for every model on the bad channel,
+            # including shared routes, while unrelated models can continue.
+            blocked_models.update(models)
+            continue
         slug = channel.get("upstream_slug")
         if isinstance(slug, str) and slug:
             for model in models:
@@ -989,6 +995,45 @@ def build_pricing_plan(
     }
 
 
+def build_isolated_pricing_plan(ledger, daily_audit, day, current_options, *,
+                                max_change_ratio, protected_videos=(),
+                                manual_evidence=None, target_models=None):
+    """Isolate model-specific evidence failures without relaxing shared costs."""
+    kwargs = {"max_change_ratio": max_change_ratio,
+              "protected_videos": protected_videos, "manual_evidence": manual_evidence}
+    # Validate global date, currency/group and inventory before considering writes.
+    plan = build_pricing_plan(ledger, daily_audit, day, current_options,
+                              target_models=set(), **kwargs)
+    models = set(build_audit_policy(daily_audit, day)["discovered_models"])
+    if target_models is not None:
+        models &= target_models
+    for model in sorted(models):
+        try:
+            item = build_pricing_plan(ledger, daily_audit, day, current_options,
+                                      target_models={model}, **kwargs)
+        except Exception:
+            plan["decisions"].append({"model": model, "action": "skip",
+                                       "reason": "model_evidence_error"})
+            continue
+        plan["decisions"].extend(item["decisions"])
+        for decision in item["decisions"]:
+            if decision.get("action") != "apply":
+                continue
+            for key in OPTION_KEYS:
+                if model in item["options"][key]:
+                    plan["options"][key][model] = item["options"][key][model]
+                else:
+                    plan["options"][key].pop(model, None)
+    return plan
+
+
+def business_status(decisions):
+    """Separate process completion from whether pricing evidence is actionable."""
+    blocked = any(x.get("reason") in {"upstream_collection_incomplete", "no_trusted_cost_evidence", "model_evidence_error", "critical_model_alert"} for x in decisions)
+    applied = any(x.get("action") == "apply" for x in decisions)
+    return ("partial" if applied else "blocked") if blocked else "complete"
+
+
 def backup_pricing_options(day, options):
     """Create a mode-0600 pricing-only backup before a live transaction."""
     timestamp = beijing_now().strftime("%Y%m%dT%H%M%S%z")
@@ -1018,6 +1063,7 @@ def _summary(plan, dry_run):
     return {
         "date": plan.get("date"),
         "dry_run": dry_run,
+        "business_status": business_status(decisions),
         "discovered_models": len(decisions),
         "applied_models": sum(1 for item in decisions if item.get("action") == "apply"),
         "skipped_models": sum(1 for item in decisions if item.get("action") != "apply"),
@@ -1094,7 +1140,7 @@ def main(argv=None):
         max_change_ratio = float(
             os.environ.get("CHANNEL_MONITOR_MAX_CHANGE_RATIO", DEFAULT_MAX_CHANGE_RATIO)
         )
-        plan = build_pricing_plan(
+        plan = build_isolated_pricing_plan(
             ledger,
             daily_audit,
             day,
@@ -1113,6 +1159,7 @@ def main(argv=None):
             "generated_at": generated_at,
             "max_change_ratio": max_change_ratio,
             "status": "complete",
+            "business_status": business_status(plan["decisions"]),
             "incomplete_credentials": incomplete_credentials,
         }
         if not args.dry_run and any(
