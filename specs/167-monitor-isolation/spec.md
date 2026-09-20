@@ -9,4 +9,4 @@ Acceptance:
 - Report blocked/partial business outcomes instead of pretending zero writes means full success.
 - Backup production scripts, test, deploy only these scripts, dry-run pricing then execute only validated decisions, deliver one current daily report and verify deduplication.
 
-Tasks: [x] issue/project and production source; [ ] regression tests; [ ] implementation; [ ] review; [ ] backup/deploy; [ ] live verification.
+Tasks: [x] issue/project and production source; [x] regression tests; [x] implementation; [x] review; [x] backup/deploy; [x] live verification. Scope limitation and remaining pricing policy decision are documented in verification.md.
