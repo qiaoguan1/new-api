@@ -88,11 +88,12 @@ class DigestBuilderTests(unittest.TestCase):
         self.assertEqual(report["pricing"]["protected_video"], 1)
         self.assertEqual(report["audit"]["ok_channels"], 1)
 
-    def test_missing_daily_artifacts_fail_closed_instead_of_sending_partial_report(self):
+    def test_missing_daily_artifacts_send_explicit_partial_report(self):
         upstreams, ledger, audit, pricing, live = self.fixture()
         del ledger["days"][DAY]
-        with self.assertRaisesRegex(digest.DigestError, "ledger_day_missing"):
-            digest.build_digest(upstreams, ledger, audit, pricing, live, DAY, generated_at=200)
+        report = digest.build_digest(upstreams, ledger, audit, pricing, live, DAY, generated_at=200)
+        self.assertIn("ledger_day_missing", report["warnings"])
+        self.assertIsNone(report["channels"][0]["daily_cost_cny"])
 
     def test_delivery_state_is_written_only_after_success_and_deduplicates(self):
         upstreams, ledger, audit, pricing, live = self.fixture()
@@ -189,7 +190,7 @@ class DigestBuilderTests(unittest.TestCase):
         self.assertNotIn("trade_no", json.dumps(payload))
         self.assertNotIn("private upstream details", json.dumps(payload))
 
-    def test_stale_recharge_summary_fails_closed(self):
+    def test_stale_recharge_summary_does_not_block_email(self):
         recharges = {
             "source": "authenticated_upstream_recharge_records",
             "generated_at": 1,
@@ -197,10 +198,9 @@ class DigestBuilderTests(unittest.TestCase):
             "unavailable": 0,
             "providers": {},
         }
-        with self.assertRaisesRegex(digest.DigestError, "recharge_summary_stale"):
-            digest.build_digest(
-                *self.fixture(), DAY, generated_at=200_000, recharges=recharges
-            )
+        report = digest.build_digest(*self.fixture(), DAY, generated_at=200_000, recharges=recharges)
+        self.assertIn("recharge_summary_stale", report["warnings"])
+        self.assertIsNone(report["recharges"]["paid_cny_total"])
 
 
 if __name__ == "__main__":
