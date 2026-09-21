@@ -1,0 +1,22 @@
+services:
+  image-adapter:
+    image: xtai/image25-adapter:issue169
+    build: .
+    container_name: xtai-image25-adapter
+    restart: unless-stopped
+    read_only: true
+    user: '10001:10001'
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    mem_limit: 512m
+    volumes:
+      - /opt/xtai-image25-adapter/config.json:/run/secrets/config.json:ro
+    networks: [app-net]
+    healthcheck:
+      test: [CMD, python, '-c', "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8095/health',timeout=2).read()"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+networks:
+  app-net:
+    external: true
