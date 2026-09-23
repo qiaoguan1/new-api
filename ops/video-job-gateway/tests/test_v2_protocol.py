@@ -78,7 +78,7 @@ class BillingV2ProtocolTests(unittest.TestCase):
         config = Config(
             token="test-token",
             data_dir=pathlib.Path(directory),
-            catalog_file=ROOT / "catalog.json",
+            catalog_file=ROOT / "tests" / "fixtures" / "catalog-20260814.json",
             providers={name: adapter.config for name, adapter in adapters.items()},
             pricing_file=ROOT / "relay-pricing.json",
             public_base_url="https://api.aixingtuyun.com",

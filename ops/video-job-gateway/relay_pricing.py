@@ -11,6 +11,7 @@ import urllib.request
 from decimal import Decimal, InvalidOperation, ROUND_CEILING
 from pathlib import Path
 from typing import Any, Iterable
+from nodyhub import NODY_MODELS, verified_row, verified_quote
 
 
 PRICE_CONTRACT_VERSION = "xtai-video-pricing-v1"
@@ -181,6 +182,9 @@ class RelayPricing:
         dynamic_revision, dynamic_rates = self._dynamic_snapshot()
         result: list[dict[str, Any]] = []
         for model, resolution in sorted(set(pairs)):
+            if model in NODY_MODELS:
+                result.append(verified_row(model, resolution))
+                continue
             row = ((self.fallback.get("models") or {}).get(model) or {}).get(resolution)
             if not isinstance(row, dict):
                 continue
@@ -210,6 +214,9 @@ class RelayPricing:
         """Billing-v2 reservation pricing; never consumes marketplace pricing."""
         result: list[dict[str, Any]] = []
         for model, resolution in sorted(set(pairs)):
+            if model in NODY_MODELS:
+                result.append(verified_row(model, resolution))
+                continue
             row = ((self.fallback.get("models") or {}).get(model) or {}).get(resolution)
             if not isinstance(row, dict):
                 continue
@@ -272,6 +279,13 @@ class RelayPricing:
         *,
         input_rate_class: str = "without_video_input",
     ) -> dict[str, Any]:
+        if model in NODY_MODELS:
+            if input_rate_class != "without_video_input":
+                raise RelayPricingError("Nody reference inputs are not enabled")
+            try:
+                return verified_quote(model, resolution, duration)
+            except ValueError as error:
+                raise RelayPricingError(str(error)) from error
         rows = self.official_rows([(str(model or ""), str(resolution or "").lower())])
         if len(rows) != 1:
             raise RelayPricingError("relay official price is unavailable for this model and resolution")

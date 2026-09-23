@@ -1,0 +1,13 @@
+ARG BASE_IMAGE=xtai/video-job-gateway:toonflow-drain-20260902-v2
+FROM ${BASE_IMAGE}
+USER root
+ARG XTAI_VCS_REF
+ARG XTAI_CATALOG_SHA256
+ARG XTAI_SOURCE_SHA256
+COPY app.py adapters.py billing_collectors.py credential_lifecycle.py catalog.py reference_contract.py release_integrity.py relay_pricing.py routing.py store.py nodyhub.py catalog.json relay-pricing.json /app/
+RUN python -c "import sys; from release_integrity import verify_release_identity; verify_release_identity(sys.argv[1],sys.argv[2],'/app/catalog.json',sys.argv[3],'/app')" "$XTAI_VCS_REF" "$XTAI_CATALOG_SHA256" "$XTAI_SOURCE_SHA256"
+LABEL org.opencontainers.image.revision="${XTAI_VCS_REF}" \
+      com.aixingtuyun.video.catalog-sha256="${XTAI_CATALOG_SHA256}" \
+      com.aixingtuyun.video.source-sha256="${XTAI_SOURCE_SHA256}"
+USER gateway
+CMD ["python", "/app/app.py"]

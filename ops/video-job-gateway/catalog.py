@@ -112,7 +112,7 @@ class Catalog:
                 route_aspect_ratios = tuple(_strings(route_source.get("aspect_ratios"), 20))
                 billing_mode = str(route_source.get("billing_mode") or "").strip().lower()
                 routing_unit_cost = str(route_source.get("routing_unit_cost") or "").strip()
-                if provider not in {"paisio", "rolldek", "toonflow"} or not upstream_model:
+                if provider not in {"paisio", "rolldek", "toonflow", "nodyhub"} or not upstream_model:
                     raise CatalogError(f"video relay route provider/model is invalid for {model_id}")
                 if route_resolution and resolutions and route_resolution not in resolutions:
                     raise CatalogError(f"video relay route resolution is invalid for {model_id}")

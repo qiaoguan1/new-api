@@ -17,6 +17,7 @@ RUNTIME_RELEASE_FILES = (
     "catalog.json",
     "catalog.py",
     "credential_lifecycle.py",
+    "nodyhub.py",
     "reference_contract.py",
     "relay-pricing.json",
     "relay_pricing.py",
