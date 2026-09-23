@@ -1,7 +1,10 @@
 """One explicitly authorized alternate-entry test; cap spend and disable key finally."""
 import importlib.util,json,os,pathlib,re,requests,sys,time
 os.umask(0o077)
-ROOT=pathlib.Path('/opt/ai-api-stack/channel-monitor');OUT=pathlib.Path('/opt/ai-api-stack/backups/nodyhub171-evidence/grok-image-chat-retest.json')
+ROOT=pathlib.Path('/opt/ai-api-stack/channel-monitor')
+attempt=sys.argv[1] if len(sys.argv)>1 else ''
+assert not attempt or re.fullmatch(r'[a-zA-Z0-9_-]{1,60}',attempt),'Invalid operator attempt label'
+OUT=pathlib.Path('/opt/ai-api-stack/backups/nodyhub171-evidence')/('grok-image-chat-retest'+('-'+attempt if attempt else '')+'.json')
 assert not OUT.exists(),'Already attempted: inspect saved evidence instead of resubmitting'
 sys.path[:0]=[str(ROOT),str(ROOT/'scripts')]
 spec=importlib.util.spec_from_file_location('b',ROOT/'scripts/fetch-upstream-balance.py');b=importlib.util.module_from_spec(spec);spec.loader.exec_module(b)

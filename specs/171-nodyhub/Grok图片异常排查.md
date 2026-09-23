@@ -33,3 +33,7 @@
 需要NodyHub处理：按原task_id查内部供应商任务，给出能返回原图片的查询接口/结果；无法交付时核对并退回.45额度；确认同步图片API或完整异步协议及该模型稳定性。Nody的密钥没有被发送到APIMart或其他第三方域名。
 
 证据保存在服务器私有目录/opt/ai-api-stack/backups/nodyhub171-evidence/grok-image-test-response.json及grok-image-chat-retest.json。
+
+## 用户再次授权的单次重试（22:17）
+
+再次仅提交一笔相同模型的聊天生图请求。13.25秒后仍返回HTTP422、apimart_error及稍后重试提示；request ID为20260923221710413738315wmXMwxLq。没有图片。账户余额仍9.591176额度，测试令牌累计用量仍9.62额度，本次没有新增扣费。令牌2553已停用，未做自动重试。证据文件：grok-image-chat-retest-user-retry-20260923-2216.json。
