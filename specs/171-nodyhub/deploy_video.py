@@ -118,12 +118,60 @@ def probe(name):
     else:raise RuntimeError('authentication missing')
     print(json.dumps({'health':health,'nody_available':len(nody),'pricing_rows':len(prices['pricing']['models']),'auth_negative':401},ensure_ascii=False))
 
+def promote(image):
+    """Drain before replacement; never restore a stale database on rollback."""
+    info=inspect(PROD)
+    assert info['Image']==json.loads((BACKUP/'production.before.json').read_text())['Image']
+    drain=STATE/'DRAIN'
+    if drain.exists():raise RuntimeError('pre-existing production drain requires review')
+    drain.write_text('Nody171 controlled deployment\n');os.chown(drain,10002,10002)
+    source=sqlite3.connect(STATE/'video-jobs.sqlite3')
+    active=source.execute("select count(*) from video_jobs where status in ('queued','submitting','running','reconciling')").fetchone()[0]
+    if active:
+        drain.unlink();raise RuntimeError('active production jobs, retry after completion')
+    target=sqlite3.connect(BACKUP/'production-consistent.sqlite3');source.backup(target);target.close();source.close()
+    old=PROD+'-rollback-nody171'
+    subprocess.run(['docker','stop','--time','30',PROD],check=True,stdout=subprocess.DEVNULL)
+    subprocess.run(['docker','rename',PROD,old],check=True)
+    try:
+        run_container(PROD,image,build_env(info),STATE,production=True)
+        for attempt in range(10):
+            try:request(PROD,'/health');break
+            except Exception:
+                if attempt==9:raise
+                time.sleep(1)
+        caps=request(PROD,'/v1/capabilities')
+        rows=caps['capabilities']['video']['models']
+        assert len([x for x in rows if x['id']=='omni-flash'])==1
+        subprocess.run(['docker','exec','ai-api-stack-nginx-1','nginx','-t'],check=True)
+        subprocess.run(['docker','exec','ai-api-stack-nginx-1','nginx','-s','reload'],check=True)
+        env_file=SECRETS/'gateway-production.env'
+        if env_file.exists():
+            shutil.copy2(env_file,BACKUP/'gateway-production.env.before')
+            lines=env_file.read_text().splitlines()
+            updates={k:v for k,v in build_env(info).items() if k.startswith('VIDEO_JOB_NODYHUB_') or k in {'VIDEO_JOB_GATEWAY_ENABLED_PROVIDERS','VIDEO_JOB_GATEWAY_V21_APPROVED_PROVIDERS'}}
+            kept=[line for line in lines if line.split('=',1)[0] not in updates]
+            fd=os.open(env_file,os.O_WRONLY|os.O_TRUNC)
+            with os.fdopen(fd,'w') as stream:stream.write('\n'.join(kept+[k+'='+v for k,v in updates.items()])+'\n')
+        drain.unlink()
+        private_json(BACKUP/'promotion.json',{'image':image,'old_container':old,'time':int(time.time())})
+        print(json.dumps({'production':PROD,'image':image,'rollback':old,'traffic':'enabled'}))
+    except Exception:
+        # The drain is still closed, so the replaced container has no new submits.
+        subprocess.run(['docker','rm','-f',PROD],check=False,stdout=subprocess.DEVNULL)
+        subprocess.run(['docker','rename',old,PROD],check=True)
+        subprocess.run(['docker','start',PROD],check=True,stdout=subprocess.DEVNULL)
+        subprocess.run(['docker','exec','ai-api-stack-nginx-1','nginx','-s','reload'],check=True)
+        if drain.exists():drain.unlink()
+        raise
+
 def main():
-    parser=argparse.ArgumentParser();parser.add_argument('action',choices=['auth','billing','canary','probe']);parser.add_argument('--release',type=Path);parser.add_argument('--image');parser.add_argument('--name',default=CANARY)
+    parser=argparse.ArgumentParser();parser.add_argument('action',choices=['auth','billing','canary','probe','promote']);parser.add_argument('--release',type=Path);parser.add_argument('--image');parser.add_argument('--name',default=CANARY)
     args=parser.parse_args()
     if args.action=='auth':prepare_auth()
     elif args.action=='billing':live_billing(args.release)
     elif args.action=='canary':canary(args.image)
     elif args.action=='probe':probe(args.name)
+    elif args.action=='promote':promote(args.image)
 
 if __name__=='__main__':main()
