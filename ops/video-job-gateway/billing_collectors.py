@@ -306,10 +306,14 @@ class NewAPITaskBillingCollector:
                 headers,
             )
             return self._parse_paisio_record(raw, ledger, task_id)
+        if self.provider_id == "nodyhub":
+            self._terminal_task_row(raw, task_id, require_exact_filter=True)
         return self._parse_newapi_record(raw, task_id)
 
     def collect_failed(self, execution_task_id: str) -> BillingRecord:
         """Resolve Paisio's generation id to its billing id and net failed-task ledger."""
+        if self.provider_id == "nodyhub":
+            return self._collect_nodyhub_failed(execution_task_id)
         if self.provider_id != "paisio":
             raise BillingCollectionError("provider_billing_failure_recovery_unsupported", retry_after_seconds=3600)
         execution_id = str(execution_task_id or "").strip()
@@ -699,7 +703,8 @@ class NewAPITaskBillingCollector:
             for row in items
             if isinstance(row, dict)
             and str(row.get("task_id") or "").strip() == provider_task_id
-            and "video" in str(row.get("action") or "").lower()
+            and ("video" in str(row.get("action") or "").lower()
+                 or (self.provider_id == "nodyhub" and str(row.get("action") or "").lower() == "textgenerate"))
         ]
         if not matches:
             raise BillingCollectionError("provider_billing_record_not_ready", retry_after_seconds=60)
@@ -877,6 +882,66 @@ class NewAPITaskBillingCollector:
             evidence_id=f"paisio-failed-request-ledger:{digest}",
             observed_at=observed_at,
         )
+
+    def _collect_nodyhub_failed(self, task_id: str) -> BillingRecord:
+        """Require an exact terminal task plus its explicit full refund record."""
+        if not re.fullmatch(r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}", task_id):
+            raise BillingCollectionError("provider_billing_task_id_invalid")
+        headers={"Accept":"application/json", "User-Agent":"XingTuVideoBillingCollector/1", **self._auth_headers()}
+        raw=self._request_json(self.endpoint,{"p":1,"page_size":10,"task_id":task_id},headers)
+        if not isinstance(raw,dict) or raw.get("success") is not True:
+            raise BillingCollectionError("provider_billing_response_rejected")
+        data=raw.get("data") if isinstance(raw,dict) else None
+        items=data.get("items") if isinstance(data,dict) else None
+        if not isinstance(items,list) or data.get("total")!=1 or len(items)!=1 or not isinstance(items[0],dict) or items[0].get("task_id")!=task_id:
+            raise BillingCollectionError("provider_billing_record_not_ready")
+        row=items[0]
+        if str(row.get("status") or "").upper() not in {"FAILURE","FAILED","ERROR","CANCELLED","CANCELED"}:
+            raise BillingCollectionError("provider_billing_record_not_final")
+        quota=_nonnegative_decimal(row.get("quota"),"provider_billing_amount_invalid")
+        try:
+            start=int(row.get("submit_time") or 0);end=int(row.get("finish_time") or 0)
+        except (ValueError,TypeError) as error:
+            raise BillingCollectionError("provider_billing_completion_time_invalid") from error
+        if start<=0 or end<start:raise BillingCollectionError("provider_billing_completion_time_invalid")
+        logs=[]
+        expected_total=None
+        seen_ids=set()
+        for page in range(1,self.identity_max_pages+1):
+            ledger=self._request_json(self.ledger_endpoint,{"p":page,"page_size":100,"start_timestamp":start-2,"end_timestamp":end+120},headers)
+            if not isinstance(ledger,dict) or ledger.get("success") is not True:
+                raise BillingCollectionError("provider_billing_response_rejected")
+            ld=ledger.get("data")
+            if not isinstance(ld,dict) or not isinstance(ld.get("items"),list):
+                raise BillingCollectionError("provider_billing_ledger_incomplete")
+            try:total=int(ld.get("total"))
+            except (ValueError,TypeError) as error:
+                raise BillingCollectionError("provider_billing_ledger_incomplete") from error
+            if isinstance(ld.get("total"),bool) or total<0 or total>100*self.identity_max_pages:
+                raise BillingCollectionError("provider_billing_ledger_incomplete")
+            if expected_total is None:expected_total=total
+            if total!=expected_total or len(ld['items'])!=min(100,max(0,total-(page-1)*100)):
+                raise BillingCollectionError("provider_billing_ledger_incomplete")
+            for entry in ld['items']:
+                if not isinstance(entry,dict) or not isinstance(entry.get('id'),int) or entry['id'] in seen_ids:
+                    raise BillingCollectionError("provider_billing_record_ambiguous")
+                seen_ids.add(entry['id']);logs.append(entry)
+            if len(logs)==total:break
+        if len(logs)!=expected_total:
+            raise BillingCollectionError("provider_billing_ledger_incomplete")
+        refunds=[x for x in logs if isinstance(x,dict) and x.get("type")==6 and re.search(r"(?<![0-9a-f-])"+re.escape(task_id)+r"(?![0-9a-f-])",str(x.get("content") or ""))]
+        if len({x.get("id") for x in refunds})!=len(refunds):
+            raise BillingCollectionError("provider_billing_record_ambiguous")
+        if not refunds or sum((_nonnegative_decimal(x.get("quota"),"provider_billing_amount_invalid") for x in refunds),Decimal(0))!=quota:
+            raise BillingCollectionError("provider_billing_refund_not_confirmed")
+        try:refund_times=[int(x.get("created_at") or 0) for x in refunds]
+        except (ValueError,TypeError) as error:
+            raise BillingCollectionError("provider_billing_completion_time_invalid") from error
+        if any(value<start-2 or value>end+120 for value in refund_times):
+            raise BillingCollectionError("provider_billing_completion_time_invalid")
+        observed=_observed_at(max(refund_times))
+        digest=hashlib.sha256(json.dumps([(x.get("id"),x.get("quota")) for x in refunds],sort_keys=True).encode()).hexdigest()
+        return BillingRecord(task_id,"zero_verified","0.000000","nodyhub_authenticated_failed_task_ledger","nodyhub-refund:"+digest,observed)
 
     def _parse_newapi_record(self, raw: Any, provider_task_id: str) -> BillingRecord:
         row = self._terminal_task_row(raw, provider_task_id)

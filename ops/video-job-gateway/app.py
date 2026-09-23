@@ -29,6 +29,7 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from adapters import AdapterError, PaisioAdapter, ProviderConfig, RollDekAdapter, ToonflowAdapter, VideoAdapter
+from nodyhub import NodyHubAdapter, NODY_MODELS
 from billing_collectors import (
     BillingCollectionError,
     NewAPITaskBillingCollector,
@@ -131,10 +132,11 @@ class Config:
         enabled = {
             value.strip().lower()
             for value in os.getenv("VIDEO_JOB_GATEWAY_ENABLED_PROVIDERS", "").split(",")
-            if value.strip().lower() in {"paisio", "rolldek", "toonflow"}
+            if value.strip().lower() in {"paisio", "rolldek", "toonflow", "nodyhub"}
         }
         providers: dict[str, ProviderConfig] = {}
         provider_defaults = {
+            "nodyhub": ("https://nodyhub.com", "getapib.org,webstatic.aiproxy.vip,nody-files.tos-cn-beijing.volces.com"),
             "paisio": ("https://api.paisio.online", "api.paisio.online,cdn.paisio.online"),
             "rolldek": ("https://rolldek.com", "rolldek.com"),
             "toonflow": (
@@ -191,13 +193,13 @@ class Config:
             raise RuntimeError("enabled Toonflow billing collection requires a separate service token")
         newapi_billing_enabled = frozenset(
             provider_id
-            for provider_id in ("paisio", "rolldek")
+            for provider_id in ("paisio", "rolldek", "nodyhub")
             if _env_bool(f"VIDEO_JOB_{provider_id.upper()}_BILLING_ENABLED", False)
         )
         v21_approved_providers = frozenset(
             value.strip().lower()
             for value in os.getenv("VIDEO_JOB_GATEWAY_V21_APPROVED_PROVIDERS", "toonflow").split(",")
-            if value.strip().lower() in {"paisio", "rolldek", "toonflow"}
+            if value.strip().lower() in {"paisio", "rolldek", "toonflow", "nodyhub"}
         )
         newapi_billing_files: dict[str, Path] = {}
         newapi_billing_rates: dict[str, str] = {}
@@ -356,6 +358,8 @@ class Gateway:
             "rolldek": RollDekAdapter(config.providers["rolldek"]),
             "toonflow": ToonflowAdapter(config.providers["toonflow"]),
         }
+        if adapters is None and "nodyhub" in config.providers:
+            self.adapters["nodyhub"] = NodyHubAdapter(config.providers["nodyhub"])
         if billing_collectors is not None:
             self.billing_collectors = dict(billing_collectors)
         else:
@@ -594,6 +598,12 @@ class Gateway:
                 model_id = str(row.get("id") or "")
                 resolutions = [str(value) for value in row.get("resolutions") or []]
                 model = self.catalog.model(model_id)
+                if model_id in NODY_MODELS:
+                    for kind in ("reference_video", "reference_audio", "reference_video_audio"):
+                        row[kind] = {"supported": False, "available": False, "available_resolutions": [], "max_count": 0, "reason": "not_enabled_in_verified_release"}
+                    row["audio_mode"] = "provider_default_only"
+                    row["generate_audio_required"] = True
+                    continue
                 reference_video_resolutions = sorted({
                     route.resolution
                     for route in model.routes
@@ -675,6 +685,13 @@ class Gateway:
     def video_prices(self) -> dict[str, Any]:
         reference_rows = []
         for model, resolution in self.price_pairs():
+            if model in NODY_MODELS:
+                reference_rows.append({
+                    "model":model,"resolution":resolution,"currency":"CNY","billing_unit":"output_second",
+                    "reference_video":{"supported":False},"reference_audio":{"supported":False},
+                    "reference_video_audio":{"supported":False},"audio_mode":"provider_default_only",
+                })
+                continue
             without_video = self.pricing.official_quote(
                 model, resolution, 1, input_rate_class="without_video_input"
             )
@@ -875,10 +892,13 @@ class Gateway:
         mode = str(parameters.get("mode") or raw.get("mode") or "text").strip().lower()
         if mode not in ALLOWED_MODES or (model.operation_modes and mode not in model.operation_modes):
             raise GatewayError(HTTPStatus.BAD_REQUEST, "video_mode_unsupported", "当前星途模型不支持所选视频模式。")
+        raw_duration = parameters.get("duration") or raw.get("duration") or 0
         try:
-            duration = int(parameters.get("duration") or raw.get("duration") or 0)
+            duration = int(raw_duration)
         except (TypeError, ValueError):
             duration = 0
+        if model.id in NODY_MODELS and (isinstance(raw_duration, bool) or str(raw_duration) != str(duration)):
+            raise GatewayError(HTTPStatus.BAD_REQUEST, "video_duration_unsupported", "时长必须是已验证的整数秒数。")
         if model.durations and duration not in model.durations:
             raise GatewayError(HTTPStatus.BAD_REQUEST, "video_duration_unsupported", "当前星途模型不支持所选时长。")
         if not model.durations and not model.duration_min <= duration <= model.duration_max:
@@ -887,6 +907,9 @@ class Gateway:
         if model.aspect_ratios and aspect_ratio not in model.aspect_ratios:
             raise GatewayError(HTTPStatus.BAD_REQUEST, "video_aspect_ratio_unsupported", "当前星途模型不支持所选画面比例。")
         generate_audio = parameters.get("generate_audio") if "generate_audio" in parameters else None
+        if model.id in NODY_MODELS and generate_audio is not True:
+            raise GatewayError(HTTPStatus.BAD_REQUEST,"video_audio_mode_unsupported",
+                               "该模型首批仅支持保留上游默认音轨，请设置generate_audio=true。")
         if generate_audio is True and not billing_v2:
             raise GatewayError(
                 HTTPStatus.BAD_REQUEST,
@@ -918,6 +941,8 @@ class Gateway:
         images = _normalize_assets(input_data.get("images") or raw.get("images"), "image", ALLOWED_IMAGE_ROLES)
         videos = _normalize_assets(input_data.get("videos") or raw.get("videos"), "video", ALLOWED_VIDEO_ROLES)
         audios = _normalize_assets(input_data.get("audios") or raw.get("audios"), "audio", ALLOWED_AUDIO_ROLES)
+        if model.id in NODY_MODELS and (images or videos or audios):
+            raise GatewayError(HTTPStatus.BAD_REQUEST,"video_reference_unsupported","本批模型仅开放已验证的文生视频。")
         candidate_routes = tuple(
             candidate
             for candidate in candidate_routes
@@ -1022,7 +1047,7 @@ class Gateway:
             raise GatewayError(HTTPStatus.CONFLICT, "video_model_unavailable", str(error)) from error
         return request_id, fingerprint, normalized, model, routes
 
-    def submit_v2(self, raw: Any, *, idempotency_key: str) -> tuple[dict[str, Any], bool]:
+    def submit_v2(self, raw: Any, *, idempotency_key: str, reference_v22: bool = False) -> tuple[dict[str, Any], bool]:
         if not self.config.public_base_url:
             raise GatewayError(
                 HTTPStatus.SERVICE_UNAVAILABLE,
@@ -1095,10 +1120,12 @@ class Gateway:
                 "generate_audio": raw["generate_audio"],
             },
         }
-        return self.submit(translated, billing_v2=True)
+        return self.submit(translated, billing_v2=True, reference_v22=reference_v22)
 
     def submit_v22(self, raw: Any, *, idempotency_key: str) -> tuple[dict[str, Any], bool]:
         """Create a durable v2.2 job using only exact reference-capable routes."""
+        if isinstance(raw, dict) and raw.get("model") in NODY_MODELS and not raw.get("reference_videos") and not raw.get("reference_audios"):
+            return self.submit_v2(raw, idempotency_key=idempotency_key, reference_v22=True)
         if not self.config.public_base_url:
             raise GatewayError(
                 HTTPStatus.SERVICE_UNAVAILABLE,
@@ -1626,14 +1653,15 @@ class Gateway:
             now = int(time.time())
             deadline = int(current.get("recovery_deadline_at") or 0)
             task_id = str(current.get("upstream_task_id") or "")
+            evidence_pending_status = "pending_review" if current.get("provider_id") == "nodyhub" else "failed"
             if not task_id:
-                if int(current.get("recovery_attempts") or 0) <= 2 and self.store.retry_uncertain_submit(job_id):
+                if str(current.get("provider_id") or "") != "nodyhub" and int(current.get("recovery_attempts") or 0) <= 2 and self.store.retry_uncertain_submit(job_id):
                     self.start_submit(job_id)
                     return
                 if deadline and now >= deadline:
                     self.store.finish(
                         job_id,
-                        "failed",
+                        evidence_pending_status,
                         error=_error(
                             "video_submit_identity_unresolved",
                             "upstream",
@@ -1674,7 +1702,7 @@ class Gateway:
                 if deadline and now >= deadline:
                     self.store.finish(
                         job_id,
-                        "failed",
+                        evidence_pending_status,
                         error=_error(
                             "video_recovery_deadline_exceeded",
                             "upstream",

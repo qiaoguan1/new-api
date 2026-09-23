@@ -13,6 +13,7 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation, ROUND_CEILING
 from pathlib import Path
 from typing import Any
+from nodyhub import NODY_MODELS, NODY_SOURCE, verified_quote
 
 
 ACTIVE_STATUSES = {"queued", "submitting", "running", "reconciling"}
@@ -302,7 +303,7 @@ class Store:
             "contract_version": str(source.get("billing_contract_version") or ""),
             "status": billing_status,
             "currency": "CNY",
-            "reserve_basis": "ark_official_1_5" if source.get("reserved_cny_exact") else "",
+            "reserve_basis": str((_json_object(str(source.get("payload_json") or "{}" )).get("_relay_price") or {}).get("price_source") or "ark_official_1_5") if source.get("reserved_cny_exact") else "",
             "reserved_amount": _public_money(source.get("reserved_cny_exact")),
             "charged_amount": _public_money(source.get("charged_cny_exact")),
             "refund_amount": _public_money(source.get("refund_cny_exact")),
@@ -688,6 +689,7 @@ class Store:
             if (
                 not row
                 or str(row["status"] or "") != "reconciling"
+                or str(row["provider_id"] or "") == "nodyhub"
                 or str(row["upstream_task_id"] or "")
                 or not attempt
                 or int(attempt["submit_count"] or 0) >= max(1, int(max_same_route_submits))
@@ -1998,17 +2000,29 @@ def _reservation_from_payload(payload_json: str) -> dict[str, str]:
         quote.get("contract_version") != PRICE_CONTRACT_VERSION
         or str(quote.get("currency") or "").upper() != "CNY"
         or str(quote.get("fallback_multiplier_exact") or "") != "1.5"
-        or str(quote.get("price_source") or "") != "ark_official_1_5"
+        or str(quote.get("price_source") or "") not in {"ark_official_1_5", NODY_SOURCE}
     ):
         return unavailable
     try:
         duration = int(payload.get("duration") or quote.get("output_seconds") or 0)
         reserved = Decimal(_money_exact(quote.get("amount_cny_exact"), allow_zero=False))
-        official = Decimal(_money_exact(quote.get("official_cost_cny_exact"), allow_zero=False))
+        basis_field = "reference_cost_cny_exact" if quote.get("price_source") == NODY_SOURCE else "official_cost_cny_exact"
+        official = Decimal(_money_exact(quote.get(basis_field), allow_zero=False))
     except (TypeError, ValueError, InvalidOperation, StoreConflict):
         return unavailable
     if duration <= 0 or duration > 3600:
         return unavailable
+    if quote.get("price_source") == NODY_SOURCE:
+        try:
+            model = str(payload.get("model") or "")
+            spec = NODY_MODELS[model]
+            if duration != spec[1]:
+                return unavailable
+            verified = verified_quote(model, str(payload.get("resolution") or ""), duration)
+            if any(str(quote.get(key)) != str(verified[key]) for key in ("pricing_revision", "amount_cny_exact", "reference_cost_cny_exact")):
+                return unavailable
+        except (KeyError, ValueError):
+            return unavailable
     expected = Decimal(_quantize_money(official * Decimal("1.5")))
     if reserved != expected:
         return unavailable
@@ -2161,6 +2175,8 @@ def _validated_settlement(payload: Any) -> dict[str, Any]:
         or source not in {
             "provider_account_ledger",
             "newapi_authenticated_video_task",
+            "nodyhub_authenticated_video_task",
+            "nodyhub_authenticated_failed_task_ledger",
             "paisio_authenticated_request_ledger",
             "toonflow_web_operation_log",
             "xtai_aggregate_attempt_cost",

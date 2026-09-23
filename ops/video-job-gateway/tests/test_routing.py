@@ -1,3 +1,4 @@
+# Historical policy tests use their versioned fixture, not mutable production priorities.
 import pathlib
 import sys
 import unittest
@@ -122,7 +123,7 @@ class RoutePlanTests(unittest.TestCase):
         self.assertEqual([route.provider for route in routes], ["toonflow"])
 
     def test_checked_in_catalog_routes_full_and_fast_to_both_video_upstreams(self):
-        catalog = Catalog.load(ROOT / "catalog.json")
+        catalog = Catalog.load(ROOT / "tests" / "fixtures" / "catalog-20260814.json")
 
         expected = {
             "seedance-2.0": ("480p", "720p", "1080p"),
@@ -145,7 +146,7 @@ class RoutePlanTests(unittest.TestCase):
         self.assertEqual([route.provider for route in mini_routes], ["toonflow"])
 
     def test_checked_in_catalog_prefers_paisio_before_toonflow(self):
-        catalog = Catalog.load(ROOT / "catalog.json")
+        catalog = Catalog.load(ROOT / "tests" / "fixtures" / "catalog-20260814.json")
 
         shared = {
             "seedance-2.0": ("480p", "720p", "1080p"),
@@ -170,7 +171,7 @@ class RoutePlanTests(unittest.TestCase):
                     self.assertEqual(plan[-1].provider, "toonflow")
 
     def test_checked_in_catalog_uses_current_face_capable_paisio_sd3_sd4_models(self):
-        catalog = Catalog.load(ROOT / "catalog.json")
+        catalog = Catalog.load(ROOT / "tests" / "fixtures" / "catalog-20260814.json")
         expected = {
             ("seedance-2.0", "480p"): ["sd3-480p"],
             ("seedance-2.0", "720p"): ["sd3-720p"],
@@ -199,7 +200,7 @@ class RoutePlanTests(unittest.TestCase):
             )
 
     def test_fast_720p_chooses_per_second_or_per_call_by_duration(self):
-        catalog = Catalog.load(ROOT / "catalog.json")
+        catalog = Catalog.load(ROOT / "tests" / "fixtures" / "catalog-20260814.json")
         _, routes, _, _ = catalog.resolve_routes(
             "seedance-2.0-fast",
             "720p",
@@ -233,11 +234,11 @@ class RoutePlanTests(unittest.TestCase):
             raw = (ROOT / name).read_text(encoding="utf-8").lower()
             self.assertNotIn("sd2", raw, name)
 
-        catalog = Catalog.load(ROOT / "catalog.json")
+        catalog = Catalog.load(ROOT / "tests" / "fixtures" / "catalog-20260814.json")
         self.assertEqual(catalog.revision, "2026-08-14.2")
 
     def test_paisio_route_names_follow_standard_fast_mini_contract(self):
-        catalog = Catalog.load(ROOT / "catalog.json")
+        catalog = Catalog.load(ROOT / "tests" / "fixtures" / "catalog-20260814.json")
         full = next(model for model in catalog.models if model.id == "seedance-2.0")
         fast = next(model for model in catalog.models if model.id == "seedance-2.0-fast")
         mini = next(model for model in catalog.models if model.id == "seedance-2.0-mini")
@@ -253,7 +254,7 @@ class RoutePlanTests(unittest.TestCase):
         self.assertEqual(mini_names, [])
 
     def test_checked_in_routes_isolate_reference_audio_to_verified_toonflow(self):
-        catalog = Catalog.load(ROOT / "catalog.json")
+        catalog = Catalog.load(ROOT / "tests" / "fixtures" / "catalog-20260814.json")
         for model in catalog.models:
             self.assertTrue(any(route.supports_reference_audio for route in model.routes))
             self.assertTrue(

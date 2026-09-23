@@ -1,6 +1,6 @@
 {
   "protocol_version": "xtai-relay-v1",
-  "revision": "2026-08-14.2",
+  "revision": "2026-09-23.nody-verified-1",
   "models": [
     {
       "id": "seedance-2.0",
@@ -10,9 +10,27 @@
         "value-sd-premium-720p": "720p"
       },
       "capabilities": {
-        "resolutions": ["480p", "720p", "1080p"],
-        "operation_modes": ["text", "first_frame", "reference", "all_reference"],
-        "aspect_ratios": ["16:9", "9:16", "1:1", "21:9", "3:4", "4:3", "2:3", "3:2"],
+        "resolutions": [
+          "480p",
+          "720p",
+          "1080p"
+        ],
+        "operation_modes": [
+          "text",
+          "first_frame",
+          "reference",
+          "all_reference"
+        ],
+        "aspect_ratios": [
+          "16:9",
+          "9:16",
+          "1:1",
+          "21:9",
+          "3:4",
+          "4:3",
+          "2:3",
+          "3:2"
+        ],
         "duration_min": 4,
         "duration_max": 15,
         "max_images": 9,
@@ -23,7 +41,7 @@
           "provider": "toonflow",
           "upstream_model": "Seedance 2.0",
           "resolution": "480p",
-          "priority": 20,
+          "priority": 5,
           "enabled": true,
           "send_resolution": true,
           "supports_generate_audio": true,
@@ -49,7 +67,7 @@
           "provider": "toonflow",
           "upstream_model": "Seedance 2.0",
           "resolution": "720p",
-          "priority": 20,
+          "priority": 5,
           "enabled": true,
           "send_resolution": true,
           "supports_generate_audio": true,
@@ -75,7 +93,7 @@
           "provider": "toonflow",
           "upstream_model": "Seedance 2.0",
           "resolution": "1080p",
-          "priority": 20,
+          "priority": 5,
           "enabled": true,
           "send_resolution": true,
           "supports_generate_audio": true,
@@ -105,9 +123,23 @@
       "enabled": true,
       "aliases": {},
       "capabilities": {
-        "resolutions": ["480p", "720p"],
-        "operation_modes": ["text", "first_frame", "reference"],
-        "aspect_ratios": ["16:9", "9:16", "1:1", "21:9", "3:4", "4:3"],
+        "resolutions": [
+          "480p",
+          "720p"
+        ],
+        "operation_modes": [
+          "text",
+          "first_frame",
+          "reference"
+        ],
+        "aspect_ratios": [
+          "16:9",
+          "9:16",
+          "1:1",
+          "21:9",
+          "3:4",
+          "4:3"
+        ],
         "duration_min": 4,
         "duration_max": 15,
         "max_images": 9,
@@ -118,7 +150,7 @@
           "provider": "toonflow",
           "upstream_model": "Seedance 2.0 fast",
           "resolution": "480p",
-          "priority": 20,
+          "priority": 5,
           "enabled": true,
           "send_resolution": true,
           "supports_generate_audio": true,
@@ -144,7 +176,7 @@
           "provider": "toonflow",
           "upstream_model": "Seedance 2.0 fast",
           "resolution": "720p",
-          "priority": 20,
+          "priority": 5,
           "enabled": true,
           "send_resolution": true,
           "supports_generate_audio": true,
@@ -198,9 +230,20 @@
       "enabled": true,
       "aliases": {},
       "capabilities": {
-        "resolutions": ["480p", "720p"],
-        "operation_modes": ["text", "first_frame", "reference"],
-        "aspect_ratios": ["16:9", "9:16", "1:1"],
+        "resolutions": [
+          "480p",
+          "720p"
+        ],
+        "operation_modes": [
+          "text",
+          "first_frame",
+          "reference"
+        ],
+        "aspect_ratios": [
+          "16:9",
+          "9:16",
+          "1:1"
+        ],
         "duration_min": 4,
         "duration_max": 15,
         "max_images": 9,
@@ -234,6 +277,265 @@
           "max_reference_audios": 3,
           "max_total_assets": 12,
           "adapter_revision": "toonflow-video-actual-cost-2026-08-09"
+        }
+      ]
+    },
+    {
+      "id": "wan3.0-video",
+      "label": "Wan 3.0",
+      "enabled": true,
+      "capabilities": {
+        "resolutions": [
+          "480p"
+        ],
+        "operation_modes": [
+          "text"
+        ],
+        "aspect_ratios": [
+          "16:9"
+        ],
+        "durations": [
+          2
+        ],
+        "max_images": 0,
+        "max_videos": 0
+      },
+      "routes": [
+        {
+          "provider": "nodyhub",
+          "upstream_model": "wan3.0-video",
+          "resolution": "480p",
+          "priority": 10,
+          "enabled": true,
+          "send_resolution": true,
+          "supports_generate_audio": true,
+          "supports_reference_video": false,
+          "supports_reference_audio": false,
+          "billing_mode": "per_second",
+          "routing_unit_cost": "0.375",
+          "adapter_revision": "nody-verified-2026-09-23.1"
+        }
+      ]
+    },
+    {
+      "id": "wan3.0-video-prime",
+      "label": "Wan 3.0 Prime",
+      "enabled": true,
+      "capabilities": {
+        "resolutions": [
+          "480p"
+        ],
+        "operation_modes": [
+          "text"
+        ],
+        "aspect_ratios": [
+          "16:9"
+        ],
+        "durations": [
+          2
+        ],
+        "max_images": 0,
+        "max_videos": 0
+      },
+      "routes": [
+        {
+          "provider": "nodyhub",
+          "upstream_model": "wan3.0-video-prime",
+          "resolution": "480p",
+          "priority": 10,
+          "enabled": true,
+          "send_resolution": true,
+          "supports_generate_audio": true,
+          "supports_reference_video": false,
+          "supports_reference_audio": false,
+          "billing_mode": "per_second",
+          "routing_unit_cost": "0.54",
+          "adapter_revision": "nody-verified-2026-09-23.1"
+        }
+      ]
+    },
+    {
+      "id": "grok-imagine-1.5-video",
+      "label": "Grok Imagine 1.5 Video",
+      "enabled": true,
+      "capabilities": {
+        "resolutions": [
+          "480p"
+        ],
+        "operation_modes": [
+          "text"
+        ],
+        "aspect_ratios": [
+          "16:9"
+        ],
+        "durations": [
+          6
+        ],
+        "max_images": 0,
+        "max_videos": 0
+      },
+      "routes": [
+        {
+          "provider": "nodyhub",
+          "upstream_model": "grok-imagine-1.5-video",
+          "resolution": "480p",
+          "priority": 10,
+          "enabled": true,
+          "send_resolution": true,
+          "supports_generate_audio": true,
+          "supports_reference_video": false,
+          "supports_reference_audio": false,
+          "billing_mode": "per_second",
+          "routing_unit_cost": "0.15",
+          "adapter_revision": "nody-verified-2026-09-23.1"
+        }
+      ]
+    },
+    {
+      "id": "grok-video-3",
+      "label": "Grok Video 3",
+      "enabled": true,
+      "capabilities": {
+        "resolutions": [
+          "720p"
+        ],
+        "operation_modes": [
+          "text"
+        ],
+        "aspect_ratios": [
+          "16:9"
+        ],
+        "durations": [
+          6
+        ],
+        "max_images": 0,
+        "max_videos": 0
+      },
+      "routes": [
+        {
+          "provider": "nodyhub",
+          "upstream_model": "grok-video-3",
+          "resolution": "720p",
+          "priority": 10,
+          "enabled": true,
+          "send_resolution": true,
+          "supports_generate_audio": true,
+          "supports_reference_video": false,
+          "supports_reference_audio": false,
+          "billing_mode": "per_second",
+          "routing_unit_cost": "0.15",
+          "adapter_revision": "nody-verified-2026-09-23.1"
+        }
+      ]
+    },
+    {
+      "id": "grok-imagine-video-official",
+      "label": "Grok Imagine Video（上游官方档）",
+      "enabled": true,
+      "capabilities": {
+        "resolutions": [
+          "480p"
+        ],
+        "operation_modes": [
+          "text"
+        ],
+        "aspect_ratios": [
+          "16:9"
+        ],
+        "durations": [
+          1
+        ],
+        "max_images": 0,
+        "max_videos": 0
+      },
+      "routes": [
+        {
+          "provider": "nodyhub",
+          "upstream_model": "grok-imagine-video-official",
+          "resolution": "480p",
+          "priority": 10,
+          "enabled": true,
+          "send_resolution": true,
+          "supports_generate_audio": true,
+          "supports_reference_video": false,
+          "supports_reference_audio": false,
+          "billing_mode": "per_second",
+          "routing_unit_cost": "0.45",
+          "adapter_revision": "nody-verified-2026-09-23.1"
+        }
+      ]
+    },
+    {
+      "id": "omni-flash",
+      "label": "Omni Flash",
+      "enabled": true,
+      "capabilities": {
+        "resolutions": [
+          "720p"
+        ],
+        "operation_modes": [
+          "text"
+        ],
+        "aspect_ratios": [
+          "16:9"
+        ],
+        "durations": [
+          4
+        ],
+        "max_images": 0,
+        "max_videos": 0
+      },
+      "routes": [
+        {
+          "provider": "nodyhub",
+          "upstream_model": "omni-flash",
+          "resolution": "720p",
+          "priority": 10,
+          "enabled": true,
+          "send_resolution": true,
+          "supports_generate_audio": true,
+          "supports_reference_video": false,
+          "supports_reference_audio": false,
+          "billing_mode": "per_second",
+          "routing_unit_cost": "0.6375",
+          "adapter_revision": "nody-verified-2026-09-23.1"
+        }
+      ]
+    },
+    {
+      "id": "flux-3-video",
+      "label": "FLUX 3 Video",
+      "enabled": true,
+      "capabilities": {
+        "resolutions": [
+          "720p"
+        ],
+        "operation_modes": [
+          "text"
+        ],
+        "aspect_ratios": [
+          "16:9"
+        ],
+        "durations": [
+          5
+        ],
+        "max_images": 0,
+        "max_videos": 0
+      },
+      "routes": [
+        {
+          "provider": "nodyhub",
+          "upstream_model": "flux-3-video",
+          "resolution": "720p",
+          "priority": 10,
+          "enabled": true,
+          "send_resolution": true,
+          "supports_generate_audio": true,
+          "supports_reference_video": false,
+          "supports_reference_audio": false,
+          "billing_mode": "per_second",
+          "routing_unit_cost": "1.425",
+          "adapter_revision": "nody-verified-2026-09-23.1"
         }
       ]
     }

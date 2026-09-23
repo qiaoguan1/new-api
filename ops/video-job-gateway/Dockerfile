@@ -8,7 +8,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1
 
 WORKDIR /app
-COPY app.py adapters.py billing_collectors.py credential_lifecycle.py catalog.py reference_contract.py release_integrity.py relay_pricing.py routing.py store.py catalog.json relay-pricing.json /app/
+COPY app.py adapters.py billing_collectors.py credential_lifecycle.py catalog.py reference_contract.py release_integrity.py relay_pricing.py routing.py store.py nodyhub.py catalog.json relay-pricing.json /app/
 
 RUN python -c "import sys; from release_integrity import verify_release_identity; verify_release_identity(sys.argv[1], sys.argv[2], '/app/catalog.json', sys.argv[3], '/app')" "$XTAI_VCS_REF" "$XTAI_CATALOG_SHA256" "$XTAI_SOURCE_SHA256" \
     && apt-get update \

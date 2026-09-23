@@ -1,3 +1,4 @@
+# Historical policy tests use their versioned fixture, not mutable production priorities.
 import pathlib
 import sys
 import tempfile
@@ -311,7 +312,7 @@ class GatewayFallbackTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as directory:
             gateway = Gateway.__new__(Gateway)
             gateway.store = Store(pathlib.Path(directory))
-            gateway.catalog = Catalog.load(ROOT / "catalog.json")
+            gateway.catalog = Catalog.load(ROOT / "tests" / "fixtures" / "catalog-20260814.json")
             gateway.adapters = {
                 "toonflow": FakeAdapter("toonflow", Observation(status="running")),
                 "paisio": FakeAdapter("paisio", Observation(status="running")),
@@ -352,7 +353,7 @@ class GatewayFallbackTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as directory:
             gateway = Gateway.__new__(Gateway)
             gateway.store = Store(pathlib.Path(directory))
-            gateway.catalog = Catalog.load(ROOT / "catalog.json")
+            gateway.catalog = Catalog.load(ROOT / "tests" / "fixtures" / "catalog-20260814.json")
             gateway.adapters = {
                 "toonflow": FakeAdapter("toonflow", Observation(status="running")),
                 "paisio": FakeAdapter("paisio", Observation(status="running")),

@@ -1,0 +1,6 @@
+*
+!*.py
+!catalog.json
+!relay-pricing.json
+!Dockerfile
+!Dockerfile.nody
