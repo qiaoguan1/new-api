@@ -83,6 +83,11 @@ func Distribute() func(c *gin.Context) {
 				}
 				var selectGroup string
 				usingGroup := common.GetContextKeyString(c, constant.ContextKeyUsingGroup)
+				// These newly public image variants retain the existing image tariff across key groups.
+				if common.IsQuotaDBAuthoritative() && (modelRequest.Model == "gpt-image-2.5-flare" || modelRequest.Model == "gpt-image-2.5-sunburst") && service.GroupInUserUsableGroups(common.GetContextKeyString(c, constant.ContextKeyUserGroup), "图") {
+					usingGroup = "图"
+					common.SetContextKey(c, constant.ContextKeyUsingGroup, usingGroup)
+				}
 				// check path is /pg/chat/completions
 				if strings.HasPrefix(c.Request.URL.Path, "/pg/chat/completions") {
 					playgroundRequest := &dto.PlayGroundRequest{}

@@ -1,0 +1,5 @@
+FROM debian:bookworm-slim
+COPY public-video-linux /usr/local/bin/public-video
+RUN chmod 0755 /usr/local/bin/public-video
+USER 10002:10002
+ENTRYPOINT ["/usr/local/bin/public-video", "--log-dir", "/tmp/public-video-logs"]

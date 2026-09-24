@@ -391,6 +391,9 @@ func PreConsumeTokenQuota(relayInfo *relaycommon.RelayInfo, quota int) error {
 	if relayInfo.IsPlayground {
 		return nil
 	}
+	if common.IsQuotaDBAuthoritative() {
+		return model.ReserveTokenQuota(relayInfo.TokenId, quota)
+	}
 	//if relayInfo.TokenUnlimited {
 	//	return nil
 	//}

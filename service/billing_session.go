@@ -232,7 +232,7 @@ func (s *BillingSession) preConsume(c *gin.Context, quota int) *types.NewAPIErro
 func (s *BillingSession) reserveFunding(delta int) error {
 	switch funding := s.funding.(type) {
 	case *WalletFunding:
-		if err := model.DecreaseUserQuota(funding.userId, delta, false); err != nil {
+		if err := model.ReserveUserQuota(funding.userId, delta); err != nil {
 			return types.NewError(err, types.ErrorCodeUpdateDataError, types.ErrOptionWithSkipRetry())
 		}
 		funding.consumed += delta
@@ -280,6 +280,9 @@ func (s *BillingSession) reserveToken(delta int) error {
 
 // shouldTrust 统一信任额度检查，适用于钱包和订阅。
 func (s *BillingSession) shouldTrust(c *gin.Context) bool {
+	if common.IsQuotaDBAuthoritative() {
+		return false
+	}
 	// 异步任务（ForcePreConsume=true）必须预扣全额，不允许信任旁路
 	if s.relayInfo.ForcePreConsume {
 		return false
