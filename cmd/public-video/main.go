@@ -3,6 +3,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/hex"
@@ -28,6 +29,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/shopspring/decimal"
 	"gorm.io/gorm"
+	gormlogger "gorm.io/gorm/logger"
 )
 
 type videoSpec struct {
@@ -98,7 +100,9 @@ func authenticate(c *gin.Context) (identity, error) {
 }
 
 func (s *server) backendJSON(method, path string, body []byte) (map[string]interface{}, int, error) {
-	req, e := http.NewRequest(method, s.backend+path, bytes.NewReader(body))
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	req, e := http.NewRequestWithContext(ctx, method, s.backend+path, bytes.NewReader(body))
 	if e != nil {
 		return nil, 0, e
 	}
@@ -155,6 +159,8 @@ func (s *server) submit(c *gin.Context, who identity) {
 		}
 	}
 	prompt, _ := body["prompt"].(string)
+	prompt = strings.TrimSpace(prompt)
+	body["prompt"] = prompt
 	duration, _ := body["duration"].(float64)
 	resolution, _ := body["resolution"].(string)
 	if len([]rune(prompt)) == 0 || len([]rune(prompt)) > 2500 || duration != float64(spec.Duration) || resolution != spec.Resolution {
@@ -225,10 +231,6 @@ func (s *server) submit(c *gin.Context, who identity) {
 		response(c, code, reason)
 		return
 	}
-	if e = model.FlushPublicVideoCache(row.ID); e != nil {
-		response(c, 503, "reservation_pending_retry_same_id")
-		return
-	}
 	status := 202
 	if reused {
 		status = 200
@@ -238,6 +240,9 @@ func (s *server) submit(c *gin.Context, who identity) {
 
 // preflight refuses a new reservation if the execution catalog or its exact price changed.
 func (s *server) preflight(name string, spec videoSpec) error {
+	if e := s.nativeReady(); e != nil {
+		return e
+	}
 	caps, status, e := s.backendJSON("GET", "/v1/capabilities", nil)
 	if e != nil || status != 200 {
 		return errors.New("catalog_unavailable")
@@ -314,23 +319,46 @@ func (s *server) snapshot(row model.PublicVideoTask) map[string]interface{} {
 }
 
 func (s *server) process(row model.PublicVideoTask) error {
-	if e := model.FlushPublicVideoCache(row.ID); e != nil {
+	if e := s.nativeReady(); e != nil {
 		return e
 	}
 	var data map[string]interface{}
 	var status int
 	var e error
 	if row.BackendID == "" {
+		var payload map[string]interface{}
+		if common.UnmarshalJsonStr(row.Body, &payload) != nil {
+			return errors.New("stored_request_invalid")
+		}
+		requestID, _ := payload["request_id"].(string)
+		lookup, lookupStatus, lookupErr := s.backendJSON("GET", "/v1/video-jobs/by-request/"+url.PathEscape(requestID), nil)
+		if lookupErr != nil {
+			return lookupErr
+		}
+		if lookupStatus == 200 {
+			job, _ := lookup["job"].(map[string]interface{})
+			found, _ := job["job_id"].(string)
+			if !regexp.MustCompile(`^vjob_[0-9a-f]{32}$`).MatchString(found) {
+				return errors.New("gateway_lookup_invalid")
+			}
+			row.BackendID = found
+			if e = model.DB.Model(&row).Where("state <> ? AND backend_id = ?", "settled", "").Updates(map[string]interface{}{"backend_id": found, "state": "submitted"}).Error; e != nil {
+				return e
+			}
+			return s.process(row)
+		}
+		if lookupStatus != 404 || row.State == "pending_review" {
+			return errors.New("gateway_identity_pending")
+		}
 		// Repeating the SAME request to our durable gateway is safe; it never repeats unknown provider submits.
 		data, status, e = s.backendJSON("POST", "/v1/videos", []byte(row.Body))
 		if e != nil {
 			return e
 		}
 		if status != 200 && status != 202 {
-			// Only contract-validation rejects prove no task was created. Other failures remain reserved.
+			// A replay rejection cannot prove that an earlier timed-out call created no task.
 			if status == 400 || status == 413 {
-				raw, _ := common.Marshal(map[string]interface{}{"status": "failed", "error": map[string]string{"code": "gateway_validation_rejected"}})
-				return model.SettlePublicVideo(row.ID, "0.000000", string(raw))
+				return model.DB.Model(&row).Where("state <> ?", "settled").Updates(map[string]interface{}{"state": "pending_review", "last_error": "gateway_identity_pending", "updated_at": time.Now().Unix()}).Error
 			}
 			return fmt.Errorf("gateway_submit_http_%d", status)
 		}
@@ -361,7 +389,7 @@ func (s *server) process(row model.PublicVideoTask) error {
 		if e = model.SettlePublicVideo(row.ID, amount, string(raw)); e != nil {
 			return e
 		}
-		return model.FlushPublicVideoCache(row.ID)
+		return nil
 	}
 	state := "submitted"
 	if billing["status"] == "pending_review" {
@@ -372,11 +400,8 @@ func (s *server) process(row model.PublicVideoTask) error {
 
 func (s *server) worker() {
 	for range time.Tick(3 * time.Second) {
-		if e := model.FlushPublicVideoCache(""); e != nil {
-			log.Print("public video cache delivery pending")
-		}
 		var rows []model.PublicVideoTask
-		if model.DB.Where("state IN ?", []string{"reserved", "submitted", "pending_review"}).Order("updated_at asc").Limit(30).Find(&rows).Error != nil {
+		if model.DB.Where("state IN ? AND updated_at <= ?", []string{"reserved", "submitted", "pending_review"}, time.Now().Unix()-3).Order("updated_at asc").Limit(30).Find(&rows).Error != nil {
 			continue
 		}
 		var workers sync.WaitGroup
@@ -397,9 +422,37 @@ func (s *server) worker() {
 }
 
 func (s *server) serve(c *gin.Context) {
+	if c.Request.Method == "OPTIONS" {
+		c.Header("Access-Control-Allow-Origin", "*")
+		c.Header("Access-Control-Allow-Methods", "GET, POST, HEAD, OPTIONS")
+		c.Header("Access-Control-Allow-Headers", "Authorization, Content-Type, Idempotency-Key, X-XingTu-Contract-Version")
+		c.Status(204)
+		return
+	}
+	c.Header("Access-Control-Allow-Origin", "*")
 	if c.Request.URL.Path == "/health" {
 		c.JSON(200, gin.H{"ok": true})
 		return
+	}
+	if c.Request.URL.Path == "/ready" {
+		if e := s.nativeReady(); e != nil {
+			response(c, 503, "native_wallet_not_ready")
+		} else {
+			c.JSON(200, gin.H{"ok": true})
+		}
+		return
+	}
+	if c.Request.URL.Path == "/v1/models" && c.GetHeader("Authorization") == "" {
+		key := c.GetHeader("x-api-key")
+		if key == "" {
+			key = c.GetHeader("x-goog-api-key")
+		}
+		if key == "" {
+			key = c.Query("key")
+		}
+		if key != "" {
+			c.Request.Header.Set("Authorization", "Bearer "+key)
+		}
 	}
 	if subtle.ConstantTimeCompare([]byte(c.GetHeader("Authorization")), []byte("Bearer "+s.serviceToken)) == 1 {
 		target, _ := url.Parse(s.legacy)
@@ -432,9 +485,32 @@ func (s *server) serve(c *gin.Context) {
 				}
 			}
 		}
+		available := map[string]bool{}
+		if s.nativeReady() == nil {
+			caps, status, e := s.backendJSON("GET", "/v1/capabilities", nil)
+			if e == nil && status == 200 {
+				capabilities, _ := caps["capabilities"].(map[string]interface{})
+				video, _ := capabilities["video"].(map[string]interface{})
+				rows, _ := video["models"].([]interface{})
+				for _, value := range rows {
+					m, ok := value.(map[string]interface{})
+					if ok && video["traffic_enabled"] == true && m["available"] == true {
+						n, _ := m["id"].(string)
+						available[n] = true
+					}
+				}
+			}
+		}
 		for name := range specs {
-			if !seen[name] && (!who.token.ModelLimitsEnabled || who.token.GetModelLimitsMap()[name]) {
+			if !seen[name] && available[name] && (!who.token.ModelLimitsEnabled || who.token.GetModelLimitsMap()[name]) {
 				items = append(items, gin.H{"id": name, "object": "model", "owned_by": "xingtu", "created": 1790176800})
+			}
+		}
+		if service.GroupInUserUsableGroups(who.user.Group, "图") {
+			for _, name := range model.GetGroupEnabledModels("图") {
+				if (name == "gpt-image-2.5-flare" || name == "gpt-image-2.5-sunburst") && !seen[name] && (!who.token.ModelLimitsEnabled || who.token.GetModelLimitsMap()[name]) {
+					items = append(items, gin.H{"id": name, "object": "model", "owned_by": "xingtu", "created": 1790176800})
+				}
 			}
 		}
 		c.JSON(200, gin.H{"object": "list", "data": items})
@@ -534,10 +610,33 @@ func (s *server) serve(c *gin.Context) {
 	}
 }
 
+// nativeReady gates fresh reservations on the currently serving native wallet mode.
+func (s *server) nativeReady() error {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	req, e := http.NewRequestWithContext(ctx, "GET", s.native+"/api/status", nil)
+	if e != nil {
+		return e
+	}
+	r, e := s.client.Do(req)
+	if e != nil {
+		return errors.New("native_unavailable")
+	}
+	defer r.Body.Close()
+	var status map[string]interface{}
+	if r.StatusCode != 200 || common.DecodeJson(io.LimitReader(r.Body, 65536), &status) != nil {
+		return errors.New("native_unavailable")
+	}
+	data, _ := status["data"].(map[string]interface{})
+	if data["quota_db_authoritative"] != true || data["enable_batch_update"] != false {
+		return errors.New("native_quota_authority_required")
+	}
+	return nil
+}
+
 func main() {
-	// Do not deploy this prototype against shared production wallets: see issue173.
-	if os.Getenv("PUBLIC_VIDEO_DEVELOPMENT_ONLY") != "true" {
-		log.Fatal("public-video prototype blocked pending native wallet integration review")
+	if !common.IsQuotaDBAuthoritative() {
+		log.Fatal("database-authoritative quota mode required")
 	}
 	common.InitEnv()
 	common.IsMasterNode = false
@@ -547,14 +646,14 @@ func main() {
 	if e := model.InitDB(); e != nil {
 		log.Fatal("database unavailable")
 	}
+	// ORM error output must never serialize bearer keys or stored user prompts.
+	model.DB = model.DB.Session(&gorm.Session{Logger: gormlogger.Discard})
 	model.LOG_DB = model.DB
-	if e := model.DB.AutoMigrate(&model.PublicVideoTask{}, &model.PublicVideoCacheEvent{}); e != nil {
+	if e := model.DB.AutoMigrate(&model.PublicVideoTask{}); e != nil {
 		log.Fatal("video ledger migration failed")
 	}
 	model.InitOptionMap()
-	if e := common.InitRedisClient(); e != nil || !common.RedisEnabled {
-		log.Fatal("redis required")
-	}
+	common.RedisEnabled = false
 	s := &server{backend: os.Getenv("PUBLIC_VIDEO_BACKEND"), legacy: os.Getenv("PUBLIC_VIDEO_LEGACY"), native: os.Getenv("PUBLIC_VIDEO_NATIVE"), serviceToken: os.Getenv("VIDEO_JOB_GATEWAY_TOKEN"), publicURL: os.Getenv("PUBLIC_VIDEO_BASE_URL"), rate: os.Getenv("PUBLIC_VIDEO_QUOTA_PER_CNY"), client: &http.Client{Timeout: 60 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}}
 	if s.backend == "" || s.legacy == "" || len(s.serviceToken) < 24 || !strings.HasPrefix(s.publicURL, "https://") {
 		log.Fatal("public video config incomplete")

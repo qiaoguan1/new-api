@@ -260,6 +260,10 @@ func GetTokenById(id int) (*Token, error) {
 }
 
 func GetTokenByKey(key string, fromDB bool) (token *Token, err error) {
+	if common.IsQuotaDBAuthoritative() {
+		err = DB.Where(map[string]interface{}{"key": key}).First(&token).Error
+		return token, err
+	}
 	defer func() {
 		// Update Redis cache asynchronously on successful DB read
 		if shouldUpdateRedis(fromDB, err) && token != nil {
@@ -383,6 +387,9 @@ func IncreaseTokenQuota(tokenId int, key string, quota int) (err error) {
 	if quota < 0 {
 		return errors.New("quota 不能为负数！")
 	}
+	if common.IsQuotaDBAuthoritative() {
+		return increaseTokenQuota(tokenId, quota)
+	}
 	if common.RedisEnabled {
 		gopool.Go(func() {
 			err := cacheIncrTokenQuota(key, int64(quota))
@@ -412,6 +419,9 @@ func increaseTokenQuota(id int, quota int) (err error) {
 func DecreaseTokenQuota(id int, key string, quota int) (err error) {
 	if quota < 0 {
 		return errors.New("quota 不能为负数！")
+	}
+	if common.IsQuotaDBAuthoritative() {
+		return decreaseTokenQuota(id, quota)
 	}
 	if common.RedisEnabled {
 		gopool.Go(func() {

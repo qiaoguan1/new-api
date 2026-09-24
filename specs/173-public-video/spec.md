@@ -1,21 +1,25 @@
 # Public API-key video access
 
+## Final status — production enabled 2026-09-24
+
+User selected A, authorizing a native main-site upgrade and brief restart. Native DB-authoritative quota mode, atomic preconsume and public key access are deployed and verified. See 普通用户密钥调用说明.md and deployment.md. The original sidecar-only rejection below is historical, not the current deployment state.
+
 User authorization: all regular users/API keys can call the new verified models. Preserve disabled/expired/account/IP and user-selected model restrictions; no requirement to create or share a service key. All legitimate user/token groups can use the seven verified Nody video models. Existing Flare/Sunburst image routes will cover legitimate groups without changing price.
 
 ## Plan and acceptance checklist
 
 - [x] Inspect production gateway, native authentication, group rules, wallet conversion and caches.
-- [ ] Add isolated Go public front door using existing NewAPI model/settings code; never rebuild or migrate the unrelated production main binary/schema.
-- [ ] Dedicated durable task and wallet ledger: owner+request idempotency, atomic user/token reservation, exact-cost final delta+consume log. Pending/unknown never refunds without proof.
-- [ ] Independent public execution gateway disables downstream-specific webhooks; existing service-token clients proxy unchanged to original gateway.
-- [ ] Validate ownership for status/content, model limits, IP, expiry, overflow, replay/conflict, failed refund and restart recovery.
-- [ ] Canary with database backup and bounded paid verification; production routing cutover, all legitimate groups image compatibility, public docs and rollback.
+- [x] Coordinate native wallet reads/writes on exact deployed source; isolated public frontdoor uses same models/settings. Only additive public task ledger migration.
+- [x] Dedicated durable task and wallet ledger: owner+request idempotency, atomic user/token reservation, exact-cost final delta+consume log. Pending/unknown never refunds without proof.
+- [x] Independent public execution gateway disables downstream-specific webhooks; existing service-token clients proxy unchanged to original gateway.
+- [x] Validate ownership for status/content, model limits, IP, expiry, overflow, replay/conflict, failed refund and restart recovery.
+- [x] Canary with database backup and bounded paid verification; production routing cutover, all legitimate groups image compatibility, public docs and rollback.
 
 No Grok image enablement. No modifications to historical balances/prices, existing upstream routing, unrelated schedules, or disabled accounts. Fixed verified exact specs only. Wallet denomination is frozen per task from site quota-unit settings and face-value Price (currently1CNY per500000quota), not USD display FX7.3 and not upstream credit conversion1.5. Live payment configuration must be verified before deployment.
 
 Public API contracts: POST /v1/videos; GET /v1/videos/{public_id} and /content; GET /v1/capabilities and /v1/video-prices with regular Bearer key. Client request_id/Idempotency-Key optional but when provided must agree. Absent keys get generated IDs; clients should retain IDs and never change them to retry uncertain requests. Shared-service calls retain exact previous semantics.
 
-## Deployment gate: BLOCKED, not production-ready
+## Historical prototype gate: blocked, superseded by user-authorized A
 
 The standalone prototype was security-reviewed and MUST NOT be deployed with shared native wallets. Native production uses BATCH_UPDATE_ENABLED=true. Its DB quota can lag already-spent cache quota. Applying a sidecar cache delta after DB commit can also double-apply against a newly rehydrated cache; an asynchronous native refresh can overwrite it. A delivery receipt alone does not solve cache-epoch consistency.
 

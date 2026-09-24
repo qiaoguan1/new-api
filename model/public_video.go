@@ -1,9 +1,8 @@
 package model
 
 import (
-	"context"
 	"errors"
-	"fmt"
+	"math"
 	"time"
 
 	"github.com/QuantumNous/new-api/common"
@@ -35,15 +34,6 @@ type PublicVideoTask struct {
 	UpdatedAt       int64
 }
 
-// PublicVideoCacheEvent delivers quota deltas without overwriting native batched accounting.
-type PublicVideoCacheEvent struct {
-	ID        string `gorm:"primaryKey;size:64"`
-	UserID    int
-	TokenID   int
-	Delta     int
-	Delivered bool `gorm:"index"`
-}
-
 var ErrPublicVideoConflict = errors.New("idempotency_conflict")
 var ErrPublicVideoQuota = errors.New("insufficient_quota")
 var ErrPublicVideoForbidden = errors.New("access_denied")
@@ -67,6 +57,9 @@ func PublicVideoQuota(amount, rate string) (int, error) {
 
 // ReservePublicVideo serializes all requests for an owner before checking idempotency and funds.
 func ReservePublicVideo(candidate PublicVideoTask) (PublicVideoTask, bool, error) {
+	if !common.IsQuotaDBAuthoritative() {
+		return PublicVideoTask{}, false, errors.New("native_quota_authority_required")
+	}
 	var result PublicVideoTask
 	reused := false
 	err := DB.Transaction(func(tx *gorm.DB) error {
@@ -105,7 +98,10 @@ func ReservePublicVideo(candidate PublicVideoTask) (PublicVideoTask, bool, error
 		if u.Quota < quota || (!token.UnlimitedQuota && token.RemainQuota < quota) {
 			return ErrPublicVideoQuota
 		}
-		if int64(token.UsedQuota)+int64(quota) > common.MaxQuota {
+		if !quotaLedgerAdditionFits(token.UsedQuota, quota) {
+			return errors.New("quota_overflow")
+		}
+		if !quotaLedgerAdditionFits(token.RemainQuota, -quota) {
 			return errors.New("quota_overflow")
 		}
 		candidate.ReservedQuota = quota
@@ -116,9 +112,7 @@ func ReservePublicVideo(candidate PublicVideoTask) (PublicVideoTask, bool, error
 			return e
 		}
 		changes := map[string]interface{}{"used_quota": gorm.Expr("used_quota + ?", quota), "accessed_time": time.Now().Unix()}
-		if !token.UnlimitedQuota {
-			changes["remain_quota"] = gorm.Expr("remain_quota - ?", quota)
-		}
+		changes["remain_quota"] = gorm.Expr("remain_quota - ?", quota)
 		if e = tx.Model(&token).Updates(changes).Error; e != nil {
 			return e
 		}
@@ -126,13 +120,16 @@ func ReservePublicVideo(candidate PublicVideoTask) (PublicVideoTask, bool, error
 			return e
 		}
 		result = candidate
-		return tx.Create(&PublicVideoCacheEvent{ID: candidate.ID + ":reserve", UserID: u.Id, TokenID: token.Id, Delta: -quota}).Error
+		return nil
 	})
 	return result, reused, err
 }
 
 // SettlePublicVideo applies one authoritative final amount, including a proven full refund.
 func SettlePublicVideo(id, amount, snapshot string) error {
+	if !common.IsQuotaDBAuthoritative() {
+		return errors.New("native_quota_authority_required")
+	}
 	return DB.Transaction(func(tx *gorm.DB) error {
 		var row PublicVideoTask
 		if e := lockForUpdate(tx).First(&row, "id = ?", id).Error; e != nil {
@@ -163,68 +160,40 @@ func SettlePublicVideo(id, amount, snapshot string) error {
 			return ErrPublicVideoForbidden
 		}
 		delta := row.ReservedQuota - quota
-		if int64(u.Quota)+int64(delta) > common.MaxQuota || int64(u.Quota)+int64(delta) < common.MinQuota || int64(u.UsedQuota)+int64(quota) > common.MaxQuota || int64(token.UsedQuota)-int64(delta) > common.MaxQuota {
+		if !quotaLedgerAdditionFits(u.Quota, delta) || !quotaLedgerAdditionFits(u.UsedQuota, quota) || !quotaLedgerAdditionFits(token.UsedQuota, -delta) {
 			return errors.New("quota_overflow")
 		}
-		if !token.UnlimitedQuota && (int64(token.RemainQuota)+int64(delta) > common.MaxQuota || int64(token.RemainQuota)+int64(delta) < common.MinQuota) {
+		if !quotaLedgerAdditionFits(token.RemainQuota, delta) {
 			return errors.New("quota_overflow")
 		}
 		if e = tx.Unscoped().Model(&u).Updates(map[string]interface{}{"quota": gorm.Expr("quota + ?", delta), "used_quota": gorm.Expr("used_quota + ?", quota), "request_count": gorm.Expr("request_count + 1")}).Error; e != nil {
 			return e
 		}
 		changes := map[string]interface{}{"used_quota": gorm.Expr("used_quota - ?", delta)}
-		if !token.UnlimitedQuota {
-			changes["remain_quota"] = gorm.Expr("remain_quota + ?", delta)
-		}
+		changes["remain_quota"] = gorm.Expr("remain_quota + ?", delta)
 		if e = tx.Unscoped().Model(&token).Updates(changes).Error; e != nil {
 			return e
 		}
 		// This service requires the existing logs table to share the main transaction database.
 		other, _ := common.Marshal(map[string]interface{}{"billing_source": "wallet", "billing_contract_version": "xtai-video-billing-v2.2", "charged_cny": amount, "reserved_cny": row.ReservedCNY, "quota_per_cny": row.QuotaPerCNY, "public_video_id": row.ID})
 		log := Log{UserId: u.Id, CreatedAt: time.Now().Unix(), Type: LogTypeConsume, Content: "Video actual-cost settlement", Username: u.Username, TokenName: token.Name, ModelName: row.Model, Quota: quota, TokenId: token.Id, Group: row.Group, RequestId: row.ID, UpstreamRequestId: row.BackendID, Other: string(other)}
-		if e = tx.Create(&log).Error; e != nil {
-			return e
-		}
-		if e = tx.Create(&PublicVideoCacheEvent{ID: row.ID + ":settle", UserID: u.Id, TokenID: token.Id, Delta: delta}).Error; e != nil {
+		// Production's older schema calls this column channel_id; newer versions use channel.
+		// The dedicated task ledger and log metadata carry the provider identity independently.
+		if e = tx.Omit("ChannelId").Create(&log).Error; e != nil {
 			return e
 		}
 		return tx.Model(&row).Updates(map[string]interface{}{"state": "settled", "charged_cny": amount, "charged_quota": quota, "snapshot": snapshot, "updated_at": time.Now().Unix(), "last_error": ""}).Error
 	})
 }
 
-// FlushPublicVideoCache uses a Redis receipt to make replayed delta delivery safe.
-func FlushPublicVideoCache(taskID string) error {
-	if !common.RedisEnabled {
-		return errors.New("redis_required")
+// Aggregate wallet ledgers can exceed the per-request int32 charge bound.
+// Check before adding, since an overflowed sum cannot be validated afterward.
+func quotaLedgerAdditionFits(balance, delta int) bool {
+	if delta > 0 {
+		return int64(balance) <= math.MaxInt64-int64(delta)
 	}
-	var events []PublicVideoCacheEvent
-	q := DB.Where("delivered = ?", false)
-	if taskID != "" {
-		q = q.Where("id IN ?", []string{taskID + ":reserve", taskID + ":settle"})
+	if delta < 0 {
+		return int64(balance) >= math.MinInt64-int64(delta)
 	}
-	if e := q.Order("id asc").Limit(100).Find(&events).Error; e != nil {
-		return e
-	}
-	for _, event := range events {
-		var token Token
-		if e := DB.Unscoped().First(&token, event.TokenID).Error; e != nil {
-			return e
-		}
-		keys := []string{"public-video-cache:" + event.ID, fmt.Sprintf("user:%d", event.UserID), "token:" + common.GenerateHMAC(token.Key)}
-		script := `if redis.call('exists',KEYS[1])==1 then return 0 end
-if redis.call('exists',KEYS[2])==1 then redis.call('hincrby',KEYS[2],'Quota',ARGV[1]) end
-if ARGV[2]=='1' and redis.call('exists',KEYS[3])==1 then redis.call('hincrby',KEYS[3],'RemainQuota',ARGV[1]) end
-redis.call('set',KEYS[1],'1');return 1`
-		finite := "1"
-		if token.UnlimitedQuota {
-			finite = "0"
-		}
-		if e := common.RDB.Eval(context.Background(), script, keys, event.Delta, finite).Err(); e != nil {
-			return e
-		}
-		if e := DB.Model(&event).Update("delivered", true).Error; e != nil {
-			return e
-		}
-	}
-	return nil
+	return true
 }

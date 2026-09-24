@@ -11,7 +11,8 @@ import (
 
 func publicVideoFixture(t *testing.T) (User, Token, PublicVideoTask) {
 	t.Helper()
-	require.NoError(t, DB.AutoMigrate(&PublicVideoTask{}, &PublicVideoCacheEvent{}))
+	t.Setenv("QUOTA_DB_AUTHORITATIVE", "true")
+	require.NoError(t, DB.AutoMigrate(&PublicVideoTask{}))
 	suffix := fmt.Sprintf("%d", time.Now().UnixNano())
 	u := User{Username: "pv" + suffix[len(suffix)-10:], AffCode: suffix[len(suffix)-8:], Password: "not-a-real-password", Status: common.UserStatusEnabled, Quota: 2000000, Group: "default"}
 	require.NoError(t, DB.Create(&u).Error)
@@ -81,5 +82,19 @@ func TestPublicVideoQuotaBoundaries(t *testing.T) {
 	for _, amount := range []string{"-1", "NaN", "1e999999", "100001"} {
 		_, e = PublicVideoQuota(amount, "500000")
 		assert.Error(t, e)
+	}
+}
+
+func TestPublicVideoTokenModeChangePreservesQuotaLedger(t *testing.T) {
+	for _, initialUnlimited := range []bool{true, false} {
+		_, token, row := publicVideoFixture(t)
+		require.NoError(t, DB.Model(&token).Update("unlimited_quota", initialUnlimited).Error)
+		_, _, e := ReservePublicVideo(row)
+		require.NoError(t, e)
+		require.NoError(t, DB.Model(&token).Update("unlimited_quota", !initialUnlimited).Error)
+		require.NoError(t, SettlePublicVideo(row.ID, "0.450000", `{"status":"succeeded"}`))
+		require.NoError(t, DB.First(&token, token.Id).Error)
+		assert.Equal(t, 1775000, token.RemainQuota)
+		assert.Equal(t, 225000, token.UsedQuota)
 	}
 }
