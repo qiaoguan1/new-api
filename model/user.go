@@ -1127,6 +1127,10 @@ func ValidateAccessToken(token string) (*User, error) {
 
 // GetUserQuota gets quota from Redis first, falls back to DB if needed
 func GetUserQuota(id int, fromDB bool) (quota int, err error) {
+	if common.IsQuotaDBAuthoritative() {
+		err = DB.Model(&User{}).Where("id = ?", id).Select("quota").First(&quota).Error
+		return quota, err
+	}
 	defer func() {
 		// Update Redis cache asynchronously on successful DB read
 		if shouldUpdateRedis(fromDB, err) {
@@ -1233,6 +1237,9 @@ func IncreaseUserQuota(id int, quota int, db bool) (err error) {
 	if quota < 0 {
 		return errors.New("quota 不能为负数！")
 	}
+	if common.IsQuotaDBAuthoritative() {
+		return increaseUserQuota(id, quota)
+	}
 	gopool.Go(func() {
 		err := cacheIncrUserQuota(id, int64(quota))
 		if err != nil {
@@ -1257,6 +1264,9 @@ func increaseUserQuota(id int, quota int) (err error) {
 func DecreaseUserQuota(id int, quota int, db bool) (err error) {
 	if quota < 0 {
 		return errors.New("quota 不能为负数！")
+	}
+	if common.IsQuotaDBAuthoritative() {
+		return decreaseUserQuota(id, quota)
 	}
 	gopool.Go(func() {
 		err := cacheDecrUserQuota(id, int64(quota))

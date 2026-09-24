@@ -1,0 +1,7 @@
+FROM xtai/issue173-native-builder:verified AS builder
+COPY quota_authority.go /build/model/quota_authority.go
+COPY classic-placeholder.html /build/web/classic/dist/index.html
+RUN go build -ldflags '-s -w -X github.com/QuantumNous/new-api/common.Version=issue173-quota-authority' -o /new-api .
+FROM new-api-fixed:issue157-stream-errors-72d5a71c
+COPY --from=builder /new-api /new-api
+LABEL com.aixingtuyun.base-source=72d5a71c807a8aab2be3c8f1417169416cd39325

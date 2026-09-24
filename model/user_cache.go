@@ -92,6 +92,13 @@ func updateUserCache(user User) error {
 
 // GetUserCache gets complete user cache from hash
 func GetUserCache(userId int) (*UserBase, error) {
+	if common.IsQuotaDBAuthoritative() {
+		user, err := GetUserById(userId, false)
+		if err != nil {
+			return nil, err
+		}
+		return user.ToBaseUser(), nil
+	}
 	// Try getting from Redis first
 	userCache, err := cacheGetUserBase(userId)
 	if err == nil {
