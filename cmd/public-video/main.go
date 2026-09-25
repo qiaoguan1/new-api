@@ -430,6 +430,10 @@ func (s *server) serve(c *gin.Context) {
 		return
 	}
 	c.Header("Access-Control-Allow-Origin", "*")
+	if c.Request.URL.Path == "/api/pricing" {
+		s.marketPricing(c)
+		return
+	}
 	if c.Request.URL.Path == "/health" {
 		c.JSON(200, gin.H{"ok": true})
 		return

@@ -50,10 +50,10 @@ func fixture(t *testing.T) (*server, *gin.Engine, model.User, model.Token) {
 			return
 		}
 		if r.URL.Path == "/v1/capabilities" {
-			_, _ = w.Write([]byte(`{"capabilities":{"video":{"traffic_enabled":true,"models":[{"id":"grok-imagine-video-official","available":true}]}}}`))
+			_, _ = w.Write([]byte(`{"billing_contract_version":"xtai-video-billing-v2.2","capabilities":{"video":{"traffic_enabled":true,"models":[{"id":"grok-imagine-video-official","available":true}]}}}`))
 			return
 		}
-		_, _ = w.Write([]byte(`{"pricing":{"models":[{"model":"grok-imagine-video-official","resolution":"480p","currency":"CNY","billing_unit":"output_second","cny_per_second_exact":"0.675000"}]}}`))
+		_, _ = w.Write([]byte(`{"pricing":{"contract_version":"xtai-video-pricing-v1","models":[{"model":"grok-imagine-video-official","resolution":"480p","currency":"CNY","billing_unit":"output_second","cny_per_second_exact":"0.675000"}]}}`))
 	}))
 	t.Cleanup(preflight.Close)
 	s.backend = preflight.URL
