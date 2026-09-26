@@ -15,6 +15,18 @@ SPEC.loader.exec_module(scan)
 
 
 class ScanTransportTests(unittest.TestCase):
+    def test_exact_internal_adapter_uses_its_container_address(self):
+        channel = {"id": 57, "base_url": "http://xtai-nodyhub-image-adapter:8097/nodyhub"}
+        result = mock.Mock(returncode=0, stdout='{"IPAddress":"172.18.0.9"}')
+        with mock.patch.object(scan.subprocess, "run", return_value=result):
+            self.assertEqual(scan.internal_catalog_url(channel, channel["base_url"] + "/v1/models"),
+                             "http://172.18.0.9:8097/nodyhub/v1/models")
+        with mock.patch.object(scan.subprocess, "run") as inspect:
+            self.assertIsNone(scan.internal_catalog_url({**channel, "id": 999}, channel["base_url"] + "/v1/models"))
+            self.assertIsNone(scan.internal_catalog_url(channel, channel["base_url"] + "/v1/models?token=x"))
+            self.assertIsNone(scan.internal_catalog_url(channel, "http://169.254.169.254/v1/models"))
+            inspect.assert_not_called()
+
     def test_disabled_channel_invalid_mapping_is_not_parsed(self):
         row = scan.base_channel_record(
             {

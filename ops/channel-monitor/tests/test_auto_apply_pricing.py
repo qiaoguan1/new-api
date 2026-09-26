@@ -104,6 +104,42 @@ def fixed_cost(cost):
 
 
 class PricingPlanTests(unittest.TestCase):
+    def test_unknown_enabled_provider_blocks_shared_model_not_unrelated_models(self):
+        known = channel(1,"known",["shared","independent"])
+        unknown = channel(2,"",["shared"])
+        result = pricing.build_isolated_pricing_plan(ledger(known=source(shared=text_cost(1,5),independent=text_cost(1,5))), audit(known,unknown), DAY, self.current_options(), max_change_ratio=5)
+        decisions={r['model']:r for r in result['decisions']}
+        self.assertEqual(decisions['shared']['action'],'skip')
+        self.assertEqual(decisions['independent']['action'],'apply')
+
+    def test_gpt6_alias_and_disabled_abilities_use_only_real_routed_cost(self):
+        row = channel(39, "codeplan", ["gpt-6", "gpt-6-astra"])
+        row.update(configured_models=["gpt-6", "gpt-6-astra"], enabled_model_names=["gpt-6"], model_mapping={"gpt-6":"gpt-6-astra"})
+        row["models"]["gpt-6"]["upstream_model"] = "gpt-6-astra"
+        result = pricing.build_pricing_plan(ledger(codeplan=source(**{"gpt-6-astra":text_cost(1.0,5.0)})), audit(row), DAY, self.current_options(), max_change_ratio=5)
+        self.assertEqual([d["model"] for d in result["decisions"]], ["gpt-6"])
+        self.assertEqual(result["decisions"][0]["action"], "apply")
+        self.assertEqual(result["decisions"][0]["source_price_keys"], {"codeplan":"gpt-6-astra"})
+
+    def test_matching_verified_price_is_unchanged_not_a_fake_write(self):
+        current = self.current_options()
+        first = pricing.build_pricing_plan(ledger(a=source(model=text_cost(1,5))), audit(channel(1,"a",["model"])), DAY, current, max_change_ratio=5)
+        current.update(first["options"])
+        second = pricing.build_pricing_plan(ledger(a=source(model=text_cost(1,5))), audit(channel(1,"a",["model"])), DAY, current, max_change_ratio=5)
+        self.assertEqual(second["decisions"][0]["action"], "unchanged")
+        summary = pricing._summary(second, False)
+        self.assertEqual(summary["applied_models"], 0)
+        self.assertEqual(summary["unchanged_models"], 1)
+        self.assertEqual(summary["business_status"], "complete")
+
+    def test_one_invalid_model_does_not_cancel_unrelated_good_model(self):
+        bad = channel(2,"bad",["bad-model"]);bad["model_mapping"]={"bad-model":"wrong"}
+        result = pricing.build_isolated_pricing_plan(ledger(a=source(model=text_cost(1,5))), audit(channel(1,"a",["model"]),bad), DAY, self.current_options(), max_change_ratio=5)
+        by_model={d["model"]:d for d in result["decisions"]}
+        self.assertEqual(by_model["model"]["action"], "apply")
+        self.assertEqual(by_model["bad-model"]["action"], "skip")
+        self.assertEqual(pricing.business_status(result["decisions"]), "partial")
+
     def current_options(self):
         return {
             "ModelRatio": {},
@@ -246,7 +282,7 @@ class PricingPlanTests(unittest.TestCase):
         self.assertTrue(math.isclose(fixed["sell_cny_per_call"], 0.6))
         self.assertTrue(math.isclose(result["options"]["ModelPrice"]["image-model"], 4.0))
 
-    def test_disabled_and_failed_channels_cannot_influence_highest_cost(self):
+    def test_disabled_routes_are_excluded_but_enabled_probe_failures_keep_cost_coverage(self):
         daily_audit = audit(
             channel(1, "healthy", ["model"]),
             channel(2, "disabled", ["model"], status=2),
@@ -264,8 +300,8 @@ class PricingPlanTests(unittest.TestCase):
         decision = result["decisions"][0]
 
         self.assertEqual(decision["action"], "apply")
-        self.assertEqual(decision["worst_input_source"], "healthy")
-        self.assertEqual(decision["worst_input_cost_cny_per_m"], 1.0)
+        self.assertEqual(decision["worst_input_source"], "failed")
+        self.assertEqual(decision["worst_input_cost_cny_per_m"], 200.0)
 
     def test_discovered_model_without_actual_cost_is_skipped_and_preserved(self):
         daily_audit = audit(channel(1, "healthy", ["unused-model"]))
@@ -418,14 +454,15 @@ class PricingPlanTests(unittest.TestCase):
             "gpt-image-2": {"available": True, "upstream_model": "gpt-image-2-adobe"}
         }
 
-        with self.assertRaisesRegex(pricing.PricingError, "mapping mismatch"):
-            pricing.build_pricing_plan(
+        result = pricing.build_pricing_plan(
                 ledger(codeplan=source()),
                 audit(mapped),
                 DAY,
                 self.current_options(),
                 max_change_ratio=50.0,
             )
+        self.assertEqual(result["decisions"][0]["action"], "skip")
+        self.assertEqual(result["decisions"][0]["reason"], "critical_model_alert")
 
     def test_mapped_model_uses_only_mapped_manual_price_key(self):
         mapped = channel(38, "codeplan", ["gpt-image-2"])
@@ -468,6 +505,7 @@ class PricingPlanTests(unittest.TestCase):
 
     def test_topaz_upstream_detail_does_not_change_price_key(self):
         topaz = channel(43, "topaz", ["aaa-9"])
+        topaz["type"] = 58
         topaz["models"] = {
             "aaa-9": {"available": True, "upstream_model": "different-upstream-name"}
         }
@@ -954,7 +992,7 @@ class PricingPlanTests(unittest.TestCase):
             mock.patch.object(pricing, "read_json", side_effect=lambda path, *a, **k: paths[path]),
             mock.patch.object(pricing, "get_option", side_effect=lambda key: options[key]),
             mock.patch.object(pricing, "protected_video_models", return_value=set()),
-            mock.patch.object(pricing, "build_pricing_plan", return_value=plan) as build,
+            mock.patch.object(pricing, "build_isolated_pricing_plan", return_value=plan) as build,
             mock.patch.object(pricing, "append_run_log"),
         ):
             code = pricing.main(["--dry-run"])
@@ -992,7 +1030,7 @@ class PricingPlanTests(unittest.TestCase):
                 max_change_ratio=float("nan"),
             )
 
-    def test_critical_channel_alert_excludes_its_cost(self):
+    def test_availability_failure_does_not_silently_remove_enabled_route_cost(self):
         daily_audit = audit(
             channel(1, "healthy", ["model"]),
             channel(2, "blocked", ["model"]),
@@ -1007,7 +1045,7 @@ class PricingPlanTests(unittest.TestCase):
             daily_ledger, daily_audit, DAY, self.current_options(), max_change_ratio=5.0
         )
 
-        self.assertEqual(result["decisions"][0]["worst_input_source"], "healthy")
+        self.assertEqual(result["decisions"][0]["worst_input_source"], "blocked")
 
     def test_underpriced_model_self_corrects_from_worst_trusted_actual_costs(self):
         options = self.current_options()

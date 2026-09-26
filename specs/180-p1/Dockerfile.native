@@ -1,0 +1,11 @@
+FROM xtai/issue173-native-builder:verified AS builder
+ENV GOMAXPROCS=2 GOMEMLIMIT=1500MiB
+COPY model/token.go /build/model/token.go
+COPY model/quota_authority.go /build/model/quota_authority.go
+COPY controller/token.go /build/controller/token.go
+COPY token_auto_group_test.go /build/model/token_auto_group_test.go
+COPY classic-placeholder.html /build/web/classic/dist/index.html
+RUN gofmt -w model/token.go controller/token.go model/token_auto_group_test.go && go test ./model -run '^TestTokenDefaultAutoGroupPersistence$' -count=1 && go build -ldflags '-s -w -X github.com/QuantumNous/new-api/common.Version=issue180-token-default' -o /new-api .
+FROM new-api-fixed:issue173-quota-authority
+COPY --from=builder /new-api /new-api
+LABEL com.aixingtuyun.base-source=issue173-quota-authority

@@ -209,11 +209,14 @@ def _positive_number(value):
 def _model_names(channel):
     configured = channel.get("configured_models")
     if isinstance(configured, list):
-        return {
+        names = {
             name.strip()
             for name in configured
             if isinstance(name, str) and name.strip()
         }
+        if "enabled_model_names" in channel:
+            names &= set(channel.get("enabled_model_names") or [])
+        return names
     models = channel.get("models") or {}
     if not isinstance(models, dict):
         return set()
@@ -233,7 +236,7 @@ def _channel_price_keys(channel, models):
     mapping = parse_model_mapping(channel.get("model_mapping"))
     result = {}
     for model in models:
-        if model not in STABLE_MAPPED_MODELS:
+        if channel.get("type") == 58:
             result[model] = model
             continue
         try:
@@ -293,9 +296,20 @@ def build_audit_policy(daily_audit, day):
         if not isinstance(channel, dict) or channel.get("status") != 1:
             continue
         models = _model_names(channel)
-        price_keys = _channel_price_keys(channel, models)
         discovered_models.update(models)
+        try:
+            price_keys = _channel_price_keys(channel, models)
+        except (PricingError, ValueError, TypeError):
+            # Preserve fail-closed pricing for every model on the bad channel,
+            # including shared routes, while unrelated models can continue.
+            blocked_models.update(models)
+            continue
         slug = channel.get("upstream_slug")
+        if not isinstance(slug, str) or not slug.strip():
+            # Unknown enabled routes are not zero-cost routes. Their shared
+            # models must remain unchanged until the source is identified.
+            blocked_models.update(models)
+            continue
         if isinstance(slug, str) and slug:
             for model in models:
                 model_expected_sources.setdefault(model, set()).add(slug)
@@ -750,7 +764,7 @@ def protected_video_models(daily_audit, raw_policy):
             continue
         source = channel.get("upstream_slug")
         for model in _model_names(channel):
-            if normalize_model_name(source, model, policy).get("status") == "matched":
+            if channel.get("type") == 58 or "视频" in str(channel.get("group", "")) or normalize_model_name(source, model, policy).get("status") == "matched":
                 protected.add(model)
     return protected
 
@@ -805,6 +819,12 @@ def build_pricing_plan(
             decision["reason"] = "video_official_pricing_only"
             decisions.append(decision)
             continue
+        if model.startswith("claude-"):
+            # Claude178 uses dedicated upstream key groups and cache tariffs;
+            # account-default catalog/aggregate rates cannot safely replace them.
+            decision["reason"] = "route_billing_group_evidence_required"
+            decisions.append(decision)
+            continue
         if model in policy["blocked_models"]:
             decision["reason"] = "critical_model_alert"
             decisions.append(decision)
@@ -826,6 +846,9 @@ def build_pricing_plan(
             decision["missing_cost_sources"] = failed_incomplete_sources
             decisions.append(decision)
             continue
+        # An enabled route's known cost remains part of the upper bound even
+        # when its availability probe fails; never silently drop costly routes.
+        eligible_sources = expected_sources or eligible_sources
 
         price_key_sets = policy["model_price_keys"].get(model, {})
         ambiguous_price_key_sources = sorted(
@@ -974,6 +997,11 @@ def build_pricing_plan(
                 )
                 if catalog_fetched_at is not None:
                     decision["worst_cost_catalog_fetched_at"] = catalog_fetched_at
+        if decision.get("action") == "apply" and all(
+            proposed.get(model) == current_options[key].get(model)
+            for key, proposed in (("ModelRatio", new_model_ratio), ("CompletionRatio", new_completion_ratio), ("ModelPrice", new_model_price))
+        ):
+            decision.update(action="unchanged", reason="price_unchanged")
         decisions.append(decision)
 
     return {
@@ -987,6 +1015,45 @@ def build_pricing_plan(
             "ModelPrice": new_model_price,
         },
     }
+
+
+def build_isolated_pricing_plan(ledger, daily_audit, day, current_options, *,
+                                max_change_ratio, protected_videos=(),
+                                manual_evidence=None, target_models=None):
+    """Isolate model-specific evidence failures without relaxing shared costs."""
+    kwargs = {"max_change_ratio": max_change_ratio,
+              "protected_videos": protected_videos, "manual_evidence": manual_evidence}
+    # Validate global date, currency/group and inventory before considering writes.
+    plan = build_pricing_plan(ledger, daily_audit, day, current_options,
+                              target_models=set(), **kwargs)
+    models = set(build_audit_policy(daily_audit, day)["discovered_models"])
+    if target_models is not None:
+        models &= target_models
+    for model in sorted(models):
+        try:
+            item = build_pricing_plan(ledger, daily_audit, day, current_options,
+                                      target_models={model}, **kwargs)
+        except Exception:
+            plan["decisions"].append({"model": model, "action": "skip",
+                                       "reason": "model_evidence_error"})
+            continue
+        plan["decisions"].extend(item["decisions"])
+        for decision in item["decisions"]:
+            if decision.get("action") != "apply":
+                continue
+            for key in OPTION_KEYS:
+                if model in item["options"][key]:
+                    plan["options"][key][model] = item["options"][key][model]
+                else:
+                    plan["options"][key].pop(model, None)
+    return plan
+
+
+def business_status(decisions):
+    """Separate process completion from whether pricing evidence is actionable."""
+    blocked = any(x.get("action") == "skip" and x.get("reason") != "video_official_pricing_only" for x in decisions)
+    applied = any(x.get("action") in {"apply", "unchanged"} for x in decisions)
+    return ("partial" if applied else "blocked") if blocked else "complete"
 
 
 def backup_pricing_options(day, options):
@@ -1018,9 +1085,11 @@ def _summary(plan, dry_run):
     return {
         "date": plan.get("date"),
         "dry_run": dry_run,
+        "business_status": business_status(decisions),
         "discovered_models": len(decisions),
         "applied_models": sum(1 for item in decisions if item.get("action") == "apply"),
-        "skipped_models": sum(1 for item in decisions if item.get("action") != "apply"),
+        "unchanged_models": sum(1 for item in decisions if item.get("action") == "unchanged"),
+        "skipped_models": sum(1 for item in decisions if item.get("action") == "skip"),
         "decisions": [
             {
                 key: item.get(key)
@@ -1094,7 +1163,7 @@ def main(argv=None):
         max_change_ratio = float(
             os.environ.get("CHANNEL_MONITOR_MAX_CHANGE_RATIO", DEFAULT_MAX_CHANGE_RATIO)
         )
-        plan = build_pricing_plan(
+        plan = build_isolated_pricing_plan(
             ledger,
             daily_audit,
             day,
@@ -1113,6 +1182,7 @@ def main(argv=None):
             "generated_at": generated_at,
             "max_change_ratio": max_change_ratio,
             "status": "complete",
+            "business_status": business_status(plan["decisions"]),
             "incomplete_credentials": incomplete_credentials,
         }
         if not args.dry_run and any(
