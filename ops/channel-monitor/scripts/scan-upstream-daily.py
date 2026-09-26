@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import copy
+import ipaddress
 import json
 import os
 import re
@@ -187,10 +188,45 @@ def redact_http_text(value, headers):
     return text
 
 
-def http_json(url, method="GET", payload=None, headers=None, timeout=25):
+INTERNAL_CATALOGS = {
+    54: ("http://xtai-toonflow-image-adapter:8094", "xtai-toonflow-image-adapter"),
+    55: ("http://xtai-image25-adapter:8095/rolldek", "xtai-image25-adapter"),
+    56: ("http://xtai-image25-adapter:8095/hanhe", "xtai-image25-adapter"),
+    57: ("http://xtai-nodyhub-image-adapter:8097/nodyhub", "xtai-nodyhub-image-adapter"),
+}
+
+
+def internal_catalog_url(channel, url):
+    """Resolve only a reviewed adapter's exact read-only catalog through Docker."""
+    known = INTERNAL_CATALOGS.get(channel.get("id")) if isinstance(channel, dict) else None
+    if not known or channel.get("base_url") != known[0] or url != known[0] + "/v1/models":
+        return None
+    response = subprocess.run(
+        ["docker", "inspect", "--format", '{{json (index .NetworkSettings.Networks "app-net")}}', known[1]],
+        capture_output=True, text=True, timeout=5, check=False,
+    )
+    if response.returncode != 0:
+        return None
+    try:
+        address = ipaddress.ip_address(json.loads(response.stdout)["IPAddress"])
+        if address.version != 4 or not address.is_private or address.is_loopback or address.is_link_local:
+            return None
+    except (ValueError, KeyError, TypeError):
+        return None
+    parsed = parse.urlsplit(url)
+    return parse.urlunsplit(("http", f"{address}:{parsed.port}", parsed.path, "", ""))
+
+
+def http_json(url, method="GET", payload=None, headers=None, timeout=25, *, internal_channel=None):
     parsed_url = parse.urlsplit(url or "")
     if parsed_url.scheme != "https" or not parsed_url.hostname:
-        return None, None, "refusing non-HTTPS upstream request", 0
+        try:
+            internal = internal_catalog_url(internal_channel, url) if method == "GET" and payload is None else None
+        except (OSError, subprocess.SubprocessError):
+            internal = None
+        if not internal:
+            return None, None, "refusing non-HTTPS upstream request", 0
+        url = internal
     data = None
     final_headers = {"User-Agent": "xingtu-upstream-monitor/1.0"}
     if payload is not None:
@@ -198,7 +234,10 @@ def http_json(url, method="GET", payload=None, headers=None, timeout=25):
         final_headers["Content-Type"] = "application/json"
     final_headers.update(headers or {})
     req = request.Request(url, data=data, headers=final_headers, method=method)
-    opener = request.build_opener(NoRedirectHandler())
+    handlers = [NoRedirectHandler()]
+    if parsed_url.scheme == "http":
+        handlers.append(request.ProxyHandler({}))
+    opener = request.build_opener(*handlers)
     started = time.monotonic()
     status = None
     body = b""
@@ -236,6 +275,7 @@ SELECT jsonb_build_object(
         'balance_updated_time', c.balance_updated_time,
         'group', c."group",
         'models', c.models,
+        'enabled_model_names', (SELECT coalesce(jsonb_agg(DISTINCT a.model), '[]'::jsonb) FROM abilities a WHERE a.channel_id=c.id AND a.enabled=true),
         'model_mapping', c.model_mapping,
         'priority', c.priority
     ) ORDER BY c.id), '[]'::jsonb),
@@ -441,6 +481,7 @@ def metadata_probe_channel(channel, ledger_entry):
         join_url(base_url, models_path),
         headers=headers,
         timeout=25,
+        internal_channel=channel,
     )
     result["http_status"] = status
     result["latency_ms"] = elapsed
@@ -479,6 +520,10 @@ def metadata_probe_channel(channel, ledger_entry):
             result["upstream_group"],
             metadata.get("account_models"),
         )
+        # A key may use a dedicated billing group unlike the login account.
+        # Its authenticated model list proves visibility, not tariff eligibility.
+        if not model:
+            model = next((upstream for _, upstream in configured if upstream in advertised), "")
     else:
         model = next(
             (
@@ -565,7 +610,52 @@ def model_price(item, group):
 
 
 def scan_pricing(channel, upstream_group, ledger_entry=None):
+    if safe_int(channel.get("type")) == 58:
+        configured = [local for local, _ in configured_model_pairs(channel)]
+        return {
+            "status": "static",
+            "http_status": None,
+            "latency_ms": None,
+            "pricing": None,
+            "error": "",
+            "source": "configured_static_price",
+            "group": upstream_group,
+            "group_ratio": None,
+            "configured_models": configured,
+            "unavailable_models": {},
+            "models": {},
+        }
     metadata = (ledger_entry or {}).get("pricing_metadata") or {}
+    actual_costs = (ledger_entry or {}).get("per_model_real_cost") or {}
+    if (
+        metadata.get("status") != "complete"
+        and (ledger_entry or {}).get("collection_status") == "complete"
+        and (ledger_entry or {}).get("actual_log_complete") is True
+        and isinstance(actual_costs, dict)
+        and actual_costs
+    ):
+        pairs = configured_model_pairs(channel)
+        models = {
+            local_model: {
+                "available": True,
+                "upstream_model": upstream_model,
+                "actual_cost": actual_costs.get(upstream_model),
+            }
+            for local_model, upstream_model in pairs
+        }
+        return {
+            "status": "actual",
+            "http_status": None,
+            "latency_ms": None,
+            "pricing": None,
+            "error": "",
+            "source": "actual_deduction_log",
+            "group": upstream_group,
+            "group_ratio": None,
+            "configured_models": [local for local, _ in pairs],
+            "unavailable_models": {},
+            "models": models,
+        }
     if metadata.get("status") == "complete":
         pricing = {
             "success": True,
@@ -717,12 +807,52 @@ def channel_scoped_log_cost(ledger_entry, channel_models):
     return scoped
 
 
+def channel_cost_reconciles(day_summary, ledger_entry, channel_models):
+    """Require account-level cost rows to match this channel before margin math."""
+    per_model = ledger_entry.get("per_model_real_cost") or {}
+    model_set = {model.strip() for model in channel_models or [] if model and model.strip()}
+    if not isinstance(per_model, dict) or not model_set:
+        return False
+    upstream_calls = 0
+    upstream_prompt = 0
+    upstream_completion = 0
+    comparable = False
+    for model, detail in per_model.items():
+        if model not in model_set or not isinstance(detail, dict):
+            continue
+        calls = safe_int(detail.get("calls"), 0)
+        if calls <= 0:
+            continue
+        comparable = True
+        upstream_calls += calls
+        upstream_prompt += safe_int(detail.get("input_tokens"), 0)
+        upstream_completion += safe_int(detail.get("output_tokens"), 0)
+    if not comparable or upstream_calls != safe_int(day_summary.get("success_calls"), 0):
+        return False
+
+    def close_enough(upstream, local):
+        tolerance = max(100, int(max(upstream, local) * 0.02))
+        return abs(upstream - local) <= tolerance
+
+    local_prompt = safe_int(day_summary.get("prompt_tokens"), 0)
+    local_completion = safe_int(day_summary.get("completion_tokens"), 0)
+    if upstream_prompt or local_prompt:
+        if not close_enough(upstream_prompt, local_prompt):
+            return False
+    if upstream_completion or local_completion:
+        if not close_enough(upstream_completion, local_completion):
+            return False
+    return True
+
+
 def actual_daily_cost_source(day_summary, balance_row, local_quota_cost, ledger_entry=None, channel_models=None):
     ledger_entry = ledger_entry or {}
     # 最高优先级：上游消费日志，按渠道承载模型拆分（修图渠道毛利误报）
     scoped = channel_scoped_log_cost(ledger_entry, channel_models or [])
     if scoped is not None:
-        return scoped, "upstream_log", 1.0
+        if channel_cost_reconciles(day_summary, ledger_entry, channel_models or []):
+            return scoped, "upstream_log", 1.0
+        return scoped, "upstream_log_unreconciled", 0.0
 
     upstream_cost = safe_float(day_summary.get("upstream_cost_usd"), 0.0)
     if upstream_cost > 0:
@@ -920,6 +1050,8 @@ def base_channel_record(channel, upstream):
                 "model_mapping": parse_model_mapping(channel.get("model_mapping")),
             }
         )
+        if "enabled_model_names" in channel:
+            base["enabled_model_names"] = channel["enabled_model_names"]
     return base
 
 
@@ -938,61 +1070,74 @@ def build_snapshot():
 
     channel_results = []
     for channel in channels:
-        channel_id = safe_int(channel.get("id"))
-        upstream = next((item for item in upstreams if channel_matches_upstream(channel, item)), {})
-        base = base_channel_record(channel, upstream)
-        if safe_int(channel.get("status")) != 1:
+        try:
+            channel_id = safe_int(channel.get("id"))
+            upstream = next((item for item in upstreams if channel_matches_upstream(channel, item)), {})
+            base = base_channel_record(channel, upstream)
+            if safe_int(channel.get("status")) != 1:
+                channel_results.append({
+                    **base,
+                    "scan_status": "skipped_disabled",
+                    "availability": None,
+                    "pricing_status": "skipped",
+                    "unavailable_models": {},
+                    "models": {},
+                })
+                continue
+
+            ledger_entry = balance_ledger.get(upstream.get("slug") or "") or {}
+            probe = metadata_probe_channel(channel, ledger_entry)
+            pricing = scan_pricing(
+                channel, probe.get("upstream_group") or "", ledger_entry
+            )
+            day_summary = cost_summary.get(str(channel_id)) or cost_summary.get(channel_id) or {}
+            local_charge_quota = safe_float(day_summary.get("local_charge_quota"), 0.0)
+            local_charge_usd = local_charge_quota / QUOTA_PER_USD
+            channel_models = [upstream for _, upstream in configured_model_pairs(channel)]
+            actual_cost, cost_source, cost_confidence = actual_daily_cost_source(
+                day_summary,
+                {},
+                local_charge_usd,
+                ledger_entry,
+                channel_models,
+            )
+            revenue = local_charge_usd
+            margin = gross_margin(revenue, actual_cost) if cost_confidence >= 0.8 else None
             channel_results.append({
                 **base,
-                "scan_status": "skipped_disabled",
-                "availability": None,
-                "pricing_status": "skipped",
-                "unavailable_models": {},
-                "models": {},
+                "scan_status": "ok" if probe.get("status") == "ok" else "error",
+                "availability": probe,
+                "upstream_group": probe.get("upstream_group") or pricing.get("group") or "",
+                "pricing_status": pricing.get("status"),
+                "pricing_http_status": pricing.get("http_status"),
+                "pricing_version": pricing.get("pricing_version", ""),
+                "pricing_error": pricing.get("error", ""),
+                "upstream_group_ratio": pricing.get("group_ratio"),
+                "configured_models": pricing.get("configured_models", base["configured_models"]),
+                "unavailable_models": pricing.get("unavailable_models", {}),
+                "models": pricing.get("models", {}),
+                "daily": {
+                    "date": day,
+                    **day_summary,
+                    "local_charge_usd": safe_round(local_charge_usd),
+                    "actual_cost_usd": safe_round(actual_cost),
+                    "actual_cost_source": cost_source,
+                    "actual_cost_confidence": cost_confidence,
+                    "gross_margin": margin,
+                },
             })
-            continue
-
-        ledger_entry = balance_ledger.get(upstream.get("slug") or "") or {}
-        probe = metadata_probe_channel(channel, ledger_entry)
-        pricing = scan_pricing(
-            channel, probe.get("upstream_group") or "", ledger_entry
-        )
-        day_summary = cost_summary.get(str(channel_id)) or cost_summary.get(channel_id) or {}
-        local_charge_quota = safe_float(day_summary.get("local_charge_quota"), 0.0)
-        local_charge_usd = local_charge_quota / QUOTA_PER_USD
-        channel_models = [upstream for _, upstream in configured_model_pairs(channel)]
-        actual_cost, cost_source, cost_confidence = actual_daily_cost_source(
-            day_summary,
-            {},
-            local_charge_usd,
-            ledger_entry,
-            channel_models,
-        )
-        revenue = local_charge_usd
-        margin = gross_margin(revenue, actual_cost)
-        channel_results.append({
-            **base,
-            "scan_status": "ok" if probe.get("status") == "ok" else "error",
-            "availability": probe,
-            "upstream_group": probe.get("upstream_group") or pricing.get("group") or "",
-            "pricing_status": pricing.get("status"),
-            "pricing_http_status": pricing.get("http_status"),
-            "pricing_version": pricing.get("pricing_version", ""),
-            "pricing_error": pricing.get("error", ""),
-            "upstream_group_ratio": pricing.get("group_ratio"),
-            "configured_models": pricing.get("configured_models", base["configured_models"]),
-            "unavailable_models": pricing.get("unavailable_models", {}),
-            "models": pricing.get("models", {}),
-            "daily": {
-                "date": day,
-                **day_summary,
-                "local_charge_usd": safe_round(local_charge_usd),
-                "actual_cost_usd": safe_round(actual_cost),
-                "actual_cost_source": cost_source,
-                "actual_cost_confidence": cost_confidence,
-                "gross_margin": margin,
-            },
-        })
+        except Exception as exc:
+            # One malformed or unavailable upstream must not cancel the audit.
+            channel_results.append({
+                "channel_id": safe_int(channel.get("id")),
+                "name": channel.get("name"), "status": safe_int(channel.get("status")),
+                "configured_models": [x.strip() for x in str(channel.get("models") or "").split(",") if x.strip()],
+                "enabled_model_names": channel.get("enabled_model_names", []),
+                "upstream_slug": next((x.get("slug") for x in upstreams if channel_matches_upstream(channel, x)), ""),
+                "scan_status": "error", "pricing_status": "error",
+                "availability": {"error": "channel_probe_failed:" + type(exc).__name__},
+                "pricing_error": "channel_probe_failed", "models": {}, "unavailable_models": {},
+            })
 
     alerts = compare_previous({"channels": channel_results}, previous)
     for row in channel_results:

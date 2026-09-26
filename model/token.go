@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/setting"
 	"github.com/QuantumNous/new-api/setting/operation_setting"
 	"github.com/bytedance/gopkg/util/gopool"
 	"gorm.io/gorm"
@@ -287,7 +288,16 @@ func GetTokenByKey(key string, fromDB bool) (token *Token, err error) {
 	return token, err
 }
 
+// ApplyDefaultGroup applies the operator's default without changing explicit groups.
+// Status-only updates must not call it: toggling a token must preserve its scope.
+func (token *Token) ApplyDefaultGroup() {
+	if setting.DefaultUseAutoGroup && token.Group == "" {
+		token.Group = "auto"
+	}
+}
+
 func (token *Token) Insert() error {
+	token.ApplyDefaultGroup()
 	var err error
 	err = DB.Create(token).Error
 	return err

@@ -298,6 +298,7 @@ func UpdateToken(c *gin.Context) {
 		cleanToken.ModelLimits = token.ModelLimits
 		cleanToken.AllowIps = token.AllowIps
 		cleanToken.Group = token.Group
+		cleanToken.ApplyDefaultGroup()
 		cleanToken.CrossGroupRetry = token.CrossGroupRetry
 	}
 	err = cleanToken.Update()

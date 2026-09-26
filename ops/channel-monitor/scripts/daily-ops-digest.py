@@ -89,15 +89,15 @@ def write_private_json(path: pathlib.Path, value: Any) -> None:
 def _number(value: Any) -> float | None:
     try:
         result = float(value)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return None
-    return result if math.isfinite(result) else None
+    return result if math.isfinite(result) and abs(result) <= 1_000_000_000 else None
 
 
 def _count(value: Any) -> int:
     try:
         result = int(value)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return 0
     return result if result >= 0 else 0
 
@@ -121,7 +121,7 @@ def target_beijing_day(now: datetime.datetime | None = None) -> str:
 
 def _latest_pricing_run(pricing_history: Any, day: str) -> dict[str, Any]:
     runs = pricing_history.get("runs") if isinstance(pricing_history, dict) else None
-    matches = [row for row in runs or [] if isinstance(row, dict) and row.get("date") == day]
+    matches = [row for row in runs or [] if isinstance(row, dict) and row.get("date") == day and row.get("dry_run") is not True]
     if not matches:
         raise DigestError("pricing_run_missing")
     return max(matches, key=lambda row: _count(row.get("generated_at")))
@@ -144,7 +144,7 @@ def _month_totals(ledger: dict[str, Any], day: str, slug: str) -> tuple[int, flo
     return calls, round(cost, 8)
 
 
-def build_digest(
+def _build_digest(
     upstreams: Any,
     ledger: Any,
     audit: Any,
@@ -203,10 +203,12 @@ def build_digest(
 
     decisions = [row for row in pricing_run.get("decisions") or [] if isinstance(row, dict)]
     reasons = Counter(_safe_code(row.get("reason")) for row in decisions)
-    blocked_reasons = {"upstream_collection_incomplete", "critical_model_alert"}
-    pricing_status = _safe_code(pricing_run.get("status"), "complete")
+    blocked_reasons = {row.get("reason") for row in decisions if row.get("action") == "skip" and row.get("reason") != "video_official_pricing_only"}
+    pricing_status = _safe_code(pricing_run.get("business_status") or pricing_run.get("status"), "complete")
     if pricing_run.get("error"):
         pricing_status = "failed"
+    elif any(row.get("reason") in blocked_reasons for row in decisions):
+        pricing_status = "partial" if any(row.get("action") in {"apply", "unchanged"} for row in decisions) else "blocked"
     channel_rows = [row for row in audit.get("channels") or [] if isinstance(row, dict)]
     report = {
         "schema_version": 1,
@@ -217,7 +219,8 @@ def build_digest(
             "status": pricing_status,
             "discovered": len(decisions),
             "applied": sum(row.get("action") == "apply" for row in decisions),
-            "skipped": sum(row.get("action") != "apply" for row in decisions),
+            "unchanged": sum(row.get("action") == "unchanged" for row in decisions),
+            "skipped": sum(row.get("action") == "skip" for row in decisions),
             "blocked": sum(_safe_code(row.get("reason")) in blocked_reasons for row in decisions),
             "protected_video": reasons.get("video_official_pricing_only", 0),
             "reasons": dict(sorted(reasons.items())[:30]),
@@ -249,7 +252,7 @@ def build_digest(
         for slug, row in sorted(recharges["providers"].items()):
             if not isinstance(row, dict) or len(recharge_rows) >= MAX_CHANNELS:
                 continue
-            paid = row.get("paid_amounts") if isinstance(row.get("paid_amounts"), dict) else {}
+            paid = row.get("paid_amounts") if row.get("status") == "complete" and isinstance(row.get("paid_amounts"), dict) else {}
             paid_cny = _number(paid.get("CNY"))
             if paid_cny is not None:
                 paid_cny_total += paid_cny
@@ -272,6 +275,80 @@ def build_digest(
     payload = notification_payload(report)
     if len(json.dumps(payload, ensure_ascii=False).encode("utf-8")) > MAX_PAYLOAD_BYTES:
         raise DigestError("digest_payload_too_large")
+    return report
+
+
+def read_optional_artifact(path: pathlib.Path) -> Any:
+    """A failed provider artifact is unknown, never a reason to suppress email."""
+    try:
+        return read_json(path, required=True)
+    except DigestError:
+        return None
+
+
+def build_digest(upstreams, ledger, audit, pricing_history, live_balance, day,
+                 *, generated_at, recharges=None):
+    """Deliver available sections and visible warnings without inventing totals."""
+    warnings = []
+    if not isinstance(ledger, dict) or not isinstance(ledger.get("days"), dict) or not isinstance(ledger["days"].get(day), dict):
+        warnings.append("ledger_day_missing")
+        ledger = {"days": {day: {}}}
+    if not isinstance(audit, dict) or audit.get("date") != day:
+        warnings.append("audit_day_missing")
+        audit = {"date": day, "channels": []}
+    try:
+        _latest_pricing_run(pricing_history, day)
+    except DigestError:
+        warnings.append("pricing_run_missing")
+        pricing_history = {"runs": [{"date": day, "status": "unknown", "decisions": []}]}
+    if not isinstance(live_balance, dict) or not isinstance(live_balance.get("providers"), dict):
+        warnings.append("live_balance_missing")
+        live_balance = {"providers": {}}
+    recharge_warning = None
+    if not isinstance(recharges, dict) or recharges.get("source") != "authenticated_upstream_recharge_records" or not isinstance(recharges.get("providers"), dict):
+        recharge_warning = "recharge_summary_unavailable"
+    else:
+        timestamp = _count(recharges.get("generated_at"))
+        if timestamp <= 0 or timestamp > generated_at + 300 or generated_at - timestamp > 36 * 3600:
+            recharge_warning = "recharge_summary_stale"
+    if recharge_warning:
+        warnings.append(recharge_warning)
+        recharges = None
+    elif any(not isinstance(row, dict) or row.get("status") != "complete" for row in recharges["providers"].values()):
+        warnings.append("recharge_providers_unavailable")
+    report = _build_digest(upstreams, ledger, audit, pricing_history, live_balance,
+                           day, generated_at=generated_at, recharges=recharges)
+    for channel in report["channels"]:
+        # A malformed provider response must not violate the mail API contract
+        # (complete requires a numeric amount) and suppress all other rows.
+        if channel["collection_status"] == "complete" and channel["daily_cost_cny"] is None:
+            channel["collection_status"] = "unknown"
+            if "provider_cost_invalid" not in warnings:
+                warnings.append("provider_cost_invalid")
+        if channel["balance_status"] == "complete" and channel["balance"] is None:
+            channel["balance_status"] = "unknown"
+            if "provider_balance_invalid" not in warnings:
+                warnings.append("provider_balance_invalid")
+        invalid_counts = any(channel[key] > 1_000_000_000 for key in ("daily_calls", "month_calls"))
+        if invalid_counts or _number(channel["month_cost_cny"]) is None:
+            # The legacy mail schema requires numeric counters. Mark the entire
+            # row unknown and explicitly label discarded corrupt statistics.
+            channel.update(collection_status="unknown", daily_calls=0,
+                           daily_cost_cny=None, month_calls=0, month_cost_cny=0)
+            channel["name"] = (channel["name"][:60] + " [统计异常，非零消费]")
+            if "provider_statistics_invalid" not in warnings:
+                warnings.append("provider_statistics_invalid")
+    if recharge_warning:
+        report["recharges"] = {"status": "unknown", "reason": recharge_warning,
+                               "paid_cny_total": None, "providers": []}
+    report["warnings"] = warnings
+    # Existing mail servers render pricing.reasons, but may ignore new fields.
+    # Reserve space so degradation is visible even before server upgrades.
+    reasons = report["pricing"]["reasons"]
+    report["pricing"]["reasons"] = dict(list(reasons.items())[:30-len(warnings)])
+    report["pricing"]["reasons"].update({warning: 1 for warning in warnings})
+    if warnings:
+        report["audit"]["alerts"] += len(warnings)
     return report
 
 
@@ -417,13 +494,13 @@ def main(argv: list[str] | None = None, environ: dict[str, str] | os._Environ[st
         now = int(time.time())
         report = build_digest(
             read_json(args.upstreams, required=True),
-            read_json(args.ledger, required=True),
-            read_json(args.audit, required=True),
-            read_json(args.pricing_log, required=True),
-            read_json(args.live_balance, required=True),
+            read_optional_artifact(args.ledger),
+            read_optional_artifact(args.audit),
+            read_optional_artifact(args.pricing_log),
+            read_optional_artifact(args.live_balance),
             day,
             generated_at=now,
-            recharges=read_json(args.recharges, required=True),
+            recharges=read_optional_artifact(args.recharges),
         )
         if args.dry_run:
             print(json.dumps({"status": "dry_run", "date": day, "channels": len(report["channels"])}, sort_keys=True))
@@ -438,8 +515,9 @@ def main(argv: list[str] | None = None, environ: dict[str, str] | os._Environ[st
         write_private_json(args.state, state)
         print(json.dumps({"status": "delivered", "date": day, "channels": len(report["channels"])}, sort_keys=True))
         return 0
-    except Exception:
-        print(json.dumps({"status": "digest_failed", "date": day}, sort_keys=True))
+    except Exception as exc:
+        code = _safe_code(str(exc), "digest_internal_error") if isinstance(exc, DigestError) else "digest_internal_error"
+        print(json.dumps({"status": "digest_failed", "date": day, "error_code": code}, sort_keys=True))
         return 2
 
 
