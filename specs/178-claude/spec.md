@@ -1,0 +1,7 @@
+# Claude onboarding and GPT6 access audit
+
+User authorizes upstream inspection and enabling Claude. GPT6 permission is read-only audit: it aliases gpt-6-astra on Code Plan/Haina and is enabled in text/auto routes. Preserve IP/model/status/quota gates and current prices.
+
+Plan: inspect funded upstream model catalogs, authenticated pricing and eligible quota groups; use dedicated model-restricted, IP-bound finite-budget probe tokens (at most1CNY quota per provider); test bounded ordinary completions and exact request billing without recharges; retain at most two verified inexpensive providers for each exact model, price at max retained verified cost×1.5. Never infer model authenticity from model names or self-identification. Do not alias versions together, enable thinking-only variants without validation, reopen Jojo, or change video/image models. Native Claude formats and OpenAI-compatible endpoints are verified independently before advertised.
+
+Candidate exact names: claude-haiku-4-5-20251001, claude-sonnet-4-6, claude-sonnet-5, claude-opus-4-6/4-7/4-8/5/5-5. Names are upstream labels, not claims of official availability. Prefer normal quota groups, not temporary trial or subscription-only groups. Resolve cost unit from stored authenticated recharge conversion and task/log evidence. All secrets remain server-side0600. Back up channel/ability/options before production writes, and leave failed/unknown candidates disabled.
