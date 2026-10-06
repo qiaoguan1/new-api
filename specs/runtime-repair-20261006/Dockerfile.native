@@ -1,0 +1,7 @@
+FROM xtai/issue173-native-builder:verified AS builder
+ENV GOMAXPROCS=2 GOMEMLIMIT=1500MiB
+COPY source/ /build/
+RUN go test ./service ./relay/channel ./model -run 'TestImage|TestGPT61|TestTokenDefaultAutoGroupPersistence' -count=1 && go build -ldflags '-s -w -X github.com/QuantumNous/new-api/common.Version=issue183-runtime' -o /new-api .
+FROM new-api-fixed:issue180-token-default
+COPY --from=builder /new-api /new-api
+LABEL com.aixingtuyun.base-source=issue180-token-default

@@ -9,12 +9,15 @@ complete log query; failures are written as incomplete with null cost.
 import base64
 import json
 import math
+import multiprocessing
 import os
 import pathlib
 import re
 import stat
+import signal
 import sys
 import time
+import tempfile
 from urllib.parse import urlsplit
 
 import requests
@@ -35,6 +38,10 @@ ROOT = pathlib.Path(__file__).resolve().parent.parent
 UPSTREAMS_PATH = ROOT / "upstreams.json"
 CRED_PATH = ROOT / "upstream-credentials.json"
 LEDGER_PATH = ROOT / "data" / "upstream-balance-ledger.json"
+REVIEW_POLICY_PATH = ROOT / "config" / "operator-weekly-review.json"
+MAX_JSON_BYTES = 128 * 1024 * 1024
+PROVIDER_DEADLINE_SECONDS = 90
+MAX_PROVIDER_RESULT_BYTES = 16 * 1024 * 1024
 TOONFLOW_TOKEN_PATH = pathlib.Path(
     os.environ.get(
         "CHANNEL_MONITOR_TOONFLOW_TOKEN_FILE",
@@ -76,10 +83,32 @@ PRICING_MODEL_FIELDS = (
 
 def read_json(path, default):
     try:
-        with open(path, "r", encoding="utf-8") as handle:
-            return json.load(handle)
-    except Exception:
+        with open(path, "rb") as handle:
+            if os.fstat(handle.fileno()).st_size > MAX_JSON_BYTES:
+                raise RuntimeError("json_input_too_large")
+            payload = handle.read(MAX_JSON_BYTES + 1)
+        if len(payload) > MAX_JSON_BYTES:
+            raise RuntimeError("json_input_too_large")
+        return json.loads(payload.decode("utf-8"))
+    except FileNotFoundError:
         return default
+    except (OSError, UnicodeError, ValueError, TypeError) as error:
+        raise RuntimeError("json_input_invalid") from error
+
+
+def collection_exclusions():
+    """Honor operator-only evidence and explicitly paused provider policies."""
+    review = read_json(REVIEW_POLICY_PATH, {})
+    policy = review.get("policy", {}) if isinstance(review, dict) else None
+    if not isinstance(policy, dict):
+        raise RuntimeError("operator_review_policy_invalid")
+    manual = policy.get("manual_weekly_providers", ["0809", "toonflow"])
+    if not isinstance(manual, list) or any(not isinstance(slug, str) for slug in manual):
+        raise RuntimeError("operator_review_policy_invalid")
+    exclusions = {slug: "skipped_manual" for slug in manual}
+    if policy.get("jojo", "paused_until_operator_requests_resume") == "paused_until_operator_requests_resume":
+        exclusions["jojocode"] = "skipped_paused"
+    return exclusions
 
 
 def write_json(path, value):
@@ -152,10 +181,16 @@ def standard_login(session, origin, username, password):
     )
     body = json_response(response, "classic login")
     if response.status_code != 200 or not body.get("success"):
+        code = clean_error(body.get("code"), (username, password))
+        message = clean_error(body.get("message"), (username, password))
+        detail = f"{code}: {message}" if code and code != "unknown error" else message
         raise RuntimeError(
-            f"classic login failed (http {response.status_code}): {clean_error(body.get('message'))}"
+            f"classic login failed (http {response.status_code}): {detail}"
         )
     data = body.get("data") or {}
+    # Keep only this collector's identity so finally can revoke its own login.
+    session._monitor_login_origin = origin
+    session._monitor_login_sid = (data.get("session") or {}).get("sid")
     # Support both legacy direct-user login responses and newer token+nested-user responses.
     user = data.get("user") if isinstance(data.get("user"), dict) else data
     access_token = data.get("access_token")
@@ -166,6 +201,31 @@ def standard_login(session, origin, username, password):
         raise RuntimeError("classic login succeeded without user id")
     session.headers.update({"New-Api-User": str(user_id)})
     return user.get("group") or ""
+
+
+def standard_logout(session, origin):
+    """Revoke only this collector's login, including when collection raised."""
+    try:
+        if getattr(session, "_monitor_login_origin", None) != origin:
+            return
+        sid = getattr(session, "_monitor_login_sid", None)
+        if sid:
+            response = session.post(
+                origin + "/api/user/auth/logout",
+                headers={"Origin": origin, "Referer": origin + "/", "X-Auth-Session": sid},
+                timeout=TIMEOUT, allow_redirects=False,
+            )
+        else:
+            response = session.get(origin + "/api/user/logout", timeout=TIMEOUT, allow_redirects=False)
+        payload = response.json() if response.status_code == 200 else {}
+        if response.status_code != 200 or payload.get("success") is not True:
+            print("collector logout was not acknowledged for " + urlsplit(origin).hostname, file=sys.stderr)
+    except Exception:
+        print("collector logout failed for " + urlsplit(origin).hostname, file=sys.stderr)
+    finally:
+        session._monitor_login_origin = None
+        session._monitor_login_sid = None
+        session.close()
 
 
 def standard_self(session, origin):
@@ -916,6 +976,8 @@ def probe_balance(slug, credential, website):
         return _balance_probe_result("newapi_classic", q2usd(self_data.get("quota")), rate)
     except Exception as exc:
         errors.append(clean_error(exc, (username, password)))
+    finally:
+        standard_logout(session, origin)
 
     session = requests.Session()
     session.headers.update(
@@ -1283,6 +1345,8 @@ def collect_one(slug, credential, website, ledger, day):
         )
     except Exception as exc:
         errors.append(clean_error(exc, (username, password)))
+    finally:
+        standard_logout(session, origin)
 
     session = requests.Session()
     session.headers.update(
@@ -1358,12 +1422,73 @@ def failed_entry(prior_entry, error):
     }
 
 
+class CollectionDeadlineCancelled(BaseException):
+    """Cancellation must bypass provider fallback and run login cleanup."""
+
+
+def _collection_worker(output, slug, credential, website, ledger, day):
+    def cancel(*_):
+        global TIMEOUT
+        TIMEOUT = 2
+        raise CollectionDeadlineCancelled("provider_collection_deadline")
+    signal.signal(signal.SIGTERM, cancel)
+    try:
+        payload = {"ok": True, "entry": collect_one(slug, credential, website, ledger, day)}
+    except BaseException as error:
+        payload = {"ok": False, "error": clean_error(error, (credential.get("username"), credential.get("password")))}
+    data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    if len(data) > MAX_PROVIDER_RESULT_BYTES:
+        data = b'{"ok":false,"error":"provider_result_too_large"}'
+    with os.fdopen(os.open(output, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "wb") as handle:
+        handle.write(data)
+
+
+def collect_bounded(slug, credential, website, ledger, day, *, deadline=PROVIDER_DEADLINE_SECONDS):
+    """One root-owned worker per source; a stuck API cannot stop later sources.
+
+    Production runs on Linux/fork, sharing the immutable history copy-on-write.
+    Other platforms retain the existing request timeouts for local diagnostics.
+    """
+    if "fork" not in multiprocessing.get_all_start_methods():
+        return collect_one(slug, credential, website, ledger, day)
+    LEDGER_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix="balance-source-", dir=LEDGER_PATH.parent) as directory:
+        output = pathlib.Path(directory) / "result.json"
+        process = multiprocessing.get_context("fork").Process(target=_collection_worker, args=(str(output), slug, credential, website, ledger, day))
+        process.start()
+        try:
+            process.join(deadline)
+            if process.is_alive():
+                process.terminate()
+                process.join(3)
+                if process.is_alive():
+                    process.kill()
+                    process.join(2)
+                raise RuntimeError("provider_collection_deadline")
+            if not output.exists() or output.stat().st_size > MAX_PROVIDER_RESULT_BYTES:
+                raise RuntimeError("provider_collection_worker_failed")
+            result = read_json(output, {})
+            if not isinstance(result, dict) or not result.get("ok"):
+                raise RuntimeError(result.get("error", "provider_collection_worker_failed") if isinstance(result, dict) else "provider_collection_worker_failed")
+            if not isinstance(result.get("entry"), dict):
+                raise RuntimeError("provider_result_invalid")
+            return result["entry"]
+        finally:
+            if process.is_alive():
+                process.kill()
+                process.join(2)
+            process.close()
+
+
 def main():
     started = time.time()
     day = target_beijing_day()
     upstreams = read_json(UPSTREAMS_PATH, [])
     credentials = read_json(CRED_PATH, {})
     ledger = read_json(LEDGER_PATH, {"days": {}})
+    if not isinstance(ledger, dict) or not isinstance(ledger.get("days"), dict):
+        raise RuntimeError("ledger_schema_invalid")
+    exclusions = collection_exclusions()
     website_by_slug = {item.get("slug"): item.get("website_url") for item in upstreams}
     day_entries = ledger.setdefault("days", {}).setdefault(day, {})
     results = []
@@ -1372,8 +1497,23 @@ def main():
         credential = credentials.get(slug)
         if not isinstance(credential, dict):
             continue
+        if slug in exclusions:
+            status = exclusions[slug]
+            # Do not overwrite user-supplied complete evidence, and do not
+            # fabricate a zero balance/cost when daily collection is skipped.
+            day_entries.setdefault(slug, {
+                "collection_status": status,
+                "actual_log_complete": False,
+                "day_log_cost_usd": None,
+                "day_log_cost_cny": None,
+                "day_log_rows": None,
+                "per_model_cost_usd": {},
+                "per_model_real_cost": {},
+            })
+            results.append({"slug": slug, "status": status})
+            continue
         try:
-            entry = collect_one(slug, credential, website_by_slug.get(slug) or "", ledger, day)
+            entry = collect_bounded(slug, credential, website_by_slug.get(slug) or "", ledger, day)
             day_entries[slug] = entry
             results.append(
                 {
@@ -1405,10 +1545,16 @@ def main():
     summary = {
         "date": day,
         "complete": sum(1 for row in results if row.get("status") == "complete"),
-        "incomplete": sum(1 for row in results if row.get("status") != "complete"),
+        "incomplete": sum(1 for row in results if row.get("status") == "incomplete"),
+        "skipped_manual": sum(1 for row in results if row.get("status") == "skipped_manual"),
+        "skipped_paused": sum(1 for row in results if row.get("status") == "skipped_paused"),
         "duration_seconds": round(time.time() - started, 2),
         "results": results,
     }
+    metadata = LEDGER_PATH.stat()
+    write_json(LEDGER_PATH.with_name("upstream-balance-health.json"), {
+        key: summary[key] for key in ("date", "complete", "incomplete", "skipped_manual", "skipped_paused")
+    } | {"source_bytes": metadata.st_size, "source_mtime_ns": metadata.st_mtime_ns, "generated_at": int(time.time())})
     print(json.dumps(summary, ensure_ascii=False, sort_keys=True))
     return 0 if summary["incomplete"] == 0 else 2
 

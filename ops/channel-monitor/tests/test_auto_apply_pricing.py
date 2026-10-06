@@ -104,6 +104,21 @@ def fixed_cost(cost):
 
 
 class PricingPlanTests(unittest.TestCase):
+    def test_reviewed_pro_adapter_uses_real_billing_model_not_request_alias(self):
+        row = channel(70, "rolldek", ["banana-pro"])
+        row.update(base_url="https://api.aixingtuyun.com/internal-upstreams/banana", type=1)
+        self.assertEqual(pricing._channel_price_keys(row, {"banana-pro"}), {"banana-pro": "gemini-3-pro-image-preview"})
+        row["channel_id"] = 53
+        self.assertEqual(pricing._channel_price_keys(row, {"banana-pro"}), {"banana-pro": "banana-pro"})
+
+    def test_tiered_model_is_not_flattened_or_claimed_as_applied(self):
+        current = self.current_options()
+        current["billing_setting.billing_mode"] = {"gpt-6.1-sol": "tiered_expr"}
+        rows = ledger(codeplan=source(**{"gpt-6.1-sol": text_cost(.3, 1.5)}))
+        result = pricing.build_pricing_plan(rows, audit(channel(69, "codeplan", ["gpt-6.1-sol"])), DAY, current, max_change_ratio=5)
+        self.assertEqual(result["decisions"][0]["action"], "skip")
+        self.assertEqual(result["decisions"][0]["reason"], "tiered_contract_requires_exact_tariff")
+        self.assertEqual(result["options"], {key: current[key] for key in pricing.OPTION_KEYS})
     def test_unknown_enabled_provider_blocks_shared_model_not_unrelated_models(self):
         known = channel(1,"known",["shared","independent"])
         unknown = channel(2,"",["shared"])
@@ -146,6 +161,7 @@ class PricingPlanTests(unittest.TestCase):
             "CompletionRatio": {},
             "ModelPrice": {},
             "GroupRatio": {"text": 0.15, "image": 0.15, "video": 0.15},
+            "billing_setting.billing_mode": {},
         }
 
     def manual_catalog(self, slug, model, row, *, valid_through=DAY):

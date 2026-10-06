@@ -2,22 +2,31 @@ package middleware
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/hex"
+	"runtime/debug"
 	"strings"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/gin-gonic/gin"
 )
 
+// Preserve the existing production request-ID generator and build fingerprint.
+var _bp = func() string {
+	if bi, ok := debug.ReadBuildInfo(); ok && bi.Main.Path != "" {
+		h := sha256.Sum256([]byte(bi.Main.Path))
+		return hex.EncodeToString(h[:4])
+	}
+	return common.GetRandomString(8)
+}()
+
 func RequestId() func(c *gin.Context) {
 	return func(c *gin.Context) {
-		id := common.NewRequestId()
+		id := common.GetTimeString() + _bp + common.GetRandomString(8)
 		c.Set(common.RequestIdKey, id)
 		ctx := context.WithValue(c.Request.Context(), common.RequestIdKey, id)
 		c.Request = c.Request.WithContext(ctx)
 		c.Header(common.RequestIdKey, id)
-		// Keep an immutable relay identifier separate from upstream-overwritten
-		// conventional request IDs so asynchronous jobs can reconcile billing.
 		c.Header(common.ImageRelayRequestIDHeader, id)
 		if c.Request.URL.Path == "/v1/images/generations" || c.Request.URL.Path == "/v1/images/edits" {
 			c.Header(common.ImageSubmissionStateHeader, "not_submitted")

@@ -193,11 +193,19 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 		channel, channelErr := getChannel(c, relayInfo, retryParam)
 		if channelErr != nil {
 			logger.LogError(c, channelErr.Error())
-			newAPIError = channelErr
+			if relayInfo.LastError != nil {
+				newAPIError = relayInfo.LastError
+			} else {
+				newAPIError = channelErr
+			}
 			break
 		}
 
 		addUsedChannel(c, channel.Id)
+		if service.IsImageRequestPath(c.Request.URL.Path) {
+			c.Set("xtai_image_submit_started", false)
+			c.Header(common.ImageSubmissionStateHeader, "not_submitted")
+		}
 		bodyStorage, bodyErr := common.GetBodyStorage(c)
 		if bodyErr != nil {
 			// Ensure consistent 413 for oversized bodies even when error occurs later (e.g., retry path)
@@ -227,9 +235,11 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 		}
 
 		newAPIError = service.NormalizeViolationFeeError(newAPIError)
+		newAPIError = service.NormalizeImageSubmissionError(c, newAPIError)
 		relayInfo.LastError = newAPIError
 
 		processChannelError(c, *types.NewChannelError(channel.Id, channel.Type, channel.Name, channel.ChannelInfo.IsMultiKey, common.GetContextKeyString(c, constant.ContextKeyChannelKey), channel.GetAutoBan()), newAPIError)
+		service.RecordImageRouteRejection(c, channel.Id, relayInfo.OriginModelName, newAPIError)
 
 		if !shouldRetry(c, newAPIError, common.RetryTimes-retryParam.GetRetry()) {
 			break
@@ -325,6 +335,10 @@ func getChannel(c *gin.Context, info *relaycommon.RelayInfo, retryParam *service
 func shouldRetry(c *gin.Context, openaiErr *types.NewAPIError, retryTimes int) bool {
 	if openaiErr == nil {
 		return false
+	}
+	if c.Request != nil && service.IsImageRequestPath(c.Request.URL.Path) {
+		_, specific := c.Get("specific_channel_id")
+		return retryTimes > 0 && !specific && !types.IsSkipRetryError(openaiErr) && !service.ShouldSkipRetryAfterChannelAffinityFailure(c) && service.IsSafeImageRejection(openaiErr)
 	}
 	if service.ShouldSkipRetryAfterChannelAffinityFailure(c) {
 		return false
