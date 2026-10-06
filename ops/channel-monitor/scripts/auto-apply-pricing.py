@@ -68,6 +68,7 @@ RECOVERABLE_UNDERPRICING_ALERT_TYPES = frozenset(
 DB_USER = os.environ.get("CHANNEL_MONITOR_DB_USER", "newapi")
 DB_NAME = os.environ.get("CHANNEL_MONITOR_DB_NAME", "new-api")
 OPTION_KEYS = ("ModelRatio", "CompletionRatio", "ModelPrice")
+READ_OPTION_KEYS = OPTION_KEYS + ("GroupRatio", "billing_setting.billing_mode")
 VIDEO_MODEL_MARKERS = (
     "video",
     "seedance",
@@ -153,10 +154,12 @@ def _run_psql(sql):
 
 def get_option(key):
     """Fetch one pricing option as a JSON object."""
-    if key not in OPTION_KEYS + ("GroupRatio",):
+    if key not in READ_OPTION_KEYS:
         raise PricingError(f"unsupported option key: {key}")
     output = _run_psql(f"SELECT value FROM options WHERE key='{key}';")
     if not output:
+        if key == "billing_setting.billing_mode":
+            return {}
         raise PricingError(f"option {key} is missing")
     try:
         value = json.loads(output)
@@ -255,7 +258,16 @@ def _channel_price_keys(channel, models):
                 f"audit model mapping mismatch for {model}: "
                 f"request={mapped_model}, audit={audited_upstream_model}"
             )
-        result[model] = mapped_model
+        # This reviewed adapter accepts banana-pro, but bills the exact Rolldek
+        # Gemini Pro model internally. Do not confuse request aliases with
+        # ledger price keys, nor apply this exception to the mixed Flash route.
+        if (channel.get("channel_id") == 70 and channel.get("upstream_slug") == "rolldek"
+                and channel.get("base_url") == "https://api.aixingtuyun.com/internal-upstreams/banana"
+                and channel.get("type") == 1 and set(models) == {"banana-pro"}
+                and model == mapped_model == "banana-pro"):
+            result[model] = "gemini-3-pro-image-preview"
+        else:
+            result[model] = mapped_model
     return result
 
 
@@ -825,6 +837,13 @@ def build_pricing_plan(
             decision["reason"] = "route_billing_group_evidence_required"
             decisions.append(decision)
             continue
+        if current_options.get("billing_setting.billing_mode", {}).get(model) == "tiered_expr":
+            # The ratio-only updater cannot replace a context/cache/resolution
+            # expression. Keep the frozen contract, never claim a flat write
+            # changed the tiered sale tariff.
+            decision["reason"] = "tiered_contract_requires_exact_tariff"
+            decisions.append(decision)
+            continue
         if model in policy["blocked_models"]:
             decision["reason"] = "critical_model_alert"
             decisions.append(decision)
@@ -1159,7 +1178,7 @@ def main(argv=None):
         )
         credentials = read_json(CREDENTIALS_PATH, required=True)
         incomplete_credentials = incomplete_credential_sources(ledger, day, credentials)
-        current = {key: get_option(key) for key in OPTION_KEYS + ("GroupRatio",)}
+        current = {key: get_option(key) for key in READ_OPTION_KEYS}
         max_change_ratio = float(
             os.environ.get("CHANNEL_MONITOR_MAX_CHANGE_RATIO", DEFAULT_MAX_CHANGE_RATIO)
         )

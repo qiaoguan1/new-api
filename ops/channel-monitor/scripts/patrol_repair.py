@@ -35,6 +35,7 @@ ALLOWED_REPAIR_ACTIONS = {
 }
 ALLOWED_CHECK_KINDS = {"systemd", "docker", "http", "disk", "path_mode", "backup", "artifact", "video_sqlite"}
 MAX_JSON_BYTES = 32 * 1024 * 1024
+MAX_LEDGER_BYTES = 64 * 1024 * 1024
 
 
 def pricing_business_health(run: Mapping[str, Any]) -> tuple[str, str]:
@@ -124,10 +125,13 @@ def write_json_mode(path: pathlib.Path, value: Any, mode: int) -> None:
 def read_json(path: pathlib.Path, default: Any = None, *, maximum: int = MAX_JSON_BYTES) -> Any:
     source = pathlib.Path(path)
     try:
-        metadata = source.stat()
-        if metadata.st_size > maximum:
+        with source.open("rb") as handle:
+            if os.fstat(handle.fileno()).st_size > maximum:
+                raise PatrolError("json_input_too_large")
+            payload = handle.read(maximum + 1)
+        if len(payload) > maximum:
             raise PatrolError("json_input_too_large")
-        return json.loads(source.read_text(encoding="utf-8"))
+        return json.loads(payload.decode("utf-8"))
     except FileNotFoundError:
         return default
     except (OSError, UnicodeError, ValueError, TypeError) as error:
@@ -233,7 +237,7 @@ class PatrolChecks:
 
     @staticmethod
     def _result(item: Mapping[str, Any], status: str, code: str, evidence: Mapping[str, Any]) -> CheckResult:
-        allowed = {"state", "age_seconds", "percent", "count", "date", "http_status", "mode", "business_status", "applied", "unchanged"}
+        allowed = {"state", "age_seconds", "percent", "count", "date", "http_status", "mode", "business_status", "applied", "unchanged", "complete", "incomplete", "skipped_manual", "skipped_paused"}
         return CheckResult(
             check_id=str(item["id"]), status=status, severity=str(item.get("severity", "critical")),
             code=_safe_identifier(code), repair_action=item.get("repair_action") if status != "healthy" else None,
@@ -243,8 +247,12 @@ class PatrolChecks:
     def evaluate(self, item: Mapping[str, Any], now: int) -> CheckResult:
         try:
             return getattr(self, "_" + str(item["kind"]))(item, now)
+        except PatrolError as error:
+            # A local reader failure is not evidence that recollecting every
+            # upstream (or restarting a service) can repair the artifact.
+            return dataclasses.replace(self._result(item, "unknown", str(error), {}), repair_action=None)
         except Exception:
-            return self._result(item, "unknown", "check_failed", {})
+            return dataclasses.replace(self._result(item, "unknown", "check_failed", {}), repair_action=None)
 
     def _systemd(self, item: Mapping[str, Any], now: int) -> CheckResult:
         result = self.runner.command(("/usr/bin/systemctl", "is-active", str(item["target"])))
@@ -338,17 +346,41 @@ class PatrolChecks:
 
     def _artifact(self, item: Mapping[str, Any], now: int) -> CheckResult:
         path = pathlib.Path(str(item["path"]))
-        document = read_json(path)
-        if document is None:
-            return self._result(item, "failed", "artifact_missing", {})
         artifact_type = item.get("artifact_type")
         day = expected_business_day(datetime.datetime.fromtimestamp(now, BEIJING))
         if artifact_type == "ledger":
+            summary = read_json(path.with_name("upstream-balance-health.json"), maximum=1024 * 1024)
+            if isinstance(summary, dict) and path.exists():
+                metadata = path.stat()
+                if (summary.get("source_bytes") == metadata.st_size
+                        and summary.get("source_mtime_ns") == metadata.st_mtime_ns
+                        and summary.get("date") == day):
+                    counts = [summary.get(key) for key in ("complete", "incomplete", "skipped_manual", "skipped_paused")]
+                    if all(isinstance(value, int) and not isinstance(value, bool) and value >= 0 for value in counts):
+                        if counts[0] > 0 or counts[1] > 0:
+                            status, code = ("warning", "ledger_partial") if counts[1] else ("healthy", "ok")
+                            return dataclasses.replace(self._result(item, status, code, summary), repair_action=None)
+            # First rollout / old or mismatched summaries still inspect the
+            # authoritative history under a ledger-specific bounded limit.
+        document = read_json(path, maximum=MAX_LEDGER_BYTES if artifact_type == "ledger" else MAX_JSON_BYTES)
+        if document is None:
+            return self._result(item, "failed", "artifact_missing", {})
+        if artifact_type == "ledger":
             days = document.get("days") if isinstance(document, dict) else None
-            eligible = sorted((str(key), value) for key, value in (days or {}).items() if str(key) >= day and isinstance(value, dict))
-            rows = eligible[-1][1] if eligible else None
-            healthy = isinstance(rows, dict) and any(isinstance(row, dict) and row.get("collection_status") == "complete" for row in rows.values())
-            return self._result(item, "healthy" if healthy else "failed", "ok" if healthy else "ledger_day_missing", {"date": day})
+            rows = days.get(day) if isinstance(days, dict) else None
+            review = read_json(path.parent.parent / "config" / "operator-weekly-review.json", {}, maximum=1024 * 1024)
+            policy = review.get("policy", {}) if isinstance(review, dict) else {}
+            manual = set(policy.get("manual_weekly_providers", ["0809", "toonflow"]))
+            if policy.get("jojo", "paused_until_operator_requests_resume") == "paused_until_operator_requests_resume":
+                manual.add("jojocode")
+            if isinstance(rows, dict):
+                rows = {slug: row for slug, row in rows.items() if slug not in manual}
+            complete = sum(isinstance(row, dict) and row.get("collection_status") == "complete" for row in (rows or {}).values()) if isinstance(rows, dict) else 0
+            incomplete = sum(isinstance(row, dict) and (row.get("collection_status") == "incomplete" or row.get("last_attempt_status") == "incomplete") for row in (rows or {}).values()) if isinstance(rows, dict) else 0
+            if complete or incomplete:
+                status, code = ("warning", "ledger_partial") if incomplete else ("healthy", "ok")
+                return dataclasses.replace(self._result(item, status, code, {"date": day, "complete": complete, "incomplete": incomplete}), repair_action=None)
+            return self._result(item, "failed", "ledger_day_missing", {"date": day})
         if artifact_type == "audit":
             healthy = isinstance(document, dict) and str(document.get("date") or "") >= day
             status, code = ("healthy", "ok") if healthy else ("failed", "audit_day_missing")
