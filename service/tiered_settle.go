@@ -9,6 +9,32 @@ import (
 // TieredResultWrapper wraps billingexpr.TieredResult for use at the service layer.
 type TieredResultWrapper = billingexpr.TieredResult
 
+// BuildModelTieredTokenParams applies the exact Fable5.1 Claude tariff's cache
+// creation compatibility without changing the shared normalization contract.
+// Unclassified aggregate creation tokens belong to the five-minute category;
+// explicitly reported one-hour tokens remain separate and are never added twice.
+func BuildModelTieredTokenParams(modelName string, usage *dto.Usage, isClaudeUsageSemantic bool, usedVars map[string]bool) billingexpr.TokenParams {
+	params := BuildTieredTokenParams(usage, isClaudeUsageSemantic, usedVars)
+	if modelName != "claude-fable-5-1" || !isClaudeUsageSemantic {
+		return params
+	}
+
+	params.CC = float64(usage.ClaudeCacheCreation5mTokens)
+	params.CC1h = float64(usage.ClaudeCacheCreation1hTokens)
+	if params.CC < 0 {
+		params.CC = 0
+	}
+	if params.CC1h < 0 {
+		params.CC1h = 0
+	}
+	totalCreation := float64(usage.PromptTokensDetails.CacheCreationTokensTotal())
+	if remainder := totalCreation - params.CC - params.CC1h; remainder > 0 {
+		params.CC += remainder
+	}
+	params.Len = params.P + params.CR + params.CC + params.CC1h
+	return params
+}
+
 // BuildTieredTokenParams constructs billingexpr.TokenParams from a dto.Usage,
 // normalizing P and C so they mean "tokens not separately priced by the
 // expression". Sub-categories (cache, image, audio) are only subtracted

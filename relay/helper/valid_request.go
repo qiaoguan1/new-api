@@ -19,6 +19,9 @@ import (
 )
 
 func GetAndValidateRequest(c *gin.Context, format types.RelayFormat) (request dto.Request, err error) {
+	if err := validateFable51RelayEndpoint(c, format); err != nil {
+		return nil, err
+	}
 	relayMode := relayconstant.Path2RelayMode(c.Request.URL.Path)
 
 	switch format {
@@ -279,6 +282,12 @@ func GetAndValidateClaudeRequest(c *gin.Context) (textRequest *dto.ClaudeRequest
 	if exceedsMaxTokensLimit(textRequest.MaxTokens, textRequest.MaxTokensToSample) {
 		return nil, errors.New("max_tokens is invalid")
 	}
+	if err := validateFable51ProtocolFields(c, textRequest.Model, true); err != nil {
+		return nil, err
+	}
+	if err := dto.NormalizeClaudeFable51Request(textRequest); err != nil {
+		return nil, err
+	}
 
 	//if textRequest.Stream {
 	//	relayInfo.IsStream = true
@@ -306,6 +315,9 @@ func GetAndValidateTextRequest(c *gin.Context, relayMode int) (*dto.GeneralOpenA
 	}
 	if textRequest.Model == "" {
 		return nil, errors.New("model is required")
+	}
+	if err := validateFable51ProtocolFields(c, textRequest.Model, false); err != nil {
+		return nil, err
 	}
 	if textRequest.WebSearchOptions != nil {
 		if textRequest.WebSearchOptions.SearchContextSize != "" {
