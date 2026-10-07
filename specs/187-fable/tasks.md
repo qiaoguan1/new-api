@@ -11,7 +11,9 @@
 - [x] Build exact production-baseline candidate and verify isolated free/real calls.
 - [x] Finalize exact-image, source, plan and isolated-runtime price proof.
 - [x] Reconcile cancelled no-swap deployment and add fail-closed Nginx mount checks.
-- [ ] Obtain separate authorization for shared proxy mount maintenance/recreation.
-- [ ] Stage and verify the scoped native model/route/billing configuration.
-- [ ] Activate qualified routes and verify eligible-user access and billing.
-- [ ] Review, document, and clean up only task-owned temporary artifacts.
+- [x] Obtain separate authorization A for brief shared proxy mount maintenance/recreation.
+- [x] Preserve dormant configs; verify isolated proxy canary and recreate only nginx.
+- [x] Recheck current retained-provider cost contracts without paid calls.
+- [x] Stage and verify the scoped native model/route/billing configuration.
+- [x] Activate qualified routes and verify eligible-user access and billing.
+- [x] Review, document, and clean up task-owned diagnostics; retain policy-blocked uncommitted bytecode caches.

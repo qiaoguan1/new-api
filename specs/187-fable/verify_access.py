@@ -201,6 +201,13 @@ def old_metadata_delta(before: list, current: list) -> list:
             any(live[row["id"]].get(key) != value for key, value in row.items())]
 
 
+def prior_abilities(rows: list, new_channel_ids: set) -> list:
+    """Exclude only our new channels; retain even historical orphan rows."""
+    require(all(type(value) is int for value in new_channel_ids), "new channel ID invalid")
+    return sorted([row for row in rows if row["channel_id"] not in new_channel_ids],
+                  key=lambda row: (row["channel_id"], row["model"], row["group"]))
+
+
 class NoRedirect(urllib.request.HTTPRedirectHandler):
     """Never send an existing credential to a redirect destination."""
     def redirect_request(self, req, fp, code, msg, headers, newurl):
@@ -331,9 +338,13 @@ class AccessVerifier:
                         "old route configuration changed")
                 report["preservation"]["old_routes"] = {"checked_rows": len(ids), "configuration_unchanged": True}
                 if "abilities" in snapshot:
-                    abilities_now = r.rows("SELECT * FROM abilities WHERE channel_id IN (" + ",".join(map(str, ids)) + ")") if ids else []
-                    order = lambda value: (value["channel_id"], value["model"], value["group"])
-                    require(sorted(abilities_now, key=order) == sorted(snapshot["abilities"], key=order), "old ability routing changed")
+                    # The full before snapshot includes disabled legacy rows
+                    # whose channels were removed before this task. Filtering
+                    # only current old channel IDs would falsely lose them.
+                    abilities_now = r.rows("SELECT * FROM abilities")
+                    added_ids = {row["id"] for row in saved["channels"]}
+                    require(prior_abilities(abilities_now, added_ids) == prior_abilities(snapshot["abilities"], set()),
+                            "old ability routing changed")
                     report["preservation"]["old_routes"]["abilities_unchanged"] = True
                 model_snapshot = snapshot.get("models", snapshot.get("metadata"))
                 if model_snapshot is not None:

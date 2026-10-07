@@ -24,6 +24,13 @@ POLICY = {"auto_groups": ["图", "文"], "usable_groups": {"auto": "Auto", "文"
 
 
 class AccessTests(unittest.TestCase):
+    def test_prior_abilities_preserves_orphans_and_excludes_only_added_channels(self):
+        old = [{"channel_id": 13, "model": "old", "group": "SAN", "enabled": False},
+               {"channel_id": 1, "model": "live", "group": "文", "enabled": True}]
+        current = old + [{"channel_id": 71, "model": access.MODEL, "group": "文", "enabled": True}]
+        self.assertEqual(access.prior_abilities(current, {71}), access.prior_abilities(old, set()))
+        self.assertNotEqual(access.prior_abilities(current[1:], {71}), access.prior_abilities(old, set()))
+
     def fixture(self, directory):
         """Inject only in-memory reads/GETs; no server helpers are executed."""
         verifier = access.AccessVerifier(Path(directory))
