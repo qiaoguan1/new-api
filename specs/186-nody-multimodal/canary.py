@@ -450,6 +450,41 @@ def submit() -> None:
                       'id': (record.get('response') or {}).get('id'), 'budget_exposure_cny': str(EXPOSURE), 'resubmit_allowed': False}))
 
 
+def probe_media(video_path: Path) -> dict:
+    """Probe the exact private MP4 in a bounded, offline candidate container."""
+    require(video_path == PRIVATE / 'public-wallet-result.mp4' and video_path.is_file()
+            and not video_path.is_symlink(), 'Only the exact private canary MP4 may be probed')
+    operation = secrets.token_hex(16)
+    name = 'xtai-issue186-ffprobe-' + operation
+    args = ['docker', 'run', '--rm', '--pull', 'never', '--name', name,
+            '--label', 'com.aixingtuyun.task=issue186-canary-media-proof',
+            '--label', 'com.aixingtuyun.probe-operation=' + operation,
+            '--network', 'none', '--read-only', '--cap-drop', 'ALL',
+            '--security-opt', 'no-new-privileges', '--memory', '128m',
+            '--cpus', '1', '--pids-limit', '64', '--user', '0:0',
+            '--mount', 'type=bind,source=' + str(video_path) + ',target=/probe.mp4,readonly',
+            '--entrypoint', 'ffprobe', 'xtai/video-job-gateway:issue186',
+            '-v', 'error', '-protocol_whitelist', 'file,pipe', '-show_streams',
+            '-show_format', '-of', 'json', '/probe.mp4']
+    try:
+        result = subprocess.run(args, text=True, capture_output=True, timeout=45)
+        require(result.returncode == 0 and len(result.stdout) <= 1024 * 1024,
+                'Offline candidate media probe failed; inspect preserved MP4')
+        return json.loads(result.stdout)
+    finally:
+        # --rm handles normal exit. A timed-out Docker client can leave its
+        # container behind; remove only our exact name AND unique ownership tag.
+        checked = subprocess.run(['docker', 'inspect', name], text=True, capture_output=True, timeout=10)
+        if checked.returncode == 0:
+            info = json.loads(checked.stdout)[0]
+            labels = info['Config'].get('Labels') or {}
+            require(labels.get('com.aixingtuyun.task') == 'issue186-canary-media-proof'
+                    and labels.get('com.aixingtuyun.probe-operation') == operation,
+                    'Probe container ownership differs; do not clean it up')
+            removed = subprocess.run(['docker', 'rm', '-f', name], text=True, capture_output=True, timeout=10)
+            require(removed.returncode == 0, 'Owned probe container cleanup needs attention')
+
+
 def poll() -> None:
     """Observe one task, verify exact fixture ledger and authenticated AV download."""
     base = isolated_base()
@@ -491,7 +526,7 @@ def poll() -> None:
     fd = os.open(video_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     with os.fdopen(fd, 'wb') as output:
         output.write(media)
-    probe = json.loads(command(['ffprobe', '-v', 'error', '-show_streams', '-show_format', '-of', 'json', str(video_path)]))
+    probe = probe_media(video_path)
     streams = probe.get('streams') or []
     require({'video', 'audio'}.issubset({s.get('codec_type') for s in streams}), 'Downloaded result lacks required video/audio streams')
     proof = {'bytes': len(media), 'sha256': hashlib.sha256(media).hexdigest(), 'streams': streams,

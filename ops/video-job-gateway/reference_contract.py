@@ -247,8 +247,14 @@ class ReferenceMediaVerifier:
                 context=self.tls_context,
             )
             try:
-                connection.request("GET", target, headers=headers)
-                response = connection.getresponse()
+                # Retry only before handing a response to the caller. Decoder
+                # and read errors from its body must not re-enter this yield.
+                try:
+                    connection.request("GET", target, headers=headers)
+                    response = connection.getresponse()
+                except OSError as error:
+                    last_error = error
+                    continue
                 if response.status != 200:
                     response.close()
                     raise ReferenceContractError(
@@ -260,10 +266,6 @@ class ReferenceMediaVerifier:
                 finally:
                     response.close()
                 return
-            except ReferenceContractError:
-                raise
-            except OSError as error:
-                last_error = error
             finally:
                 connection.close()
         raise OSError("all pinned reference media addresses failed") from last_error

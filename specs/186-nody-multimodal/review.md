@@ -36,6 +36,7 @@
 11. Nested documented result formats were not delivered by the Nody-specific URL extractor. Original UUID is retained and nested video URL results are recognized.
 12. Gateway SQLite context resources were not closed. Transaction completion now closes handles, with commit/reopen resource regression.
 13. Live Grok Video 3 polling returned a scalar `output` HTTPS URL, which was classified as running. Exact scalar-output regression now succeeds, while explicit failed status and non-HTTPS results remain rejected.
+14. Pinned download retries surrounded the context-manager yield, so caller I/O errors could produce a second yield. Retries now cover only connection setup; caller errors propagate once and resources close deterministically.
 
 ### Findings Deferred
 
@@ -43,7 +44,7 @@ None. Four models' undocumented multimodal modes and explicit first/last/video/a
 
 ### Verification Boundary
 
-- Relevant Python gateway suite:179 tests passing at this checkpoint.
+- Relevant Python gateway suite:182 tests passing at this checkpoint.
 - Go public-video and model suites passed; image-validation/debit, exact replay, no-task refund and concurrency interleaving regressions passed.
 - Independent read-only security and seven-criterion behavioral reviewers reported no remaining code blocker after corrections.
 - Six exact provider image tuples have successful authenticated task bills, totalCNY4.50. Further delivery/canary and controlled rollout verification are release gates and are NOT implied by code review completion.
