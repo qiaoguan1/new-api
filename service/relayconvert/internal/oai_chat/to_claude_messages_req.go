@@ -28,6 +28,19 @@ type openRouterRequestReasoning struct {
 }
 
 func OpenAIChatRequestToClaudeMessages(c *gin.Context, textRequest dto.GeneralOpenAIRequest) (*dto.ClaudeRequest, error) {
+	if textRequest.Model == dto.ClaudeFable51Model {
+		if textRequest.MaxTokens != nil && textRequest.MaxCompletionTokens != nil {
+			return nil, fmt.Errorf("max_tokens and max_completion_tokens must not both be supplied for claude-fable-5-1")
+		}
+		if textRequest.Reasoning != nil || textRequest.THINKING != nil || textRequest.EnableThinking != nil {
+			return nil, fmt.Errorf("claude-fable-5-1 Chat requests must use reasoning_effort, not reasoning or thinking fields")
+		}
+		if textRequest.ReasoningEffort != "" {
+			if err := dto.ValidateClaudeFable51Effort(textRequest.ReasoningEffort); err != nil {
+				return nil, fmt.Errorf("reasoning_effort: %w", err)
+			}
+		}
+	}
 	claudeTools := make([]any, 0, len(textRequest.Tools))
 
 	for _, tool := range textRequest.Tools {
@@ -174,7 +187,16 @@ func OpenAIChatRequestToClaudeMessages(c *gin.Context, textRequest dto.GeneralOp
 		}
 	}
 
-	if textRequest.ReasoningEffort != "" {
+	if textRequest.Model == dto.ClaudeFable51Model {
+		claudeRequest.Thinking = &dto.Thinking{Type: "adaptive"}
+		if textRequest.ReasoningEffort != "" {
+			outputConfig, err := common.Marshal(dto.OutputConfigForEffort{Effort: textRequest.ReasoningEffort})
+			if err != nil {
+				return nil, err
+			}
+			claudeRequest.OutputConfig = outputConfig
+		}
+	} else if textRequest.ReasoningEffort != "" {
 		switch textRequest.ReasoningEffort {
 		case "low":
 			claudeRequest.Thinking = &dto.Thinking{
