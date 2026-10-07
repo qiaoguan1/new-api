@@ -7,6 +7,7 @@ import re
 import urllib.error
 import urllib.request
 from adapters import AdapterError, HttpJsonTransport, JsonResponse, Observation, TransportFailure, VideoAdapter, _observation
+from nody_media_wire import build_media_body
 
 NODY_REVISION = 'nody-verified-2026-09-23.1'
 NODY_SOURCE = 'verified_upstream_1_5'
@@ -101,40 +102,12 @@ class NodyHubAdapter(VideoAdapter):
         super().__init__(config,transport or NodyTransport())
 
     def request_body(self, upstream_model, payload):
-        if payload.get('mode') in {'reference', 'all_reference'}:
-            spec = NODY_IMAGE_MODELS.get(upstream_model)
-            images = payload.get('images')
-            mode = payload['mode']
-            if (not spec or (payload.get('resolution'), payload.get('duration')) != spec
-                    or payload.get('aspect_ratio') != '16:9'
-                    or payload.get('generate_audio') is not True
-                    or not isinstance(images, list)
-                    or not (1 <= len(images) <= 7)
-                    or (mode == 'reference' and len(images) != 1)
-                    or (mode == 'all_reference' and len(images) < 2)
-                    or any(payload.get(k) for k in ('videos', 'audios'))
-                    or any(not isinstance(item, dict) or item.get('role') != 'reference'
-                           or not isinstance(item.get('url'), str) or not item['url'].startswith('https://')
-                           for item in images)):
-                raise AdapterError('nodyhub_unverified_spec', 'Unsupported Nody image-reference specification.', phase='validate', http_status=400)
-            urls = [item['url'] for item in images]
-            body = {'model': upstream_model, 'prompt': payload['prompt'], 'duration': spec[1]}
-            if upstream_model == 'grok-video-3':
-                body.update(resolution='720P', images=urls)
-                if len(urls) > 1:
-                    body['ratio'] = '16:9'
-            elif upstream_model == 'grok-imagine-1.5-video':
-                body.update(quality='720p', image_urls=urls)
-                if len(urls) > 1:
-                    body['size'] = '16:9'
-            else:
-                body['resolution'] = spec[0]
-                if len(urls) == 1:
-                    body['image'] = {'url': urls[0]}
-                else:
-                    body['reference_images'] = [{'url': url} for url in urls]
-                    body['aspect_ratio'] = '16:9'
-            return body
+        """Keep legacy text bytes while translating explicitly admitted media modes."""
+        if payload.get('mode') != 'text':
+            try:
+                return build_media_body(upstream_model, payload)
+            except ValueError as error:
+                raise AdapterError('nodyhub_unverified_spec', 'Unsupported Nody media specification.', phase='validate', http_status=400) from error
         spec=NODY_MODELS.get(upstream_model)
         if (not spec or payload.get('resolution')!=spec[0] or payload.get('duration')!=spec[1]
             or payload.get('aspect_ratio')!='16:9' or payload.get('mode')!='text'

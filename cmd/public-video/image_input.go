@@ -13,6 +13,22 @@ import (
 
 var imageIdentityPattern = regexp.MustCompile(`^[0-9a-f]{64}$`)
 
+// validateMediaURL rejects unsafe syntax before gateway DNS/content verification.
+func validateMediaURL(value interface{}) error {
+	raw, ok := value.(string)
+	if !ok || len(raw) == 0 || len(raw) > 4096 {
+		return errors.New("invalid media source URL")
+	}
+	parsed, err := url.Parse(raw)
+	if err != nil || parsed.Scheme != "https" || parsed.Hostname() == "" || parsed.User != nil || parsed.Fragment != "" || (parsed.Port() != "" && parsed.Port() != "443") {
+		return errors.New("invalid media source URL")
+	}
+	if ip := net.ParseIP(parsed.Hostname()); ip != nil && (!ip.IsGlobalUnicast() || ip.IsPrivate() || ip.IsLoopback() || ip.IsLinkLocalUnicast()) {
+		return errors.New("private media source URL")
+	}
+	return nil
+}
+
 // normalizeImageInput validates only declared image-reference modes. Execution
 // eligibility, actual image bytes and the reserve price are checked internally
 // before a public wallet transaction can begin.

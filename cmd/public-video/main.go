@@ -153,30 +153,47 @@ func (s *server) submit(c *gin.Context, who identity) {
 		return
 	}
 	for field := range body {
-		if !map[string]bool{"model": true, "prompt": true, "resolution": true, "duration": true, "aspect_ratio": true, "generate_audio": true, "request_id": true, "provider_id": true, "mode": true, "images": true, "image_roles": true, "image_identities": true}[field] {
+		if !map[string]bool{"model": true, "prompt": true, "resolution": true, "duration": true, "aspect_ratio": true, "generate_audio": true, "request_id": true, "provider_id": true, "mode": true, "images": true, "image_roles": true, "image_identities": true, "reference_images": true, "reference_videos": true, "reference_audios": true}[field] {
 			response(c, 400, "unsupported_field_"+field)
 			return
 		}
 	}
-	imageInput, e := normalizeImageInput(body)
+	mediaInput, e := normalizeNodyMediaInput(body)
+	if e != nil {
+		response(c, 400, "invalid_media_input")
+		return
+	}
+	imageInput := false
+	if !mediaInput {
+		imageInput, e = normalizeImageInput(body)
+	}
 	if e != nil {
 		response(c, 400, "invalid_image_input")
 		return
 	}
 	prompt, _ := body["prompt"].(string)
+	if mediaInput {
+		if value, exists := body["prompt"]; exists {
+			if _, ok := value.(string); !ok {
+				response(c, 400, "invalid_prompt")
+				return
+			}
+		}
+	}
 	prompt = strings.TrimSpace(prompt)
 	body["prompt"] = prompt
 	duration, _ := body["duration"].(float64)
 	resolution, _ := body["resolution"].(string)
-	if len([]rune(prompt)) == 0 || len([]rune(prompt)) > 2500 || (!imageInput && (duration != float64(spec.Duration) || resolution != spec.Resolution)) {
+	promptRequired := !mediaInput || (name != "wan3.0-video" && name != "wan3.0-video-prime")
+	if (promptRequired && len([]rune(prompt)) == 0) || len([]rune(prompt)) > 2500 || (!imageInput && !mediaInput && (duration != float64(spec.Duration) || resolution != spec.Resolution)) {
 		response(c, 400, "unverified_video_spec")
 		return
 	}
-	if aspect, exists := body["aspect_ratio"]; exists && aspect != "16:9" {
+	if aspect, exists := body["aspect_ratio"]; !mediaInput && exists && aspect != "16:9" {
 		response(c, 400, "unverified_aspect_ratio")
 		return
 	}
-	if audio, exists := body["generate_audio"]; exists && audio != true {
+	if audio, exists := body["generate_audio"]; !mediaInput && exists && audio != true {
 		response(c, 400, "audio_required")
 		return
 	}
@@ -196,12 +213,16 @@ func (s *server) submit(c *gin.Context, who identity) {
 		response(c, 400, "invalid_request_id")
 		return
 	}
-	body["generate_audio"] = true
-	body["aspect_ratio"] = "16:9"
+	if !mediaInput {
+		body["generate_audio"] = true
+		body["aspect_ratio"] = "16:9"
+	}
 	body["provider_id"] = "video-aixingtu-api"
 	delete(body, "request_id")
 	fingerprintBody := body
-	if imageInput {
+	if mediaInput {
+		fingerprintBody = mediaFingerprintBody(body)
+	} else if imageInput {
 		fingerprintBody = make(map[string]interface{}, len(body))
 		for key, value := range body {
 			fingerprintBody[key] = value
@@ -223,7 +244,15 @@ func (s *server) submit(c *gin.Context, who identity) {
 	var existing model.PublicVideoTask
 	lookup := model.DB.Where("id = ? AND user_id = ?", id, who.user.Id).First(&existing).Error
 	if errors.Is(lookup, gorm.ErrRecordNotFound) {
-		if imageInput {
+		if mediaInput {
+			body["request_id"] = "public-" + hex.EncodeToString(idHash[:])
+			var status int
+			spec, status, e = s.preflightMedia(body)
+			if e != nil {
+				response(c, status, "media_input_not_ready")
+				return
+			}
+		} else if imageInput {
 			body["request_id"] = "public-" + hex.EncodeToString(idHash[:])
 			var status int
 			spec, status, e = s.preflightImage(body)
@@ -239,7 +268,7 @@ func (s *server) submit(c *gin.Context, who identity) {
 		response(c, 503, "wallet_unavailable")
 		return
 	}
-	if lookup == nil && imageInput {
+	if lookup == nil && (imageInput || mediaInput) {
 		spec.Reserve = existing.ReservedCNY
 	}
 	body["request_id"] = "public-" + hex.EncodeToString(idHash[:])
@@ -399,10 +428,14 @@ func (s *server) process(row model.PublicVideoTask) error {
 		}
 		if status != 200 && status != 202 {
 			gatewayError, _ := data["error"].(map[string]interface{})
-			imageMode := payload["mode"] == "reference" || payload["mode"] == "all_reference"
-			if imageMode && row.SubmitAttempts == 1 && data["task_created"] == false && data["upstream_submitted"] == false && data["billing_contract_version"] == "xtai-video-billing-v2.2" && data["request_id"] == requestID && gatewayError["phase"] == "validate" {
+			mediaMode := payload["mode"] == "reference" || payload["mode"] == "all_reference" || payload["mode"] == "first_frame" || payload["mode"] == "last_frame" || payload["mode"] == "first_last_frame"
+			if mediaMode && row.SubmitAttempts == 1 && data["task_created"] == false && data["upstream_submitted"] == false && data["billing_contract_version"] == "xtai-video-billing-v2.2" && data["request_id"] == requestID && gatewayError["phase"] == "validate" {
+				rejectionCode := "media_input_rejected_before_creation"
+				if (row.Model == "grok-video-3" || row.Model == "grok-imagine-1.5-video" || row.Model == "grok-imagine-video-official") && payload["reference_videos"] == nil && payload["reference_audios"] == nil {
+					rejectionCode = "image_input_rejected_before_creation"
+				}
 				snapshot, marshalErr := common.Marshal(map[string]interface{}{"status": "failed", "model": row.Model, "result_delivery": "unavailable",
-					"error":              map[string]interface{}{"code": "image_input_rejected_before_creation", "message": "参考素材校验失败，任务未创建，本次预扣已退回。"},
+					"error":              map[string]interface{}{"code": rejectionCode, "message": "参考素材校验失败，任务未创建，本次预扣已退回。"},
 					"execution_evidence": map[string]interface{}{"source": "authenticated_gateway_pre_creation_rejection", "request_id": requestID, "task_created": false, "upstream_submitted": false},
 					"billing":            map[string]interface{}{"status": "settled", "currency": "CNY", "charged_amount": "0.000000"}})
 				if marshalErr != nil {

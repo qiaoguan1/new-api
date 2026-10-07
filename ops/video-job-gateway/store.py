@@ -14,6 +14,7 @@ from decimal import Decimal, InvalidOperation, ROUND_CEILING
 from pathlib import Path
 from typing import Any
 from nodyhub import NODY_MODELS, NODY_IMAGE_MODELS, NODY_SOURCE, UUID, verified_quote
+from nody_media_wire import build_media_body
 
 
 ACTIVE_STATUSES = {"queued", "submitting", "running", "reconciling"}
@@ -2026,7 +2027,46 @@ def _reservation_from_payload(payload_json: str) -> dict[str, str]:
         try:
             model = str(payload.get("model") or "")
             images = payload.get("images") or []
-            if images:
+            if payload.get("_nody_media_contract") is True or quote.get("media_contract_evidence") is not None or payload.get("videos") or payload.get("audios"):
+                evidence = quote.get("media_contract_evidence")
+                if (payload.get("_nody_media_contract") is not True or contract_version != BILLING_CONTRACT_REFERENCE_VERSION
+                        or not isinstance(evidence, dict) or evidence.get("source") != "nodyhub_authenticated_video_task"
+                        or not isinstance(evidence.get("task_id"), str) or not UUID.fullmatch(evidence["task_id"])
+                        or type(payload.get("duration")) is not int or type(quote.get("output_seconds")) is not int
+                        or quote["output_seconds"] != duration or official > 100
+                        or any(quote.get(field) != payload.get(field) for field in ("model", "resolution", "duration", "aspect_ratio", "generate_audio"))
+                        or type(quote.get("generate_audio")) is not bool
+                        or quote.get("operation_mode") != payload.get("mode")):
+                    return unavailable
+                build_media_body(model, payload)
+                references = payload.get("reference_input")
+                if not isinstance(references, dict):
+                    return unavailable
+                for name, field, reference_field, seconds_field in (("images", "image_count", "", ""), ("videos", "video_count", "reference_videos", "input_video_seconds_exact"), ("audios", "audio_count", "reference_audios", "input_audio_seconds_exact")):
+                    assets = payload.get(name)
+                    if (not isinstance(assets, list) or type(quote.get(field)) is not int or quote[field] != len(assets)
+                            or any(not isinstance(item, dict) or not SHA256_PATTERN.fullmatch(str(item.get("identity") or "")) for item in assets)):
+                        return unavailable
+                    if not reference_field:
+                        continue
+                    metadata = references.get(reference_field)
+                    if not isinstance(metadata, list) or len(metadata) != len(assets):
+                        return unavailable
+                    if assets:
+                        if any(not isinstance(item, dict) or item.get("sha256") != assets[index]["identity"] for index, item in enumerate(metadata)):
+                            return unavailable
+                        if any(not isinstance(item.get("duration_seconds"), str)
+                               or not re.fullmatch(r"(?:0|[1-9][0-9]{0,2})\.[0-9]{6}", item["duration_seconds"])
+                               or not Decimal(1) <= Decimal(item["duration_seconds"]) <= 15 for item in metadata):
+                            return unavailable
+                        total = format(sum((Decimal(item["duration_seconds"]) for item in metadata), Decimal(0)), ".6f")
+                        if quote.get(seconds_field) != total or payload.get(seconds_field) != total:
+                            return unavailable
+                    elif quote.get(seconds_field) is not None or payload.get(seconds_field) is not None:
+                        return unavailable
+                if quote.get("input_rate_class") != ("with_video_input" if payload.get("videos") else "without_video_input"):
+                    return unavailable
+            elif images:
                 evidence = quote.get("image_contract_evidence") or {}
                 if (model not in NODY_IMAGE_MODELS or not isinstance(images, list)
                         or (payload.get("resolution"), duration) != NODY_IMAGE_MODELS[model]
@@ -2043,7 +2083,7 @@ def _reservation_from_payload(payload_json: str) -> dict[str, str]:
                 verified = verified_quote(model, str(payload.get("resolution") or ""), duration)
                 if any(str(quote.get(key)) != str(verified[key]) for key in ("pricing_revision", "amount_cny_exact", "reference_cost_cny_exact")):
                     return unavailable
-        except (KeyError, ValueError):
+        except (KeyError, ValueError, TypeError, InvalidOperation):
             return unavailable
     expected = Decimal(_quantize_money(official * Decimal("1.5")))
     if reserved != expected:

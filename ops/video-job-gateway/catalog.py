@@ -147,7 +147,7 @@ class Catalog:
                         supports_generate_audio=bool(route_source.get("supports_generate_audio", False)),
                         supports_reference_video=bool(route_source.get("supports_reference_video", False)),
                         supports_reference_audio=bool(route_source.get("supports_reference_audio", False)),
-                        max_reference_audios=_bounded_int(route_source.get("max_reference_audios"), 0, 3),
+                        max_reference_audios=_bounded_int(route_source.get("max_reference_audios"), 0, 5 if provider == "nodyhub" else 3),
                         billing_mode=billing_mode,
                         routing_unit_cost=routing_unit_cost,
                     )

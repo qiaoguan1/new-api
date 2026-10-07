@@ -19,6 +19,8 @@ RUNTIME_RELEASE_FILES = (
     "credential_lifecycle.py",
     "nodyhub.py",
     "nody_image_contracts.py",
+    "nody_media_contracts.py",
+    "nody_media_wire.py",
     "reference_contract.py",
     "relay-pricing.json",
     "relay_pricing.py",
