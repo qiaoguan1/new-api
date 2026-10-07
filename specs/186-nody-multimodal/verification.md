@@ -1,6 +1,11 @@
-# Issue186 verification checkpoint — 2026-10-07
+# Issue186 production verification — 2026-10-07
 
 ## Verified
+
+- Production verification returned: ordinary-user text video models7, image-reference profiles6, native runtime unchanged. Public `/api/pricing` returnedHTTP200, `video_catalog_status=ready`, and all three Grok image rows available with two profiles each.
+- Both Python video gateways and the Go public frontdoor now use the issue186 candidates.
+- Isolated canary `vjob_61a64afb2910ed701e19507741aa8c03` downloaded66191 bytes with audio/video, settledCNY0.675000 /337500 quota with matching user/token/task/log accounting and cross-user404. At the verified1.5 markup, upstream costCNY0.45; cumulative generation-test expenditureCNY4.95, below the authorizedCNY50 ceiling. No task was resubmitted.
+- Six direct tests now all have bounded downloaded H264/AAC MP4 proof matching their authenticated SUCCESS bills.
 
 - Local public-video and model Go suites pass.
 - Latest candidate gateway passed all182 tests on the production host in an isolated test container.
@@ -9,17 +14,22 @@
 - Production source baseline matches the feature base after line-ending normalization.
 - The public site health endpoint returned HTTP200 with database-authoritative quota enabled during this run.
 
-## Not completed or not claimed
+## Deliberate boundaries
 
-- The six-case complete delivery proof and isolated public-wallet canary are not accepted yet. The free-only server run stopped at the delivery-proof gate; it submitted no paid task and did not prepare/promote production changes.
-- The operator verification helper's cleanup-confirmation check failed after media probing. It now also confirms sandbox absence through an exact-name Docker container listing rather than depending on CLI error wording; that correction still needs live verification. The original CLI error text was not recovered, so its cause is not asserted.
-- SSH repeatedly timed out during connection/banner exchange or reset after connecting. These errors do not establish that the public service is down.
-- No production gateway/frontdoor switch, user/key/price/balance modification, historical replay/refund, or schedule change was performed.
+- No real user/key permission, existing price, balance, historical replay/refund or schedule change was performed.
 - Wan3, Wan3Prime, FLUX3, OmniFlash image modes and first/last/video/audio inputs still lack the required primary contract and exact live evidence in this release.
 - PR188 remains draft; no CI status or merge is claimed.
 
-## Safe continuation
+## Release recovery
 
-Restore a stable authorized SSH connection, or obtain user approval to use the host's logged-in web console. Re-run only GET-based delivery proof; then create the isolated canary, verify free rejection/accounting, and submit at most one durable CNY2.4-ceiling canary intent within the original CNY50 budget. Only after exact settled wallet/media proof may the reviewed backup/drain/promote flow run. Never resubmit an existing or uncertain upstream task.
+Foreground route refresh/rollback did not complete under unstable SSH. Original services were recovered first; the successful retry reused immutable tested candidates in an independent server process, retained current data, checked exact profile hashes, and bounded transient Docker-DNS validation.
+
+The restored catalog comparison reported only a group-list order swap and placement of the same `pricing_version` hash on different rows. Actual prices were unchanged. Comparison now normalizes set-like lists and ignores only version-placement metadata; money and `pricing_revision` remain strict. Three operator regression cases pass, including rejection of real price/revision changes.
+
+Canary-only configuration was corrected to use local/evidence-based prices without dynamic production reads. Final access validation uses an existing ordinary-role user key. No user permission was changed.
+
+Private PostgreSQL/SQLite backups and stopped production rollback containers are retained. No database dump was restored over current transactions. New image modes remain bound to exact counts/specifications in the live capabilities/prices APIs.
 
 Private server receipts remain under `/opt/ai-api-stack/backups/nody-multimodal-186-20261007`; credentials and signed result URLs are not included here.
+
+Cleanup: four task-owned canary containers and the exact isolated database `xtai_issue186_canary` were removed after private PostgreSQL/SQLite audit backups. Production rollback containers and current production data are retained; audit backups can recover the removed test data.

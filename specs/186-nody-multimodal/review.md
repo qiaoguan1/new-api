@@ -37,6 +37,10 @@
 12. Gateway SQLite context resources were not closed. Transaction completion now closes handles, with commit/reopen resource regression.
 13. Live Grok Video 3 polling returned a scalar `output` HTTPS URL, which was classified as running. Exact scalar-output regression now succeeds, while explicit failed status and non-HTTPS results remain rejected.
 14. Pinned download retries surrounded the context-manager yield, so caller I/O errors could produce a second yield. Retries now cover only connection setup; caller errors propagate once and resources close deterministically.
+15. Operator canary startup used a private hostname not accepted by the pricing validator. The isolated environment now uses local/evidence prices and a non-routable presentation origin; production validation was not loosened.
+16. Operator credential selection assumed one user's group and then role. Selection now requires an existing ordinary-role, active/unexpired, unrestricted key and live authentication; no user permission is mutated.
+17. Strict catalog comparison treated collection order and placement of the same version hash as a price change. Three regressions cover semantic equality and rejection of real monetary/revision changes.
+18. Foreground SSH termination interrupted recovery. Retried deployment is detached, bound to immutable candidate IDs and profile SHA, records identity boundaries, retries only transient DNS validation, and preserves current accounting. Rollback checks active-image safety before stopping the public process.
 
 ### Findings Deferred
 
@@ -47,8 +51,9 @@ None. Four models' undocumented multimodal modes and explicit first/last/video/a
 - Relevant Python gateway suite:182 tests passing at this checkpoint.
 - Go public-video and model suites passed; image-validation/debit, exact replay, no-task refund and concurrency interleaving regressions passed.
 - Independent read-only security and seven-criterion behavioral reviewers reported no remaining code blocker after corrections.
-- Six exact provider image tuples have successful authenticated task bills, totalCNY4.50. Further delivery/canary and controlled rollout verification are release gates and are NOT implied by code review completion.
-- No production deployment, historical refund, price-schedule change or unrelated channel change is claimed here.
+- Six exact provider image tuples have authenticated successful bills and downloaded AV proof; direct costCNY4.50. The public-wallet canary settledCNY0.675000/337500 quota with owner/download/ledger checks; cumulative upstream generation-test costCNY4.95.
+- Production public/legacy verification returned seven preserved text IDs, six exact image profiles and native runtime unchanged. Public model-square checks returnedHTTP200 with all three Grok image rows available.
+- No historical refund, price-schedule change, real user balance/permission change or unrelated channel change is claimed.
 
 **Unaddressed: 0**
 **Review Status: COMPLETE**

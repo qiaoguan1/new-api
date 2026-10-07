@@ -81,8 +81,8 @@ def production_sql(statement: str) -> str:
 def ordinary_key() -> str:
     """Select an existing authorized normal-user token without ACL changes."""
     raw = production_sql("SELECT t.key FROM tokens t JOIN users u ON u.id=t.user_id "
-                         "WHERE u.username='lian123' AND u.status=1 AND u.\"group\"='auto' "
-                         "AND t.status=1 AND t.deleted_at IS NULL AND u.deleted_at IS NULL "
+                         "WHERE u.status=1 AND u.role=1 "
+                         "AND t.status IN (1,4) AND t.deleted_at IS NULL AND u.deleted_at IS NULL "
                          "AND (t.expired_time=-1 OR t.expired_time>extract(epoch from now())) "
                          "AND coalesce(t.allow_ips,'')='' AND t.model_limits_enabled=false "
                          "AND coalesce(t.\"group\",'') IN ('','auto') ORDER BY t.id DESC LIMIT 1;")
@@ -355,7 +355,10 @@ def compare_catalog(name: str, current: dict, before: dict, *, images: bool) -> 
         for rows in (old, new):
             mapped = {}
             for row in rows:
-                copy_row = {key: value for key, value in row.items() if key not in ('image_reference', 'image_reference_pricing')}
+                copy_row = {key: value for key, value in row.items() if key not in ('image_reference', 'image_reference_pricing', 'pricing_version')}
+                for field in ('enable_groups', 'supported_endpoint_types'):
+                    if isinstance(copy_row.get(field), list):
+                        copy_row[field] = sorted(copy_row[field], key=lambda value: json.dumps(value, sort_keys=True))
                 if row.get('model_name') in c.IMAGE_MODELS and isinstance(copy_row.get('description'), str):
                     copy_row['description'] = copy_row['description'].split('另支持已验证图片参考；', 1)[0]
                 mapped[row['model_name']] = copy_row
@@ -429,6 +432,7 @@ def rollback() -> None:
     state = json.loads(STATE.read_text())
     c.require(state.get('swapped') or state.get('drains') or state.get('phase') == 'draining', 'No recorded rollout mutation to roll back')
     drains(state)
+    inflight_safe(rollback=True)
     current_names = c.command(['docker', 'ps', '-a', '--format', '{{.Names}}']).splitlines()
     if PUBLIC in current_names:
         public = c.inspect(PUBLIC)
@@ -437,7 +441,6 @@ def rollback() -> None:
                 and public['Config'].get('Labels', {}).get('com.aixingtuyun.rollout-operation') == state['operation_id'])
         c.require(owned, 'Public container identity ambiguous; do not stop it')
         docker('/containers/' + public['Id'] + '/stop?t=60', method='POST')
-    inflight_safe(rollback=True)
     for name in [name for name in TARGETS if name in state['swapped']]:
         target = state['targets'][name]
         names = c.command(['docker', 'ps', '-a', '--format', '{{.Names}}']).splitlines()

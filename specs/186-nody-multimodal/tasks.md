@@ -24,12 +24,12 @@
 
 ## Phase 4: User Story 3 - Discovery and Rollout
 
-- [ ] T011 [US3] Run relevant regressions and isolated-canary contracts.
-- [ ] T012 [US3] Real lowest-spec validation within CNY50 cumulative exposure; record task/cost/result evidence.
-- [ ] T013 [US3] Synchronize only verified capability/price/marketplace rows and downstream examples.
+- [x] T011 [US3] Run relevant regressions and isolated-canary contracts.
+- [x] T012 [US3] Real lowest-spec validation within CNY50 cumulative exposure; record task/cost/result evidence.
+- [x] T013 [US3] Synchronize only verified capability/price/marketplace rows and downstream examples.
 - [x] T014 Comprehensive/security review and resolve findings before release.
-- [ ] T015 Private backup, controlled rollout and public/legacy verification.
-- [ ] T016 Remove unnecessary task-owned files, commit/PR with attached artifact, and report partial gates honestly.
+- [x] T015 Private backup, controlled rollout and public/legacy verification.
+- [x] T016 Remove unnecessary task-owned files, commit/PR with attached artifact, and report partial gates honestly.
 
 ## Dependencies
 
