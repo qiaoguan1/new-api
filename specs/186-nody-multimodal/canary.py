@@ -413,7 +413,7 @@ def verify_free() -> None:
     body = reference_body('issue186-invalid-sha-free')
     body['image_identities'] = ['0' * 64]
     code, rejected = fetch(base + '/v1/videos', token=accounts[0]['key'], body=body)
-    require(code == 400, 'Invalid content SHA must be rejected before reservation')
+    require(code == 409, 'Actual content SHA mismatch must conflict before reservation')
     require(wallet(accounts[0]) == before, 'Invalid asset changed canary wallet/task/log accounting')
     private_json(PRIVATE / 'free-verification.json', {'at': int(time.time()), 'catalogs': observed, 'rejection': rejected, 'wallet': before, 'passed': True})
     print(json.dumps({'free_checks_passed': True, 'text_models': 7, 'image_profiles': 6, 'invalid_asset_status': code, 'wallet_delta': 0}))
@@ -483,6 +483,9 @@ def probe_media(video_path: Path) -> dict:
                     'Probe container ownership differs; do not clean it up')
             removed = subprocess.run(['docker', 'rm', '-f', name], text=True, capture_output=True, timeout=10)
             require(removed.returncode == 0, 'Owned probe container cleanup needs attention')
+        else:
+            absent = subprocess.run(['docker', 'ps', '-a', '--filter', 'name=^/' + name + '$', '--format', '{{.ID}}'], text=True, capture_output=True, timeout=10)
+            require(absent.returncode == 0 and not absent.stdout.strip(), 'Owned probe absence could not be verified')
 
 
 def poll() -> None:

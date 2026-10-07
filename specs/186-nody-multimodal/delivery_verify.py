@@ -57,8 +57,9 @@ def probe_download(path, task_id):
           and all((rows[0].get('Config',{}).get('Labels')or{}).get(key)==value for key,value in labels.items()))
    if not owned:raise RuntimeError('sandbox_cleanup_identity_mismatch')
    subprocess.run(['docker','rm','--force',name],capture_output=True,text=True,timeout=10,check=True)
-  elif 'No such' not in inspected.stderr:
-   raise RuntimeError('sandbox_cleanup_not_confirmed')
+  else:
+   absent=subprocess.run(['docker','ps','-a','--filter','name=^/'+name+'$','--format','{{.ID}}'],capture_output=True,text=True,timeout=10)
+   if absent.returncode!=0 or absent.stdout.strip():raise RuntimeError('sandbox_cleanup_not_confirmed')
 
 def atomic_update(path,fields):
  current=json.loads(path.read_text()); current.update(fields)
