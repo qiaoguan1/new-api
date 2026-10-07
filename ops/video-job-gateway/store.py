@@ -13,7 +13,7 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation, ROUND_CEILING
 from pathlib import Path
 from typing import Any
-from nodyhub import NODY_MODELS, NODY_SOURCE, verified_quote
+from nodyhub import NODY_MODELS, NODY_IMAGE_MODELS, NODY_SOURCE, UUID, verified_quote
 
 
 ACTIVE_STATUSES = {"queued", "submitting", "running", "reconciling"}
@@ -54,6 +54,16 @@ class StoreConflict(ValueError):
     pass
 
 
+class ClosingConnection(sqlite3.Connection):
+    """Commit/rollback normally, then release the WAL connection at context exit."""
+
+    def __exit__(self, *args):
+        try:
+            return super().__exit__(*args)
+        finally:
+            self.close()
+
+
 class Store:
     def __init__(self, data_dir: Path, *, max_active_jobs: int = 500, public_base_url: str = "") -> None:
         self.data_dir = data_dir
@@ -64,7 +74,7 @@ class Store:
         self._initialize()
 
     def connect(self) -> sqlite3.Connection:
-        connection = sqlite3.connect(self.path, timeout=15, isolation_level=None)
+        connection = sqlite3.connect(self.path, timeout=15, isolation_level=None, factory=ClosingConnection)
         connection.row_factory = sqlite3.Row
         connection.execute("pragma journal_mode=wal")
         connection.execute("pragma synchronous=full")
@@ -2015,12 +2025,24 @@ def _reservation_from_payload(payload_json: str) -> dict[str, str]:
     if quote.get("price_source") == NODY_SOURCE:
         try:
             model = str(payload.get("model") or "")
-            spec = NODY_MODELS[model]
-            if duration != spec[1]:
-                return unavailable
-            verified = verified_quote(model, str(payload.get("resolution") or ""), duration)
-            if any(str(quote.get(key)) != str(verified[key]) for key in ("pricing_revision", "amount_cny_exact", "reference_cost_cny_exact")):
-                return unavailable
+            images = payload.get("images") or []
+            if images:
+                evidence = quote.get("image_contract_evidence") or {}
+                if (model not in NODY_IMAGE_MODELS or not isinstance(images, list)
+                        or (payload.get("resolution"), duration) != NODY_IMAGE_MODELS[model]
+                        or payload.get("mode") not in {"reference", "all_reference"}
+                        or quote.get("operation_mode") != payload.get("mode")
+                        or type(quote.get("image_count")) is not int or quote["image_count"] != len(images)
+                        or not isinstance(evidence, dict) or evidence.get("source") != "nodyhub_authenticated_video_task"
+                        or not isinstance(evidence.get("task_id"), str) or not UUID.fullmatch(evidence["task_id"])):
+                    return unavailable
+            else:
+                spec = NODY_MODELS[model]
+                if duration != spec[1]:
+                    return unavailable
+                verified = verified_quote(model, str(payload.get("resolution") or ""), duration)
+                if any(str(quote.get(key)) != str(verified[key]) for key in ("pricing_revision", "amount_cny_exact", "reference_cost_cny_exact")):
+                    return unavailable
         except (KeyError, ValueError):
             return unavailable
     expected = Decimal(_quantize_money(official * Decimal("1.5")))

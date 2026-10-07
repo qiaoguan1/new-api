@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"sort"
 	"time"
@@ -112,11 +113,16 @@ func (s *server) marketPricing(c *gin.Context) {
 		return
 	}
 	enabled := map[string]bool{}
+	imageCapabilities := map[string]map[string]interface{}{}
 	for _, value := range models {
 		m, ok := value.(map[string]interface{})
 		if ok && m["available"] == true {
 			name, _ := m["id"].(string)
 			enabled[name] = true
+			images, _ := m["image_reference"].(map[string]interface{})
+			if images["available"] == true {
+				imageCapabilities[name] = images
+			}
 		}
 	}
 	pricing, _ := prices["pricing"].(map[string]interface{})
@@ -177,6 +183,57 @@ func (s *server) marketPricing(c *gin.Context) {
 		// while retaining the exact CNY reservation and specification for API consumers.
 		displayPrice, _ := reserve.Mul(rate).Div(decimal.NewFromFloat(common.QuotaPerUnit)).Div(decimal.NewFromFloat(groupRatio)).Float64()
 		added = append(added, gin.H{"model_name": name, "display_name": videoTitles[name], "description": fmt.Sprintf("%s · 文生视频 %s / %d秒 / 16:9 / 保留音轨；该规格预扣¥%s，按实际成本×1.5结算。JSON POST /v1/videos。", videoTitles[name], spec.Resolution, spec.Duration, spec.Reserve), "quota_type": 1, "model_ratio": 0, "model_price": displayPrice, "owner_by": "NodyHub", "completion_ratio": 0, "enable_groups": []string{"视频"}, "supported_endpoint_types": []string{"video-generation"}, "public_video_pricing": gin.H{"currency": "CNY", "reserved_cny_exact": spec.Reserve, "duration": spec.Duration, "resolution": spec.Resolution, "aspect_ratio": "16:9", "generate_audio": true, "billing_mode": "actual_cost_times_1_5", "pricing_revision": revision}})
+		if images := imageCapabilities[name]; images != nil {
+			imagePrices, _ := prices["image_reference_pricing"].(map[string]interface{})
+			imagePriceRows, _ := imagePrices["models"].([]interface{})
+			imageSpecs, _ := images["specifications"].([]interface{})
+			verifiedSpecs := []interface{}{}
+			for _, candidate := range imageSpecs {
+				row, ok := candidate.(map[string]interface{})
+				if !ok || row["model"] != name || row["currency"] != "CNY" {
+					continue
+				}
+				mode, modeOK := row["operation_mode"].(string)
+				count, countOK := row["image_count"].(float64)
+				duration, durationOK := row["duration"].(float64)
+				resolution, resolutionOK := row["resolution"].(string)
+				amount, amountOK := row["amount_cny_exact"].(string)
+				revision, revisionOK := row["pricing_revision"].(string)
+				priceAmount, amountErr := decimal.NewFromString(amount)
+				if !modeOK || (mode != "reference" && mode != "all_reference") || !countOK || count != math.Trunc(count) || count < 1 || count > 7 || (mode == "reference" && count != 1) || (mode == "all_reference" && count < 2) || !durationOK || duration != math.Trunc(duration) || duration < 1 || duration > 30 || !resolutionOK || (resolution != "480p" && resolution != "720p") || !amountOK || amountErr != nil || !priceAmount.IsPositive() || !revisionOK || revision == "" {
+					continue
+				}
+				for _, priceValue := range imagePriceRows {
+					price, ok := priceValue.(map[string]interface{})
+					if !ok || price["model"] != name || price["currency"] != "CNY" {
+						continue
+					}
+					match := true
+					for _, field := range []string{"operation_mode", "image_count", "resolution", "duration", "amount_cny_exact", "pricing_revision"} {
+						if other, ok := price[field].(string); ok {
+							if row[field] != other {
+								match = false
+							}
+						} else if other, ok := price[field].(float64); ok {
+							if row[field] != other {
+								match = false
+							}
+						} else {
+							match = false
+						}
+					}
+					if match {
+						verifiedSpecs = append(verifiedSpecs, row)
+						break
+					}
+				}
+			}
+			if len(verifiedSpecs) > 0 {
+				projection := added[len(added)-1].(gin.H)
+				projection["image_reference"] = gin.H{"available": true, "identity_required": true, "roles": []string{"reference"}, "required_input_aspect_ratio": "16:9", "specifications": verifiedSpecs}
+				projection["description"] = projection["description"].(string) + "另支持已验证图片参考；模式、图片数量、分辨率和时长须按image_reference.specifications选择，不支持未验证首尾帧。"
+			}
+		}
 	}
 	endpoints, _ := native["supported_endpoint"].(map[string]interface{})
 	if endpoints == nil {

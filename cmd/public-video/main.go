@@ -153,17 +153,22 @@ func (s *server) submit(c *gin.Context, who identity) {
 		return
 	}
 	for field := range body {
-		if !map[string]bool{"model": true, "prompt": true, "resolution": true, "duration": true, "aspect_ratio": true, "generate_audio": true, "request_id": true, "provider_id": true}[field] {
+		if !map[string]bool{"model": true, "prompt": true, "resolution": true, "duration": true, "aspect_ratio": true, "generate_audio": true, "request_id": true, "provider_id": true, "mode": true, "images": true, "image_roles": true, "image_identities": true}[field] {
 			response(c, 400, "unsupported_field_"+field)
 			return
 		}
+	}
+	imageInput, e := normalizeImageInput(body)
+	if e != nil {
+		response(c, 400, "invalid_image_input")
+		return
 	}
 	prompt, _ := body["prompt"].(string)
 	prompt = strings.TrimSpace(prompt)
 	body["prompt"] = prompt
 	duration, _ := body["duration"].(float64)
 	resolution, _ := body["resolution"].(string)
-	if len([]rune(prompt)) == 0 || len([]rune(prompt)) > 2500 || duration != float64(spec.Duration) || resolution != spec.Resolution {
+	if len([]rune(prompt)) == 0 || len([]rune(prompt)) > 2500 || (!imageInput && (duration != float64(spec.Duration) || resolution != spec.Resolution)) {
 		response(c, 400, "unverified_video_spec")
 		return
 	}
@@ -195,20 +200,47 @@ func (s *server) submit(c *gin.Context, who identity) {
 	body["aspect_ratio"] = "16:9"
 	body["provider_id"] = "video-aixingtu-api"
 	delete(body, "request_id")
-	canonical, _ := common.Marshal(body)
+	fingerprintBody := body
+	if imageInput {
+		fingerprintBody = make(map[string]interface{}, len(body))
+		for key, value := range body {
+			fingerprintBody[key] = value
+		}
+		roles := body["image_roles"].([]interface{})
+		identities := body["image_identities"].([]interface{})
+		references := make([]interface{}, len(roles))
+		for index := range roles {
+			references[index] = map[string]interface{}{"role": roles[index], "identity": identities[index]}
+		}
+		fingerprintBody["images"] = references
+		delete(fingerprintBody, "image_roles")
+		delete(fingerprintBody, "image_identities")
+	}
+	canonical, _ := common.Marshal(fingerprintBody)
 	fingerprint := sha256.Sum256(canonical)
 	idHash := sha256.Sum256([]byte(fmt.Sprintf("%d:%s", who.user.Id, requestID)))
 	id := "vjob_" + hex.EncodeToString(idHash[:16])
 	var existing model.PublicVideoTask
 	lookup := model.DB.Where("id = ? AND user_id = ?", id, who.user.Id).First(&existing).Error
 	if errors.Is(lookup, gorm.ErrRecordNotFound) {
-		if e = s.preflight(name, spec); e != nil {
+		if imageInput {
+			body["request_id"] = "public-" + hex.EncodeToString(idHash[:])
+			var status int
+			spec, status, e = s.preflightImage(body)
+			if e != nil {
+				response(c, status, "image_input_not_ready")
+				return
+			}
+		} else if e = s.preflight(name, spec); e != nil {
 			response(c, 503, "video_price_or_capability_not_ready")
 			return
 		}
 	} else if lookup != nil {
 		response(c, 503, "wallet_unavailable")
 		return
+	}
+	if lookup == nil && imageInput {
+		spec.Reserve = existing.ReservedCNY
 	}
 	body["request_id"] = "public-" + hex.EncodeToString(idHash[:])
 	wire, _ := common.Marshal(body)
@@ -351,13 +383,35 @@ func (s *server) process(row model.PublicVideoTask) error {
 			return errors.New("gateway_identity_pending")
 		}
 		// Repeating the SAME request to our durable gateway is safe; it never repeats unknown provider submits.
+		attempt := model.DB.Model(&row).Where("state = ? AND backend_id = ?", "reserved", "").Update("submit_attempts", gorm.Expr("COALESCE(submit_attempts, 0) + 1"))
+		if attempt.Error != nil {
+			return attempt.Error
+		}
+		if attempt.RowsAffected != 1 {
+			return nil
+		}
+		if e = model.DB.First(&row, "id = ?", row.ID).Error; e != nil {
+			return e
+		}
 		data, status, e = s.backendJSON("POST", "/v1/videos", []byte(row.Body))
 		if e != nil {
 			return e
 		}
 		if status != 200 && status != 202 {
+			gatewayError, _ := data["error"].(map[string]interface{})
+			imageMode := payload["mode"] == "reference" || payload["mode"] == "all_reference"
+			if imageMode && row.SubmitAttempts == 1 && data["task_created"] == false && data["upstream_submitted"] == false && data["billing_contract_version"] == "xtai-video-billing-v2.2" && data["request_id"] == requestID && gatewayError["phase"] == "validate" {
+				snapshot, marshalErr := common.Marshal(map[string]interface{}{"status": "failed", "model": row.Model, "result_delivery": "unavailable",
+					"error":              map[string]interface{}{"code": "image_input_rejected_before_creation", "message": "参考素材校验失败，任务未创建，本次预扣已退回。"},
+					"execution_evidence": map[string]interface{}{"source": "authenticated_gateway_pre_creation_rejection", "request_id": requestID, "task_created": false, "upstream_submitted": false},
+					"billing":            map[string]interface{}{"status": "settled", "currency": "CNY", "charged_amount": "0.000000"}})
+				if marshalErr != nil {
+					return marshalErr
+				}
+				return model.SettlePublicVideoNoTask(row.ID, string(snapshot))
+			}
 			// A replay rejection cannot prove that an earlier timed-out call created no task.
-			if status == 400 || status == 413 {
+			if status == 400 || status == 409 || status == 413 {
 				return model.DB.Model(&row).Where("state <> ?", "settled").Updates(map[string]interface{}{"state": "pending_review", "last_error": "gateway_identity_pending", "updated_at": time.Now().Unix()}).Error
 			}
 			return fmt.Errorf("gateway_submit_http_%d", status)

@@ -22,6 +22,7 @@ type PublicVideoTask struct {
 	Group           string `gorm:"size:64"`
 	Body            string `gorm:"type:text"`
 	BackendID       string `gorm:"size:48"`
+	SubmitAttempts  int
 	State           string `gorm:"size:32;index"`
 	ReservedCNY     string `gorm:"size:32"`
 	ChargedCNY      string `gorm:"size:32"`
@@ -127,6 +128,17 @@ func ReservePublicVideo(candidate PublicVideoTask) (PublicVideoTask, bool, error
 
 // SettlePublicVideo applies one authoritative final amount, including a proven full refund.
 func SettlePublicVideo(id, amount, snapshot string) error {
+	return settlePublicVideo(id, amount, snapshot, false)
+}
+
+// SettlePublicVideoNoTask releases only a currently first-attempt reservation.
+// Counter/state/backend checks occur while holding the same transaction row lock
+// as the wallet update, so another worker cannot submit after a stale refund.
+func SettlePublicVideoNoTask(id, snapshot string) error {
+	return settlePublicVideo(id, "0.000000", snapshot, true)
+}
+
+func settlePublicVideo(id, amount, snapshot string, requireNoTask bool) error {
 	if !common.IsQuotaDBAuthoritative() {
 		return errors.New("native_quota_authority_required")
 	}
@@ -140,6 +152,9 @@ func SettlePublicVideo(id, amount, snapshot string) error {
 				return ErrPublicVideoConflict
 			}
 			return nil
+		}
+		if requireNoTask && (row.SubmitAttempts != 1 || row.BackendID != "" || row.State != "reserved") {
+			return errors.New("no_task_settlement_guard_changed")
 		}
 		if row.State != "reserved" && row.State != "submitted" && row.State != "pending_review" {
 			return errors.New("invalid_settlement_state")

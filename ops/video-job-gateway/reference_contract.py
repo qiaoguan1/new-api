@@ -12,6 +12,7 @@ import socket
 import ssl
 import subprocess
 import tempfile
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -70,7 +71,10 @@ class ReferenceMediaVerifier:
     def verify_image_origins(self, urls: list[str]) -> None:
         """Require companion images to use the same approved public object-storage origin."""
         for url in urls:
-            parsed = urllib.parse.urlsplit(url)
+            try:
+                parsed = urllib.parse.urlsplit(url)
+            except (ValueError, TypeError) as error:
+                raise ReferenceContractError("video_image_url_invalid", "参考图片地址无效。") from error
             host = (parsed.hostname or "").lower().rstrip(".")
             try:
                 port = parsed.port
@@ -87,6 +91,67 @@ class ReferenceMediaVerifier:
             ):
                 raise ReferenceContractError("video_image_url_invalid", "参考图片必须来自中转站允许的私有对象存储域名。")
             self._public_dns_addresses(host, "video_image")
+
+    def verify_images(self, images: list[dict[str, str]]) -> None:
+        """Verify bounded PNG/JPEG bytes, identity and the accepted16:9 tuple."""
+        if not images or len(images) > 7:
+            raise ReferenceContractError("video_image_count_invalid", "图片数量无效。")
+        maximum = 10 * 1024 * 1024
+        deadline = time.monotonic() + min(self.timeout_seconds, 45)
+        for item in images:
+            if time.monotonic() >= deadline:
+                raise ReferenceContractError("video_image_probe_failed", "图片校验总耗时超过安全上限。")
+            identity = item.get("identity", "")
+            if not isinstance(identity, str) or not SHA256.fullmatch(identity):
+                raise ReferenceContractError("video_image_identity_invalid", "图片必须提供SHA-256身份。")
+            url = item.get("url", "")
+            self.verify_image_origins([url])
+            host = (urllib.parse.urlsplit(url).hostname or "").lower().rstrip(".")
+            addresses = self._public_dns_addresses(host, "video_image")
+            headers = {"Accept": "image/png,image/jpeg", "User-Agent": "xtai-image-reference-verifier/186"}
+            try:
+                with self._open_pinned(url, host, addresses, headers, "video_image", deadline=deadline) as response, tempfile.NamedTemporaryFile(prefix="xtai-image-ref-", suffix=".image") as target:
+                    mime = response.headers.get_content_type().lower()
+                    if mime not in {"image/png", "image/jpeg"}:
+                        raise ReferenceContractError("video_image_format_invalid", "参考图片只接受PNG或JPEG。")
+                    declared = response.headers.get("Content-Length")
+                    if declared is not None and (int(declared) <= 0 or int(declared) > maximum):
+                        raise ReferenceContractError("video_image_size_invalid", "参考图片超过10MiB安全上限。")
+                    digest = hashlib.sha256()
+                    total = 0
+                    while chunk := response.read(64 * 1024):
+                        if time.monotonic() >= deadline:
+                            raise ReferenceContractError("video_image_probe_failed", "图片校验总耗时超过安全上限。")
+                        total += len(chunk)
+                        if total > maximum:
+                            raise ReferenceContractError("video_image_size_invalid", "参考图片超过10MiB安全上限。")
+                        digest.update(chunk)
+                        target.write(chunk)
+                    if total <= 0 or (declared is not None and total != int(declared)):
+                        raise ReferenceContractError("video_image_size_invalid", "参考图片字节数不一致。")
+                    if not secrets.compare_digest(digest.hexdigest(), identity):
+                        raise ReferenceContractError("video_image_identity_mismatch", "图片SHA-256与实际内容不一致。")
+                    target.flush()
+                    target.seek(0)
+                    magic = target.read(8)
+                    if (mime == "image/png" and magic != b"\x89PNG\r\n\x1a\n") or (mime == "image/jpeg" and not magic.startswith(b"\xff\xd8\xff")):
+                        raise ReferenceContractError("video_image_format_invalid", "图片签名与声明类型不符。")
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise ReferenceContractError("video_image_probe_failed", "图片校验总耗时超过安全上限。")
+                    completed = subprocess.run(["ffprobe", "-v", "error", "-protocol_whitelist", "file,pipe", "-f", "png_pipe" if mime == "image/png" else "jpeg_pipe", "-show_entries", "stream=codec_type,codec_name,width,height", "-of", "json", target.name], check=True, capture_output=True, text=True, timeout=min(15, remaining))
+                    streams = json.loads(completed.stdout).get("streams") or []
+                    if len(streams) != 1 or streams[0].get("codec_type") != "video" or streams[0].get("codec_name") != ("png" if mime == "image/png" else "mjpeg"):
+                        raise ReferenceContractError("video_image_format_invalid", "图片实际编码与声明不一致。")
+                    width, height = int(streams[0].get("width") or 0), int(streams[0].get("height") or 0)
+                    if not (64 <= width <= 8192 and 64 <= height <= 8192):
+                        raise ReferenceContractError("video_image_dimension_invalid", "图片尺寸超出当前安全范围。")
+                    if width * 9 != height * 16:
+                        raise ReferenceContractError("video_image_aspect_ratio_unsupported", "本批已验证图片参考规格要求16:9素材。")
+            except ReferenceContractError:
+                raise
+            except (OSError, ValueError, urllib.error.URLError, subprocess.SubprocessError) as error:
+                raise ReferenceContractError("video_image_probe_failed", "中转站无法安全读取或校验参考图片。") from error
 
     def _verify_item(self, item: dict[str, Any], kind: str, maximum: int) -> None:
         prefix = f"reference_{kind}"
@@ -166,15 +231,19 @@ class ReferenceMediaVerifier:
         addresses: tuple[str, ...],
         headers: dict[str, str],
         prefix: str,
+        deadline: float | None = None,
     ):
         parsed = urllib.parse.urlsplit(url)
         target = urllib.parse.urlunsplit(("", "", parsed.path or "/", parsed.query, ""))
         last_error: OSError | None = None
         for address in addresses:
+            remaining = deadline - time.monotonic() if deadline is not None else self.timeout_seconds
+            if remaining <= 0:
+                raise ReferenceContractError(f"{prefix}_probe_failed", "素材校验超过总耗时上限。")
             connection = _PinnedHTTPSConnection(
                 host,
                 address,
-                timeout=self.timeout_seconds,
+                timeout=min(self.timeout_seconds, 15, remaining) if deadline is not None else self.timeout_seconds,
                 context=self.tls_context,
             )
             try:
@@ -252,8 +321,9 @@ class _PinnedHTTPSConnection(http.client.HTTPSConnection):
     def __init__(self, host: str, address: str, **kwargs: Any) -> None:
         super().__init__(host, port=443, **kwargs)
         self.pinned_address = address
+        self._create_connection = self._connect_pinned
 
-    def _create_connection(self, _address, timeout=None, source_address=None):  # noqa: ANN001
+    def _connect_pinned(self, _address, timeout=None, source_address=None):  # noqa: ANN001
         return socket.create_connection(
             (self.pinned_address, 443),
             timeout,

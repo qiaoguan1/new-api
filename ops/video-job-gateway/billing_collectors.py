@@ -21,6 +21,7 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation, ROUND_CEILING
 from pathlib import Path
 from typing import Any, Mapping
+from nodyhub import NODY_MODELS
 
 
 MONEY_QUANTUM = Decimal("0.000001")
@@ -698,14 +699,19 @@ class NewAPITaskBillingCollector:
             raise BillingCollectionError("provider_billing_response_rejected", retry_after_seconds=300)
         data = raw.get("data") if isinstance(raw.get("data"), dict) else {}
         items = data.get("items") if isinstance(data.get("items"), list) else []
-        matches = [
-            row
-            for row in items
-            if isinstance(row, dict)
-            and str(row.get("task_id") or "").strip() == provider_task_id
-            and ("video" in str(row.get("action") or "").lower()
-                 or (self.provider_id == "nodyhub" and str(row.get("action") or "").lower() == "textgenerate"))
-        ]
+        matches = []
+        for row in items:
+            if not isinstance(row, dict) or str(row.get("task_id") or "").strip() != provider_task_id:
+                continue
+            action = str(row.get("action") or "").lower()
+            accepted = "video" in action or (self.provider_id == "nodyhub" and action == "textgenerate")
+            if self.provider_id == "nodyhub" and action == "generate":
+                properties = row.get("properties") if isinstance(row.get("properties"), dict) else {}
+                accepted = (str(row.get("platform")) == "48"
+                            and properties.get("origin_model_name") in NODY_MODELS
+                            and properties.get("request_url_path") in {"/v2/videos/generations", "/v1/videos"})
+            if accepted:
+                matches.append(row)
         if not matches:
             raise BillingCollectionError("provider_billing_record_not_ready", retry_after_seconds=60)
         if len(matches) != 1:
