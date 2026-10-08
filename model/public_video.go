@@ -3,6 +3,7 @@ package model
 import (
 	"errors"
 	"math"
+	"strings"
 	"time"
 
 	"github.com/QuantumNous/new-api/common"
@@ -22,6 +23,7 @@ type PublicVideoTask struct {
 	Group           string `gorm:"size:64"`
 	Body            string `gorm:"type:text"`
 	BackendID       string `gorm:"size:48"`
+	SubmitAttempts  int
 	State           string `gorm:"size:32;index"`
 	ReservedCNY     string `gorm:"size:32"`
 	ChargedCNY      string `gorm:"size:32"`
@@ -127,6 +129,17 @@ func ReservePublicVideo(candidate PublicVideoTask) (PublicVideoTask, bool, error
 
 // SettlePublicVideo applies one authoritative final amount, including a proven full refund.
 func SettlePublicVideo(id, amount, snapshot string) error {
+	return settlePublicVideo(id, amount, snapshot, false)
+}
+
+// SettlePublicVideoNoTask releases only a currently first-attempt reservation.
+// Counter/state/backend checks occur while holding the same transaction row lock
+// as the wallet update, so another worker cannot submit after a stale refund.
+func SettlePublicVideoNoTask(id, snapshot string) error {
+	return settlePublicVideo(id, "0.000000", snapshot, true)
+}
+
+func settlePublicVideo(id, amount, snapshot string, requireNoTask bool) error {
 	if !common.IsQuotaDBAuthoritative() {
 		return errors.New("native_quota_authority_required")
 	}
@@ -140,6 +153,9 @@ func SettlePublicVideo(id, amount, snapshot string) error {
 				return ErrPublicVideoConflict
 			}
 			return nil
+		}
+		if requireNoTask && (row.SubmitAttempts != 1 || row.BackendID != "" || row.State != "reserved") {
+			return errors.New("no_task_settlement_guard_changed")
 		}
 		if row.State != "reserved" && row.State != "submitted" && row.State != "pending_review" {
 			return errors.New("invalid_settlement_state")
@@ -160,6 +176,18 @@ func SettlePublicVideo(id, amount, snapshot string) error {
 			return ErrPublicVideoForbidden
 		}
 		delta := row.ReservedQuota - quota
+		if delta < 0 {
+			estimated, err := publicVideoUsesEstimatedReservation(row)
+			if err != nil {
+				return err
+			}
+			// New operator estimates are not upper bounds. Preserve the legacy
+			// verified debt contract, but require funds before supplementing an
+			// estimated reservation; no wallet/log/receipt changes on refusal.
+			if estimated && (u.Quota < -delta || (!token.UnlimitedQuota && token.RemainQuota < -delta)) {
+				return ErrPublicVideoQuota
+			}
+		}
 		if !quotaLedgerAdditionFits(u.Quota, delta) || !quotaLedgerAdditionFits(u.UsedQuota, quota) || !quotaLedgerAdditionFits(token.UsedQuota, -delta) {
 			return errors.New("quota_overflow")
 		}
@@ -184,6 +212,35 @@ func SettlePublicVideo(id, amount, snapshot string) error {
 		}
 		return tx.Model(&row).Updates(map[string]interface{}{"state": "settled", "charged_cny": amount, "charged_quota": quota, "snapshot": snapshot, "updated_at": time.Now().Unix(), "last_error": ""}).Error
 	})
+}
+
+// publicVideoUsesEstimatedReservation reads only the frozen private envelope
+// written by the public frontdoor. A malformed envelope must not silently fall
+// back to legacy debt settlement. Full quote/fingerprint integrity is checked by
+// the frontdoor before settlement; this model boundary enforces wallet safety.
+func publicVideoUsesEstimatedReservation(row PublicVideoTask) (bool, error) {
+	if row.Body == "" {
+		return false, nil
+	}
+	if len(row.Body) > 1024*1024 {
+		return false, errors.New("invalid_estimated_reservation")
+	}
+	var body map[string]interface{}
+	if common.UnmarshalJsonStr(row.Body, &body) != nil {
+		if strings.Contains(row.Body, "_public_reservation") {
+			return false, errors.New("invalid_estimated_reservation")
+		}
+		return false, nil
+	}
+	value, exists := body["_public_reservation"]
+	if !exists {
+		return false, nil
+	}
+	metadata, ok := value.(map[string]interface{})
+	if !ok || metadata["schema_version"] != "xtai-public-video-estimated-reservation-v1" || metadata["price_source"] != "nodyhub_operator_testing_estimate" || metadata["pricing_kind"] != "estimated_reservation" || metadata["verification_status"] != "unverified" || metadata["is_upper_bound"] != false || metadata["reserved_cny_exact"] != row.ReservedCNY || metadata["payload_fingerprint"] != row.Fingerprint {
+		return false, errors.New("invalid_estimated_reservation")
+	}
+	return true, nil
 }
 
 // Aggregate wallet ledgers can exceed the per-request int32 charge bound.

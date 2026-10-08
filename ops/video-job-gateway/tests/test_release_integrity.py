@@ -60,6 +60,22 @@ class ReleaseIntegrityTests(unittest.TestCase):
         self.assertIn("org.opencontainers.image.revision", dockerfile)
         self.assertIn("com.aixingtuyun.video.catalog-sha256", dockerfile)
         self.assertIn("com.aixingtuyun.video.source-sha256", dockerfile)
+        for name in ("Dockerfile", "Dockerfile.nody"):
+            self.assertIn("chmod 0644 /app/*.py /app/*.json", (ROOT / name).read_text(encoding="utf-8"))
+
+    def test_media_runtime_tampering_invalidates_the_release_digest(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            for name in set(RUNTIME_RELEASE_FILES) | {"nody_media_wire.py", "nody_media_contracts.py"}:
+                (root / name).write_bytes(f"fixture:{name}".encode())
+            original = gateway_source_sha256(root)
+            catalog_digest = hashlib.sha256((root / "catalog.json").read_bytes()).hexdigest()
+            for name in ("nody_media_wire.py", "nody_media_contracts.py"):
+                before = (root / name).read_bytes()
+                (root / name).write_bytes(before + b"tampered")
+                with self.subTest(name=name), self.assertRaises(ReleaseIntegrityError):
+                    verify_release_identity("a" * 40, catalog_digest, root / "catalog.json", original, root)
+                (root / name).write_bytes(before)
 
 
 if __name__ == "__main__":

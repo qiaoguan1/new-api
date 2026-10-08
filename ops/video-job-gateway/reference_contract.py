@@ -6,12 +6,14 @@ import hashlib
 import http.client
 import ipaddress
 import json
+import math
 import re
 import secrets
 import socket
 import ssl
 import subprocess
 import tempfile
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -37,6 +39,7 @@ AUDIO_FORMATS = {
     ("audio/mp4", "m4a"),
     ("audio/x-m4a", "m4a"),
 }
+IMAGE_ASPECT_RATIOS = {"adaptive", "21:9", "2:1", "16:9", "4:3", "1:1", "3:4", "9:16", "3:2", "2:3"}
 
 
 class ReferenceContractError(ValueError):
@@ -52,6 +55,19 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
         return None
 
 
+def _verification_deadline(timeout_seconds: int, maximum_seconds: int, deadline: float | None, prefix: str) -> float:
+    """Cap a caller's shared budget without extending a verifier's local ceiling."""
+    now = time.monotonic()
+    bounded = now + min(timeout_seconds, maximum_seconds)
+    if deadline is not None:
+        if isinstance(deadline, bool) or not isinstance(deadline, (int, float)) or not math.isfinite(deadline):
+            raise ReferenceContractError(f"{prefix}_probe_failed", "素材校验总耗时上限无效。")
+        bounded = min(bounded, deadline)
+    if now >= bounded:
+        raise ReferenceContractError(f"{prefix}_probe_failed", "素材校验超过总耗时上限。")
+    return bounded
+
+
 class ReferenceMediaVerifier:
     """Fetch and probe v2.2 media before any quota is reserved or task is created."""
 
@@ -60,17 +76,31 @@ class ReferenceMediaVerifier:
         self.timeout_seconds = timeout_seconds
         self.tls_context = ssl.create_default_context()
 
-    def verify(self, references: dict[str, Any]) -> None:
+    def verify(
+        self, references: dict[str, Any], *, duration_tolerance: Decimal = Decimal("0.100000"),
+        deadline: float | None = None,
+    ) -> None:
+        """Verify all AV assets within one shared download-and-decoder budget."""
         if not self.allowed_hosts:
             raise ReferenceContractError("reference_media_host_unavailable", "参考素材来源域名尚未配置。")
+        if not isinstance(duration_tolerance, Decimal) or not duration_tolerance.is_finite() or not Decimal(0) <= duration_tolerance <= Decimal("0.100000"):
+            raise ReferenceContractError("reference_media_probe_failed", "参考素材时长校验精度无效。")
+        deadline = _verification_deadline(self.timeout_seconds, 60, deadline, "reference_media")
         for kind, maximum in (("reference_videos", MAX_VIDEO_BYTES), ("reference_audios", MAX_AUDIO_BYTES)):
             for item in references.get(kind) or []:
-                self._verify_item(item, "video" if kind == "reference_videos" else "audio", maximum)
+                media_kind = "video" if kind == "reference_videos" else "audio"
+                if duration_tolerance == Decimal("0.100000"):
+                    self._verify_item(item, media_kind, maximum, deadline=deadline)
+                else:
+                    self._verify_item(item, media_kind, maximum, deadline=deadline, duration_tolerance=duration_tolerance)
 
     def verify_image_origins(self, urls: list[str]) -> None:
         """Require companion images to use the same approved public object-storage origin."""
         for url in urls:
-            parsed = urllib.parse.urlsplit(url)
+            try:
+                parsed = urllib.parse.urlsplit(url)
+            except (ValueError, TypeError) as error:
+                raise ReferenceContractError("video_image_url_invalid", "参考图片地址无效。") from error
             host = (parsed.hostname or "").lower().rstrip(".")
             try:
                 port = parsed.port
@@ -88,8 +118,94 @@ class ReferenceMediaVerifier:
                 raise ReferenceContractError("video_image_url_invalid", "参考图片必须来自中转站允许的私有对象存储域名。")
             self._public_dns_addresses(host, "video_image")
 
-    def _verify_item(self, item: dict[str, Any], kind: str, maximum: int) -> None:
+    def verify_images(
+        self, images: list[dict[str, str]], *, max_images: int = 7, aspect_ratio: str = "16:9",
+        deadline: float | None = None,
+    ) -> None:
+        """Verify PNG/JPEG identity against a bounded, already-priced image tuple."""
+        if type(max_images) is not int or not 1 <= max_images <= 10 or not isinstance(images, list) or not images or len(images) > max_images:
+            raise ReferenceContractError("video_image_count_invalid", "图片数量无效。")
+        if not isinstance(aspect_ratio, str) or aspect_ratio not in IMAGE_ASPECT_RATIOS:
+            raise ReferenceContractError("video_image_aspect_ratio_unsupported", "图片参考比例不在当前安全白名单中。")
+        maximum = 10 * 1024 * 1024
+        deadline = _verification_deadline(self.timeout_seconds, 45, deadline, "video_image")
+        for item in images:
+            if time.monotonic() >= deadline:
+                raise ReferenceContractError("video_image_probe_failed", "图片校验总耗时超过安全上限。")
+            identity = item.get("identity", "")
+            if not isinstance(identity, str) or not SHA256.fullmatch(identity):
+                raise ReferenceContractError("video_image_identity_invalid", "图片必须提供SHA-256身份。")
+            url = item.get("url", "")
+            self.verify_image_origins([url])
+            host = (urllib.parse.urlsplit(url).hostname or "").lower().rstrip(".")
+            addresses = self._public_dns_addresses(host, "video_image")
+            headers = {"Accept": "image/png,image/jpeg", "User-Agent": "xtai-image-reference-verifier/186"}
+            try:
+                with self._open_pinned(url, host, addresses, headers, "video_image", deadline=deadline) as response, tempfile.NamedTemporaryFile(prefix="xtai-image-ref-", suffix=".image") as target:
+                    mime = response.headers.get_content_type().lower()
+                    if mime not in {"image/png", "image/jpeg"}:
+                        raise ReferenceContractError("video_image_format_invalid", "参考图片只接受PNG或JPEG。")
+                    declared = response.headers.get("Content-Length")
+                    if declared is not None and (int(declared) <= 0 or int(declared) > maximum):
+                        raise ReferenceContractError("video_image_size_invalid", "参考图片超过10MiB安全上限。")
+                    digest = hashlib.sha256()
+                    total = 0
+                    while True:
+                        remaining = deadline - time.monotonic()
+                        if remaining <= 0:
+                            raise ReferenceContractError("video_image_probe_failed", "图片校验总耗时超过安全上限。")
+                        response_socket = getattr(getattr(getattr(response, "fp", None), "raw", None), "_sock", None)
+                        if response_socket is not None:
+                            response_socket.settimeout(min(15, remaining))
+                        chunk = response.read1(min(64 * 1024, maximum + 1 - total))
+                        if time.monotonic() >= deadline:
+                            raise ReferenceContractError("video_image_probe_failed", "图片校验总耗时超过安全上限。")
+                        if not chunk:
+                            break
+                        total += len(chunk)
+                        if total > maximum:
+                            raise ReferenceContractError("video_image_size_invalid", "参考图片超过10MiB安全上限。")
+                        digest.update(chunk)
+                        target.write(chunk)
+                    if total <= 0 or (declared is not None and total != int(declared)):
+                        raise ReferenceContractError("video_image_size_invalid", "参考图片字节数不一致。")
+                    if not secrets.compare_digest(digest.hexdigest(), identity):
+                        raise ReferenceContractError("video_image_identity_mismatch", "图片SHA-256与实际内容不一致。")
+                    target.flush()
+                    target.seek(0)
+                    magic = target.read(8)
+                    if (mime == "image/png" and magic != b"\x89PNG\r\n\x1a\n") or (mime == "image/jpeg" and not magic.startswith(b"\xff\xd8\xff")):
+                        raise ReferenceContractError("video_image_format_invalid", "图片签名与声明类型不符。")
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise ReferenceContractError("video_image_probe_failed", "图片校验总耗时超过安全上限。")
+                    completed = subprocess.run(["ffprobe", "-v", "error", "-protocol_whitelist", "file,pipe", "-f", "png_pipe" if mime == "image/png" else "jpeg_pipe", "-show_entries", "stream=codec_type,codec_name,width,height", "-of", "json", target.name], check=True, capture_output=True, text=True, timeout=min(15, remaining))
+                    if time.monotonic() >= deadline:
+                        raise ReferenceContractError("video_image_probe_failed", "图片校验总耗时超过安全上限。")
+                    streams = json.loads(completed.stdout).get("streams") or []
+                    if len(streams) != 1 or streams[0].get("codec_type") != "video" or streams[0].get("codec_name") != ("png" if mime == "image/png" else "mjpeg"):
+                        raise ReferenceContractError("video_image_format_invalid", "图片实际编码与声明不一致。")
+                    width, height = int(streams[0].get("width") or 0), int(streams[0].get("height") or 0)
+                    if not (64 <= width <= 8192 and 64 <= height <= 8192):
+                        raise ReferenceContractError("video_image_dimension_invalid", "图片尺寸超出当前安全范围。")
+                    if aspect_ratio != "adaptive":
+                        numerator, denominator = (int(value) for value in aspect_ratio.split(":"))
+                        if width * denominator != height * numerator:
+                            raise ReferenceContractError("video_image_aspect_ratio_unsupported", "参考图片比例与已验证规格不一致。")
+            except ReferenceContractError:
+                raise
+            except (OSError, ValueError, urllib.error.URLError, subprocess.SubprocessError) as error:
+                raise ReferenceContractError("video_image_probe_failed", "中转站无法安全读取或校验参考图片。") from error
+
+    def _verify_item(
+        self, item: dict[str, Any], kind: str, maximum: int, *, deadline: float | None = None,
+        duration_tolerance: Decimal = Decimal("0.100000"),
+    ) -> None:
         prefix = f"reference_{kind}"
+        if deadline is None:
+            deadline = time.monotonic() + min(self.timeout_seconds, 60)
+        if time.monotonic() >= deadline:
+            raise ReferenceContractError(f"{prefix}_probe_failed", "素材校验超过总耗时上限。")
         url = str(item["url"])
         parsed = urllib.parse.urlsplit(url)
         host = (parsed.hostname or "").lower().rstrip(".")
@@ -99,7 +215,7 @@ class ReferenceMediaVerifier:
         headers = {"Accept": str(item["mime_type"]), "User-Agent": "xtai-reference-verifier/2.2"}
         suffix = ".mp4" if kind == "video" else f".{item.get('codec') or 'audio'}"
         try:
-            with self._open_pinned(url, host, addresses, headers, prefix) as response, tempfile.NamedTemporaryFile(
+            with self._open_pinned(url, host, addresses, headers, prefix, deadline=deadline) as response, tempfile.NamedTemporaryFile(
                 prefix="xtai-ref-", suffix=suffix, delete=True
             ) as target:
                 response_type = str(response.headers.get_content_type() or "").lower()
@@ -121,7 +237,18 @@ class ReferenceMediaVerifier:
                 digest = hashlib.sha256()
                 total = 0
                 while True:
-                    chunk = response.read(min(1024 * 1024, maximum + 1 - total))
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise ReferenceContractError(f"{prefix}_probe_failed", "素材校验超过总耗时上限。")
+                    response_socket = getattr(getattr(getattr(response, "fp", None), "raw", None), "_sock", None)
+                    if response_socket is not None:
+                        response_socket.settimeout(min(15, remaining))
+                    # read(n) may keep waiting for n bytes as a peer trickles
+                    # data. read1 returns after one buffered/raw read, allowing
+                    # the total deadline to be checked between I/O operations.
+                    chunk = response.read1(min(64 * 1024, maximum + 1 - total))
+                    if time.monotonic() >= deadline:
+                        raise ReferenceContractError(f"{prefix}_probe_failed", "素材校验超过总耗时上限。")
                     if not chunk:
                         break
                     total += len(chunk)
@@ -134,7 +261,35 @@ class ReferenceMediaVerifier:
                     raise ReferenceContractError(f"{prefix}_size_invalid", "参考素材实际字节数与声明不一致。")
                 if not secrets.compare_digest(digest.hexdigest(), str(item["sha256"])):
                     raise ReferenceContractError(f"{prefix}_identity_mismatch", "参考素材SHA-256与实际内容不一致。")
-                self._probe(Path(target.name), item, kind)
+                target.seek(0)
+                magic = target.read(16)
+                declared_codec = "mp4" if kind == "video" else str(item.get("codec") or "")
+                if declared_codec in {"mp4", "m4a"}:
+                    valid_magic = len(magic) >= 12 and magic[4:8] == b"ftyp" and (
+                        int.from_bytes(magic[:4], "big") >= 16 or magic[:4] == b"\x00\x00\x00\x01"
+                    )
+                elif declared_codec == "mp3":
+                    valid_magic = magic.startswith(b"ID3") or (
+                        len(magic) >= 4 and magic[0] == 0xFF and magic[1] & 0xE0 == 0xE0
+                        and magic[1] & 0x18 != 0x08 and magic[1] & 0x06 != 0
+                    )
+                elif declared_codec == "wav":
+                    valid_magic = len(magic) >= 12 and magic[:4] == b"RIFF" and magic[8:12] == b"WAVE"
+                elif declared_codec == "aac":
+                    valid_magic = len(magic) >= 7 and magic[0] == 0xFF and magic[1] & 0xF6 == 0xF0
+                else:
+                    valid_magic = False
+                if not valid_magic:
+                    raise ReferenceContractError(f"{prefix}_format_invalid", "参考素材签名与声明类型不符。")
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise ReferenceContractError(f"{prefix}_probe_failed", "素材校验超过总耗时上限。")
+                if duration_tolerance == Decimal("0.100000"):
+                    self._probe(Path(target.name), item, kind, timeout_seconds=min(30, remaining))
+                else:
+                    self._probe(Path(target.name), item, kind, timeout_seconds=min(30, remaining), duration_tolerance=duration_tolerance)
+                if time.monotonic() >= deadline:
+                    raise ReferenceContractError(f"{prefix}_probe_failed", "素材校验超过总耗时上限。")
         except ReferenceContractError:
             raise
         except (OSError, ValueError, InvalidOperation, urllib.error.URLError, subprocess.SubprocessError) as error:
@@ -166,20 +321,30 @@ class ReferenceMediaVerifier:
         addresses: tuple[str, ...],
         headers: dict[str, str],
         prefix: str,
+        deadline: float | None = None,
     ):
         parsed = urllib.parse.urlsplit(url)
         target = urllib.parse.urlunsplit(("", "", parsed.path or "/", parsed.query, ""))
         last_error: OSError | None = None
         for address in addresses:
+            remaining = deadline - time.monotonic() if deadline is not None else self.timeout_seconds
+            if remaining <= 0:
+                raise ReferenceContractError(f"{prefix}_probe_failed", "素材校验超过总耗时上限。")
             connection = _PinnedHTTPSConnection(
                 host,
                 address,
-                timeout=self.timeout_seconds,
+                timeout=min(self.timeout_seconds, 15, remaining) if deadline is not None else self.timeout_seconds,
                 context=self.tls_context,
             )
             try:
-                connection.request("GET", target, headers=headers)
-                response = connection.getresponse()
+                # Retry only before handing a response to the caller. Decoder
+                # and read errors from its body must not re-enter this yield.
+                try:
+                    connection.request("GET", target, headers=headers)
+                    response = connection.getresponse()
+                except OSError as error:
+                    last_error = error
+                    continue
                 if response.status != 200:
                     response.close()
                     raise ReferenceContractError(
@@ -191,36 +356,61 @@ class ReferenceMediaVerifier:
                 finally:
                     response.close()
                 return
-            except ReferenceContractError:
-                raise
-            except OSError as error:
-                last_error = error
             finally:
                 connection.close()
         raise OSError("all pinned reference media addresses failed") from last_error
 
     @staticmethod
-    def _probe(path: Path, item: dict[str, Any], kind: str) -> None:
+    def _probe(
+        path: Path, item: dict[str, Any], kind: str, *, timeout_seconds: float = 30,
+        duration_tolerance: Decimal = Decimal("0.100000"),
+    ) -> None:
+        """Probe an already signature-checked local file with no network protocols."""
+        demuxer = "mov" if kind == "video" else {"mp3": "mp3", "wav": "wav", "aac": "aac", "m4a": "mov"}.get(str(item.get("codec") or ""))
+        if demuxer is None:
+            raise ReferenceContractError(f"reference_{kind}_format_invalid", "参考素材容器不在当前安全白名单中。")
+        if timeout_seconds <= 0:
+            raise ReferenceContractError(f"reference_{kind}_probe_failed", "素材校验超过总耗时上限。")
+        if not isinstance(duration_tolerance, Decimal) or not duration_tolerance.is_finite() or not Decimal(0) <= duration_tolerance <= Decimal("0.100000"):
+            raise ReferenceContractError(f"reference_{kind}_probe_failed", "参考素材时长校验精度无效。")
         completed = subprocess.run(
             [
-                "ffprobe", "-v", "error", "-show_entries",
+                "ffprobe", "-v", "error", "-protocol_whitelist", "file,pipe", "-f", demuxer,
+                "-select_streams", "v:0" if kind == "video" else "a:0", "-show_entries",
                 "format=format_name,duration:stream=codec_type,codec_name,width,height,sample_rate,channels",
                 "-of", "json", str(path),
             ],
             check=True,
-            capture_output=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
             text=True,
-            timeout=30,
+            timeout=min(30, timeout_seconds),
         )
-        payload = json.loads(completed.stdout)
-        streams = [row for row in payload.get("streams") or [] if row.get("codec_type") == kind]
-        if not streams:
-            raise ReferenceContractError(f"reference_{kind}_format_invalid", "参考素材中未发现声明的媒体轨道。")
+        if not isinstance(completed.stdout, str) or len(completed.stdout) > 64 * 1024:
+            raise ReferenceContractError(f"reference_{kind}_probe_failed", "参考素材探测输出超过安全上限。")
+        try:
+            payload = json.loads(completed.stdout)
+        except ValueError as error:
+            raise ReferenceContractError(f"reference_{kind}_probe_failed", "参考素材探测元数据无效。") from error
+        if not isinstance(payload, dict):
+            raise ReferenceContractError(f"reference_{kind}_probe_failed", "参考素材探测元数据无效。")
+        streams = payload.get("streams")
+        if not isinstance(streams, list) or len(streams) != 1 or not isinstance(streams[0], dict) or streams[0].get("codec_type") != kind:
+            raise ReferenceContractError(f"reference_{kind}_format_invalid", "参考素材未返回唯一声明的媒体轨道。")
         stream = streams[0]
-        media_format = str((payload.get("format") or {}).get("format_name") or "").lower()
-        actual_duration = Decimal(str((payload.get("format") or {}).get("duration") or "0"))
-        declared_duration = Decimal(str(item["duration_seconds"]))
-        if abs(actual_duration - declared_duration) > Decimal("0.100000"):
+        metadata = payload.get("format")
+        if not isinstance(metadata, dict):
+            raise ReferenceContractError(f"reference_{kind}_duration_invalid", "参考素材未返回有效时长。")
+        media_format = str(metadata.get("format_name") or "").lower()
+        try:
+            actual_duration = Decimal(str(metadata.get("duration")))
+            declared_duration = Decimal(str(item.get("duration_seconds")))
+        except InvalidOperation as error:
+            raise ReferenceContractError(f"reference_{kind}_duration_invalid", "参考素材探测时长无效。") from error
+        if (not actual_duration.is_finite() or not declared_duration.is_finite()
+                or not 0 < actual_duration <= MAX_DURATION or not 0 < declared_duration <= MAX_DURATION):
+            raise ReferenceContractError(f"reference_{kind}_duration_invalid", "参考素材时长必须为安全范围内的有限正数。")
+        if abs(actual_duration - declared_duration) > duration_tolerance:
             raise ReferenceContractError(f"reference_{kind}_duration_invalid", "参考素材实际时长与声明不一致。")
         if kind == "video":
             if not any(name in media_format.split(",") for name in ("mov", "mp4", "m4a", "3gp", "3g2", "mj2")):
@@ -252,8 +442,9 @@ class _PinnedHTTPSConnection(http.client.HTTPSConnection):
     def __init__(self, host: str, address: str, **kwargs: Any) -> None:
         super().__init__(host, port=443, **kwargs)
         self.pinned_address = address
+        self._create_connection = self._connect_pinned
 
-    def _create_connection(self, _address, timeout=None, source_address=None):  # noqa: ANN001
+    def _connect_pinned(self, _address, timeout=None, source_address=None):  # noqa: ANN001
         return socket.create_connection(
             (self.pinned_address, 443),
             timeout,
@@ -281,6 +472,47 @@ def validate_reference_payload(raw: Any) -> dict[str, Any]:
     return {"reference_videos": normalized_videos, "reference_audios": normalized_audios}
 
 
+def validate_nody_reference_payload(raw: Any, model: str) -> dict[str, Any]:
+    """Validate model-local raw Nody AV descriptors without pricing or I/O.
+
+    Empty AV arrays allow separately checked frame/image requests. Wan accepts
+    up to five items of each kind, including audio-only; Omni accepts one video
+    and no audio. All items remain content-identified and bounded to 1..15s.
+    The generic Seedance contract and its total-duration limits are unchanged.
+    """
+    from nody_media_wire import _public_https_url
+
+    limits = {
+        "wan3.0-video": (5, 5), "wan3.0-video-prime": (5, 5), "omni-flash": (1, 0),
+        "flux-3-video": (0, 0), "grok-video-3": (0, 0), "grok-imagine-1.5-video": (0, 0),
+        "grok-imagine-video-official": (0, 0),
+    }
+    if not isinstance(raw, dict):
+        raise ReferenceContractError("payload_invalid", "请求体必须是JSON对象。")
+    if not isinstance(model, str) or model not in limits or raw.get("model", model) != model:
+        raise ReferenceContractError("reference_model_unsupported", "参考素材模型无效或与请求不一致。")
+    maximum_videos, maximum_audios = limits[model]
+    videos = _array(raw.get("reference_videos"), "reference_video_count_invalid", maximum_videos)
+    audios = _array(raw.get("reference_audios"), "reference_audio_count_invalid", maximum_audios)
+    mode = raw.get("mode", "all_reference")
+    if not isinstance(mode, str) or mode not in {"text", "first_frame", "last_frame", "first_last_frame", "reference", "all_reference"}:
+        raise ReferenceContractError("reference_input_combination_unsupported", "参考素材模式无效。")
+    if (videos or audios) and mode in {"text", "first_frame", "last_frame", "first_last_frame"}:
+        raise ReferenceContractError("reference_input_combination_unsupported", "首尾帧或文生模式不能携带参考视频或音频。")
+    result: dict[str, Any] = {"reference_videos": [], "reference_audios": []}
+    for field, items, kind in (("reference_videos", videos, "video"), ("reference_audios", audios, "audio")):
+        for value in items:
+            if not isinstance(value, dict):
+                raise ReferenceContractError(f"reference_{kind}_format_invalid", "参考素材必须是完整元数据对象。")
+            try:
+                _public_https_url(value.get("url"))
+            except ValueError as error:
+                raise ReferenceContractError(f"reference_{kind}_url_invalid", "参考素材必须使用安全的公网HTTPS地址。") from error
+            item = _video(value, minimum_duration=Decimal("1.000000")) if kind == "video" else _audio(value, minimum_duration=Decimal("1.000000"))
+            result[field].append(item)
+    return result
+
+
 def stable_reference_identity(raw: Any) -> dict[str, Any]:
     """Return ordered fingerprint metadata; signed URLs are deliberately excluded."""
     normalized = validate_reference_payload(raw)
@@ -304,10 +536,10 @@ def _array(value: Any, code: str, maximum: int) -> list[Any]:
     return value
 
 
-def _video(value: Any) -> dict[str, Any]:
+def _video(value: Any, *, minimum_duration: Decimal = MIN_DURATION) -> dict[str, Any]:
     if not isinstance(value, dict) or value.get("role") != "reference_video":
         raise ReferenceContractError("reference_video_format_invalid", "参考视频角色无效。")
-    item = _common(value, "video", MAX_VIDEO_BYTES)
+    item = _common(value, "video", MAX_VIDEO_BYTES, minimum_duration=minimum_duration)
     if value.get("mime_type") != "video/mp4":
         raise ReferenceContractError("reference_video_format_invalid", "参考视频只接受能力目录允许的MP4。")
     item["mime_type"] = "video/mp4"
@@ -316,10 +548,10 @@ def _video(value: Any) -> dict[str, Any]:
     return item
 
 
-def _audio(value: Any) -> dict[str, Any]:
+def _audio(value: Any, *, minimum_duration: Decimal = MIN_DURATION) -> dict[str, Any]:
     if not isinstance(value, dict) or value.get("role") != "reference_audio":
         raise ReferenceContractError("reference_audio_format_invalid", "参考音频角色无效。")
-    item = _common(value, "audio", MAX_AUDIO_BYTES)
+    item = _common(value, "audio", MAX_AUDIO_BYTES, minimum_duration=minimum_duration)
     audio_format = (value.get("mime_type"), value.get("codec"))
     if audio_format not in AUDIO_FORMATS:
         raise ReferenceContractError("reference_audio_format_invalid", "参考音频格式不在当前官方能力白名单中。")
@@ -330,7 +562,9 @@ def _audio(value: Any) -> dict[str, Any]:
     return item
 
 
-def _common(value: dict[str, Any], kind: str, maximum_bytes: int) -> dict[str, Any]:
+def _common(
+    value: dict[str, Any], kind: str, maximum_bytes: int, *, minimum_duration: Decimal = MIN_DURATION
+) -> dict[str, Any]:
     prefix = f"reference_{kind}"
     url = str(value.get("url") or "").strip()
     parsed = urllib.parse.urlsplit(url)
@@ -361,8 +595,8 @@ def _common(value: dict[str, Any], kind: str, maximum_bytes: int) -> dict[str, A
         duration_decimal = Decimal(duration)
     except InvalidOperation as error:
         raise ReferenceContractError(f"{prefix}_duration_invalid", "参考素材时长无效。") from error
-    if duration_decimal < MIN_DURATION or duration_decimal > MAX_DURATION:
-        raise ReferenceContractError(f"{prefix}_duration_invalid", "参考素材单段时长必须在2至15秒之间。")
+    if duration_decimal < minimum_duration or duration_decimal > MAX_DURATION:
+        raise ReferenceContractError(f"{prefix}_duration_invalid", f"参考素材单段时长必须在{minimum_duration:g}至15秒之间。")
     return {
         "role": value["role"],
         "url": url,

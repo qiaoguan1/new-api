@@ -1,0 +1,12 @@
+ARG BASE_IMAGE=xtai/public-video:issue186
+FROM ${BASE_IMAGE}
+USER root
+ARG XTAI_VCS_REF
+ARG XTAI_SOURCE_SHA256
+COPY public-video-linux /usr/local/bin/public-video
+RUN chmod 0755 /usr/local/bin/public-video \
+    && test "$XTAI_SOURCE_SHA256" = "$(sha256sum /usr/local/bin/public-video | cut -d' ' -f1)"
+LABEL org.opencontainers.image.revision="${XTAI_VCS_REF}" \
+      com.aixingtuyun.video.source-sha256="${XTAI_SOURCE_SHA256}"
+USER 10002:10002
+ENTRYPOINT ["/usr/local/bin/public-video", "--log-dir", "/tmp/public-video-logs"]

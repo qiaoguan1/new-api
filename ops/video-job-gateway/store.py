@@ -13,7 +13,9 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation, ROUND_CEILING
 from pathlib import Path
 from typing import Any
-from nodyhub import NODY_MODELS, NODY_SOURCE, verified_quote
+from nodyhub import NODY_MODELS, NODY_IMAGE_MODELS, NODY_SOURCE, UUID, verified_quote
+from nody_media_wire import build_media_body
+from nody_operator_testing import SOURCE as NODY_OPERATOR_SOURCE, validate_operator_quote
 
 
 ACTIVE_STATUSES = {"queued", "submitting", "running", "reconciling"}
@@ -54,6 +56,16 @@ class StoreConflict(ValueError):
     pass
 
 
+class ClosingConnection(sqlite3.Connection):
+    """Commit/rollback normally, then release the WAL connection at context exit."""
+
+    def __exit__(self, *args):
+        try:
+            return super().__exit__(*args)
+        finally:
+            self.close()
+
+
 class Store:
     def __init__(self, data_dir: Path, *, max_active_jobs: int = 500, public_base_url: str = "") -> None:
         self.data_dir = data_dir
@@ -64,7 +76,7 @@ class Store:
         self._initialize()
 
     def connect(self) -> sqlite3.Connection:
-        connection = sqlite3.connect(self.path, timeout=15, isolation_level=None)
+        connection = sqlite3.connect(self.path, timeout=15, isolation_level=None, factory=ClosingConnection)
         connection.row_factory = sqlite3.Row
         connection.execute("pragma journal_mode=wal")
         connection.execute("pragma synchronous=full")
@@ -1554,7 +1566,7 @@ class Store:
             rows = connection.execute(
                 """
                 select job_id,provider_id,status,error_json,upstream_task_id,
-                       route_history_json,finished_at
+                       route_history_json,finished_at,payload_json
                 from video_jobs where updated_at>=?
                 """,
                 (min(cutoff, capacity_cutoff),),
@@ -1582,6 +1594,7 @@ class Store:
                         provider
                         and occurred_at >= cutoff
                         and not bool(error.get("uncertain", False))
+                        and not _is_operator_input_rejection(str(row["payload_json"] or ""), error)
                     ):
                         counts[provider] += 1
             if row["status"] != "failed":
@@ -1599,6 +1612,7 @@ class Store:
                 provider
                 and not str(row["upstream_task_id"] or "")
                 and not bool(error.get("uncertain", False))
+                and not _is_operator_input_rejection(str(row["payload_json"] or ""), error)
             ):
                 counts[provider] += 1
         threshold = max(1, int(failure_threshold))
@@ -1903,6 +1917,33 @@ def _is_generation_capacity_failure(error: dict[str, Any]) -> bool:
     return any(marker in message for marker in GENERATION_CAPACITY_MESSAGE_MARKERS)
 
 
+def _is_operator_input_rejection(payload_json: str, error: dict[str, Any]) -> bool:
+    """Only trusted manual-test input errors avoid poisoning proven routes.
+
+    Authentication, funded-account limits, capacity, server errors and uncertain
+    outcomes retain the existing provider-wide safety behavior.
+    """
+    payload = _json_object(payload_json) or {}
+    quote = payload.get("_relay_price")
+    if (not isinstance(quote, dict) or quote.get("price_source") != NODY_OPERATOR_SOURCE
+            or not validate_operator_quote(payload, quote) or error.get("uncertain")
+            or _is_generation_infrastructure_failure(error) or _is_generation_capacity_failure(error)):
+        return False
+    category = str(error.get("category") or "").strip().lower()
+    try:
+        status = int(error.get("http_status") or 0)
+    except (TypeError, ValueError):
+        return False
+    if status not in {0, 400, 422} or (status == 0 and category != "validation"):
+        return False
+    protected = ("authentication", "authorization", "unauthorized", "permission", "api key", "invalid token", "credential",
+                 "quota", "balance", "payment", "billing", "credit", "rate limit", "rate_limit", "capacity", "account", "pool",
+                 "infrastructure", "internal error", "server error", "service unavailable", "timeout", "network", "connection",
+                 "鉴权", "认证", "凭证", "令牌", "额度", "配额", "余额", "支付", "充值", "限流", "账号", "账户", "服务器", "内部错误", "网络", "超时")
+    text = " ".join(str(error.get(field) or "").lower() for field in ("code", "category", "message"))
+    return not any(marker in text for marker in protected)
+
+
 def _quantize_money(value: Decimal) -> str:
     return format(value.quantize(MONEY_QUANTUM, rounding=ROUND_CEILING), "f")
 
@@ -1996,6 +2037,18 @@ def _reservation_from_payload(payload_json: str) -> dict[str, str]:
     quote = payload.get("_relay_price") if isinstance(payload, dict) else None
     if not isinstance(quote, dict):
         return unavailable
+    if quote.get("price_source") == NODY_OPERATOR_SOURCE or payload.get("_nody_operator_testing") is True:
+        if (contract_version != BILLING_CONTRACT_REFERENCE_VERSION or not validate_operator_quote(payload, quote)
+                or quote.get("contract_version") != PRICE_CONTRACT_VERSION):
+            return unavailable
+        try:
+            reserved = Decimal(_money_exact(quote.get("amount_cny_exact"), allow_zero=False))
+        except (ValueError, InvalidOperation, StoreConflict):
+            return unavailable
+        if not 0 < reserved <= 150:
+            return unavailable
+        return {"status": "reserved", "reserved": _quantize_money(reserved), "official": "",
+                "revision": str(quote["pricing_revision"]), "contract_version": contract_version}
     if (
         quote.get("contract_version") != PRICE_CONTRACT_VERSION
         or str(quote.get("currency") or "").upper() != "CNY"
@@ -2015,13 +2068,64 @@ def _reservation_from_payload(payload_json: str) -> dict[str, str]:
     if quote.get("price_source") == NODY_SOURCE:
         try:
             model = str(payload.get("model") or "")
-            spec = NODY_MODELS[model]
-            if duration != spec[1]:
-                return unavailable
-            verified = verified_quote(model, str(payload.get("resolution") or ""), duration)
-            if any(str(quote.get(key)) != str(verified[key]) for key in ("pricing_revision", "amount_cny_exact", "reference_cost_cny_exact")):
-                return unavailable
-        except (KeyError, ValueError):
+            images = payload.get("images") or []
+            if payload.get("_nody_media_contract") is True or quote.get("media_contract_evidence") is not None or payload.get("videos") or payload.get("audios"):
+                evidence = quote.get("media_contract_evidence")
+                if (payload.get("_nody_media_contract") is not True or contract_version != BILLING_CONTRACT_REFERENCE_VERSION
+                        or not isinstance(evidence, dict) or evidence.get("source") != "nodyhub_authenticated_video_task"
+                        or not isinstance(evidence.get("task_id"), str) or not UUID.fullmatch(evidence["task_id"])
+                        or type(payload.get("duration")) is not int or type(quote.get("output_seconds")) is not int
+                        or quote["output_seconds"] != duration or official > 100
+                        or any(quote.get(field) != payload.get(field) for field in ("model", "resolution", "duration", "aspect_ratio", "generate_audio"))
+                        or type(quote.get("generate_audio")) is not bool
+                        or quote.get("operation_mode") != payload.get("mode")):
+                    return unavailable
+                build_media_body(model, payload)
+                references = payload.get("reference_input")
+                if not isinstance(references, dict):
+                    return unavailable
+                for name, field, reference_field, seconds_field in (("images", "image_count", "", ""), ("videos", "video_count", "reference_videos", "input_video_seconds_exact"), ("audios", "audio_count", "reference_audios", "input_audio_seconds_exact")):
+                    assets = payload.get(name)
+                    if (not isinstance(assets, list) or type(quote.get(field)) is not int or quote[field] != len(assets)
+                            or any(not isinstance(item, dict) or not SHA256_PATTERN.fullmatch(str(item.get("identity") or "")) for item in assets)):
+                        return unavailable
+                    if not reference_field:
+                        continue
+                    metadata = references.get(reference_field)
+                    if not isinstance(metadata, list) or len(metadata) != len(assets):
+                        return unavailable
+                    if assets:
+                        if any(not isinstance(item, dict) or item.get("sha256") != assets[index]["identity"] for index, item in enumerate(metadata)):
+                            return unavailable
+                        if any(not isinstance(item.get("duration_seconds"), str)
+                               or not re.fullmatch(r"(?:0|[1-9][0-9]{0,2})\.[0-9]{6}", item["duration_seconds"])
+                               or not Decimal(1) <= Decimal(item["duration_seconds"]) <= 15 for item in metadata):
+                            return unavailable
+                        total = format(sum((Decimal(item["duration_seconds"]) for item in metadata), Decimal(0)), ".6f")
+                        if quote.get(seconds_field) != total or payload.get(seconds_field) != total:
+                            return unavailable
+                    elif quote.get(seconds_field) is not None or payload.get(seconds_field) is not None:
+                        return unavailable
+                if quote.get("input_rate_class") != ("with_video_input" if payload.get("videos") else "without_video_input"):
+                    return unavailable
+            elif images:
+                evidence = quote.get("image_contract_evidence") or {}
+                if (model not in NODY_IMAGE_MODELS or not isinstance(images, list)
+                        or (payload.get("resolution"), duration) != NODY_IMAGE_MODELS[model]
+                        or payload.get("mode") not in {"reference", "all_reference"}
+                        or quote.get("operation_mode") != payload.get("mode")
+                        or type(quote.get("image_count")) is not int or quote["image_count"] != len(images)
+                        or not isinstance(evidence, dict) or evidence.get("source") != "nodyhub_authenticated_video_task"
+                        or not isinstance(evidence.get("task_id"), str) or not UUID.fullmatch(evidence["task_id"])):
+                    return unavailable
+            else:
+                spec = NODY_MODELS[model]
+                if duration != spec[1]:
+                    return unavailable
+                verified = verified_quote(model, str(payload.get("resolution") or ""), duration)
+                if any(str(quote.get(key)) != str(verified[key]) for key in ("pricing_revision", "amount_cny_exact", "reference_cost_cny_exact")):
+                    return unavailable
+        except (KeyError, ValueError, TypeError, InvalidOperation):
             return unavailable
     expected = Decimal(_quantize_money(official * Decimal("1.5")))
     if reserved != expected:

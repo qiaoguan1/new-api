@@ -645,6 +645,9 @@ def _result_url(raw: dict[str, Any]) -> str:
         nested = raw.get(key)
         if isinstance(nested, dict):
             candidates.extend([nested.get("video_url"), nested.get("url"), nested.get("output_url")])
+        elif key == "output" and isinstance(nested, str):
+            # Nody Grok Video3 queries return a scalar output URL.
+            candidates.append(nested)
         elif isinstance(nested, list):
             for item in nested[:5]:
                 if isinstance(item, dict):

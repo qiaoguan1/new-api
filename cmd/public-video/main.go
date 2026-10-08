@@ -100,7 +100,34 @@ func authenticate(c *gin.Context) (identity, error) {
 }
 
 func (s *server) backendJSON(method, path string, body []byte) (map[string]interface{}, int, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	var payload map[string]interface{}
+	if len(body) > 0 {
+		if err := common.Unmarshal(body, &payload); err != nil {
+			return nil, 0, err
+		}
+	}
+	budget := 10 * time.Second
+	if method == "POST" && path == "/v1/operations/video-input-validation" {
+		budget = 75 * time.Second
+	} else if method == "POST" && path == "/v1/videos" {
+		for _, field := range []string{"images", "reference_images", "reference_videos", "reference_audios", "videos", "video", "audios", "audio"} {
+			switch value := payload[field].(type) {
+			case []interface{}:
+				if len(value) > 0 {
+					budget = 75 * time.Second
+				}
+			case string:
+				if value != "" {
+					budget = 75 * time.Second
+				}
+			case map[string]interface{}:
+				if raw, ok := value["url"].(string); ok && raw != "" {
+					budget = 75 * time.Second
+				}
+			}
+		}
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), budget)
 	defer cancel()
 	req, e := http.NewRequestWithContext(ctx, method, s.backend+path, bytes.NewReader(body))
 	if e != nil {
@@ -110,14 +137,18 @@ func (s *server) backendJSON(method, path string, body []byte) (map[string]inter
 	req.Header.Set("X-XingTu-Contract-Version", "xtai-video-billing-v2.2")
 	if len(body) > 0 {
 		req.Header.Set("Content-Type", "application/json")
-		var data map[string]interface{}
-		if e = common.Unmarshal(body, &data); e != nil {
-			return nil, 0, e
-		}
-		rid, _ := data["request_id"].(string)
+		rid, _ := payload["request_id"].(string)
 		req.Header.Set("Idempotency-Key", rid)
 	}
-	r, e := s.client.Do(req)
+	client := s.client
+	if budget == 75*time.Second {
+		// Keep the shared transport/redirect policy, but do not let its ordinary
+		// 60s client timeout truncate the gateway's bounded 60s media verifier.
+		clientCopy := *s.client
+		clientCopy.Timeout = budget
+		client = &clientCopy
+	}
+	r, e := client.Do(req)
 	if e != nil {
 		return nil, 0, e
 	}
@@ -153,25 +184,47 @@ func (s *server) submit(c *gin.Context, who identity) {
 		return
 	}
 	for field := range body {
-		if !map[string]bool{"model": true, "prompt": true, "resolution": true, "duration": true, "aspect_ratio": true, "generate_audio": true, "request_id": true, "provider_id": true}[field] {
+		if !map[string]bool{"model": true, "prompt": true, "resolution": true, "duration": true, "aspect_ratio": true, "generate_audio": true, "request_id": true, "provider_id": true, "mode": true, "images": true, "image_roles": true, "image_identities": true, "reference_images": true, "reference_videos": true, "reference_audios": true}[field] {
 			response(c, 400, "unsupported_field_"+field)
 			return
 		}
 	}
+	mediaInput, e := normalizeNodyMediaInput(body)
+	if e != nil {
+		response(c, 400, "invalid_media_input")
+		return
+	}
+	imageInput := false
+	if !mediaInput {
+		imageInput, e = normalizeImageInput(body)
+	}
+	if e != nil {
+		response(c, 400, "invalid_image_input")
+		return
+	}
 	prompt, _ := body["prompt"].(string)
+	if mediaInput {
+		if value, exists := body["prompt"]; exists {
+			if _, ok := value.(string); !ok {
+				response(c, 400, "invalid_prompt")
+				return
+			}
+		}
+	}
 	prompt = strings.TrimSpace(prompt)
 	body["prompt"] = prompt
 	duration, _ := body["duration"].(float64)
 	resolution, _ := body["resolution"].(string)
-	if len([]rune(prompt)) == 0 || len([]rune(prompt)) > 2500 || duration != float64(spec.Duration) || resolution != spec.Resolution {
+	promptRequired := !mediaInput || body["mode"] == "text" || (name != "wan3.0-video" && name != "wan3.0-video-prime")
+	if (promptRequired && len([]rune(prompt)) == 0) || len([]rune(prompt)) > 2500 || (!imageInput && !mediaInput && (duration != float64(spec.Duration) || resolution != spec.Resolution)) {
 		response(c, 400, "unverified_video_spec")
 		return
 	}
-	if aspect, exists := body["aspect_ratio"]; exists && aspect != "16:9" {
+	if aspect, exists := body["aspect_ratio"]; !mediaInput && exists && aspect != "16:9" {
 		response(c, 400, "unverified_aspect_ratio")
 		return
 	}
-	if audio, exists := body["generate_audio"]; exists && audio != true {
+	if audio, exists := body["generate_audio"]; !mediaInput && exists && audio != true {
 		response(c, 400, "audio_required")
 		return
 	}
@@ -191,24 +244,67 @@ func (s *server) submit(c *gin.Context, who identity) {
 		response(c, 400, "invalid_request_id")
 		return
 	}
-	body["generate_audio"] = true
-	body["aspect_ratio"] = "16:9"
+	if !mediaInput {
+		body["generate_audio"] = true
+		body["aspect_ratio"] = "16:9"
+	}
 	body["provider_id"] = "video-aixingtu-api"
 	delete(body, "request_id")
-	canonical, _ := common.Marshal(body)
+	fingerprintBody := body
+	if mediaInput {
+		fingerprintBody = mediaFingerprintBody(body)
+	} else if imageInput {
+		fingerprintBody = make(map[string]interface{}, len(body))
+		for key, value := range body {
+			fingerprintBody[key] = value
+		}
+		roles := body["image_roles"].([]interface{})
+		identities := body["image_identities"].([]interface{})
+		references := make([]interface{}, len(roles))
+		for index := range roles {
+			references[index] = map[string]interface{}{"role": roles[index], "identity": identities[index]}
+		}
+		fingerprintBody["images"] = references
+		delete(fingerprintBody, "image_roles")
+		delete(fingerprintBody, "image_identities")
+	}
+	canonical, _ := common.Marshal(fingerprintBody)
 	fingerprint := sha256.Sum256(canonical)
 	idHash := sha256.Sum256([]byte(fmt.Sprintf("%d:%s", who.user.Id, requestID)))
 	id := "vjob_" + hex.EncodeToString(idHash[:16])
 	var existing model.PublicVideoTask
 	lookup := model.DB.Where("id = ? AND user_id = ?", id, who.user.Id).First(&existing).Error
 	if errors.Is(lookup, gorm.ErrRecordNotFound) {
-		if e = s.preflight(name, spec); e != nil {
+		if mediaInput {
+			body["request_id"] = "public-" + hex.EncodeToString(idHash[:])
+			var status int
+			spec, status, e = s.preflightMedia(body)
+			if e != nil {
+				response(c, status, "media_input_not_ready")
+				return
+			}
+		} else if imageInput {
+			body["request_id"] = "public-" + hex.EncodeToString(idHash[:])
+			var status int
+			spec, status, e = s.preflightImage(body)
+			if e != nil {
+				response(c, status, "image_input_not_ready")
+				return
+			}
+		} else if e = s.preflight(name, spec); e != nil {
 			response(c, 503, "video_price_or_capability_not_ready")
 			return
 		}
 	} else if lookup != nil {
 		response(c, 503, "wallet_unavailable")
 		return
+	}
+	if lookup == nil && (imageInput || mediaInput) {
+		spec.Reserve = existing.ReservedCNY
+		if _, err := frozenPublicVideoRequest(existing); err != nil {
+			response(c, 503, "frozen_reservation_invalid")
+			return
+		}
 	}
 	body["request_id"] = "public-" + hex.EncodeToString(idHash[:])
 	wire, _ := common.Marshal(body)
@@ -290,6 +386,18 @@ func (s *server) snapshot(row model.PublicVideoTask) map[string]interface{} {
 	data["request_id"] = row.ClientRequestID
 	data["model"] = row.Model
 	billing := map[string]interface{}{"contract_version": "xtai-video-billing-v2.2", "status": "reserved", "currency": "CNY", "reserve_basis": "verified_upstream_1_5", "reserved_amount": row.ReservedCNY, "charged_amount": nil, "refund_amount": nil, "supplement_amount": nil}
+	frozen, reservationErr := frozenPublicVideoRequest(row)
+	if frozen.estimated {
+		billing["reserve_basis"] = operatorEstimateSource
+		billing["pricing_kind"], billing["verification_status"], billing["admission_mode"] = "estimated_reservation", "unverified", "operator_testing"
+		billing["is_upper_bound"], billing["warning"] = false, operatorEstimateWarning
+		if reservationErr == nil {
+			billing["pricing_revision"], billing["reserve_cap_applied"] = frozen.reservation["pricing_revision"], frozen.reservation["reserve_cap_applied"]
+		} else {
+			billing["status"] = "pending_review"
+			data["error"] = map[string]interface{}{"code": "frozen_reservation_invalid", "message": "冻结预扣依据校验失败，保留任务和预扣，等待核对。"}
+		}
+	}
 	if row.State == "settled" {
 		a, _ := decimal.NewFromString(row.ChargedCNY)
 		r, _ := decimal.NewFromString(row.ReservedCNY)
@@ -297,6 +405,9 @@ func (s *server) snapshot(row model.PublicVideoTask) map[string]interface{} {
 		billing["charged_amount"] = row.ChargedCNY
 		billing["refund_amount"] = decimal.Max(r.Sub(a), decimal.Zero).StringFixed(6)
 		billing["supplement_amount"] = decimal.Max(a.Sub(r), decimal.Zero).StringFixed(6)
+		if frozen.estimated {
+			billing["settlement_basis"] = "actual_upstream_bill_times_1_5"
+		}
 		if data["status"] == "succeeded" {
 			data["result_delivery"] = "ready"
 			data["result_url"] = s.publicURL + "/v1/videos/" + row.ID + "/content"
@@ -312,6 +423,19 @@ func (s *server) snapshot(row model.PublicVideoTask) map[string]interface{} {
 		if row.State == "pending_review" {
 			billing["status"] = "pending_review"
 			data["status"] = "pending_review"
+			if row.LastError == "wallet_supplement_required" {
+				data["error"] = map[string]interface{}{"code": "wallet_supplement_required", "message": "实际上游账单高于预扣，当前余额不足以补扣；保留结果与预扣，补足余额后继续结算，不会重新生成。"}
+				var receipt map[string]interface{}
+				if common.UnmarshalJsonStr(row.Snapshot, &receipt) == nil {
+					actual, _ := receipt["billing"].(map[string]interface{})
+					amount, _ := actual["charged_amount"].(string)
+					charged, err := decimal.NewFromString(amount)
+					reserved, reserveErr := decimal.NewFromString(row.ReservedCNY)
+					if err == nil && reserveErr == nil && charged.GreaterThan(reserved) {
+						billing["required_supplement_amount"] = charged.Sub(reserved).StringFixed(6)
+					}
+				}
+			}
 		}
 	}
 	data["billing"] = billing
@@ -325,11 +449,12 @@ func (s *server) process(row model.PublicVideoTask) error {
 	var data map[string]interface{}
 	var status int
 	var e error
+	frozen, err := frozenPublicVideoRequest(row)
+	if err != nil {
+		return err
+	}
 	if row.BackendID == "" {
-		var payload map[string]interface{}
-		if common.UnmarshalJsonStr(row.Body, &payload) != nil {
-			return errors.New("stored_request_invalid")
-		}
+		payload := frozen.payload
 		requestID, _ := payload["request_id"].(string)
 		lookup, lookupStatus, lookupErr := s.backendJSON("GET", "/v1/video-jobs/by-request/"+url.PathEscape(requestID), nil)
 		if lookupErr != nil {
@@ -351,13 +476,46 @@ func (s *server) process(row model.PublicVideoTask) error {
 			return errors.New("gateway_identity_pending")
 		}
 		// Repeating the SAME request to our durable gateway is safe; it never repeats unknown provider submits.
-		data, status, e = s.backendJSON("POST", "/v1/videos", []byte(row.Body))
+		attempt := model.DB.Model(&row).Where("state = ? AND backend_id = ?", "reserved", "").Update("submit_attempts", gorm.Expr("COALESCE(submit_attempts, 0) + 1"))
+		if attempt.Error != nil {
+			return attempt.Error
+		}
+		if attempt.RowsAffected != 1 {
+			return nil
+		}
+		if e = model.DB.First(&row, "id = ?", row.ID).Error; e != nil {
+			return e
+		}
+		wire := []byte(row.Body)
+		if frozen.estimated {
+			wire, e = common.Marshal(payload)
+			if e != nil {
+				return e
+			}
+		}
+		data, status, e = s.backendJSON("POST", "/v1/videos", wire)
 		if e != nil {
 			return e
 		}
 		if status != 200 && status != 202 {
+			gatewayError, _ := data["error"].(map[string]interface{})
+			mediaMode := frozen.estimated || payload["mode"] == "reference" || payload["mode"] == "all_reference" || payload["mode"] == "first_frame" || payload["mode"] == "last_frame" || payload["mode"] == "first_last_frame"
+			if mediaMode && row.SubmitAttempts == 1 && data["task_created"] == false && data["upstream_submitted"] == false && data["billing_contract_version"] == "xtai-video-billing-v2.2" && data["request_id"] == requestID && gatewayError["phase"] == "validate" {
+				rejectionCode := "media_input_rejected_before_creation"
+				if (row.Model == "grok-video-3" || row.Model == "grok-imagine-1.5-video" || row.Model == "grok-imagine-video-official") && payload["reference_videos"] == nil && payload["reference_audios"] == nil {
+					rejectionCode = "image_input_rejected_before_creation"
+				}
+				snapshot, marshalErr := common.Marshal(map[string]interface{}{"status": "failed", "model": row.Model, "result_delivery": "unavailable",
+					"error":              map[string]interface{}{"code": rejectionCode, "message": "参考素材校验失败，任务未创建，本次预扣已退回。"},
+					"execution_evidence": map[string]interface{}{"source": "authenticated_gateway_pre_creation_rejection", "request_id": requestID, "task_created": false, "upstream_submitted": false},
+					"billing":            map[string]interface{}{"status": "settled", "currency": "CNY", "charged_amount": "0.000000"}})
+				if marshalErr != nil {
+					return marshalErr
+				}
+				return model.SettlePublicVideoNoTask(row.ID, string(snapshot))
+			}
 			// A replay rejection cannot prove that an earlier timed-out call created no task.
-			if status == 400 || status == 413 {
+			if status == 400 || status == 409 || status == 413 {
 				return model.DB.Model(&row).Where("state <> ?", "settled").Updates(map[string]interface{}{"state": "pending_review", "last_error": "gateway_identity_pending", "updated_at": time.Now().Unix()}).Error
 			}
 			return fmt.Errorf("gateway_submit_http_%d", status)
@@ -386,10 +544,15 @@ func (s *server) process(row model.PublicVideoTask) error {
 		if !ok || billing["currency"] != "CNY" {
 			return errors.New("gateway_settlement_invalid")
 		}
-		if e = model.SettlePublicVideo(row.ID, amount, string(raw)); e != nil {
-			return e
+		settleErr := model.SettlePublicVideo(row.ID, amount, string(raw))
+		if errors.Is(settleErr, model.ErrPublicVideoQuota) {
+			// The authenticated actual receipt stays durable while the wallet
+			// remains unchanged. The next poll retries settlement, never generation.
+			if err := model.DB.Model(&row).Where("state <> ?", "settled").Updates(map[string]interface{}{"state": "pending_review", "last_error": "wallet_supplement_required", "snapshot": string(raw), "updated_at": time.Now().Unix()}).Error; err != nil {
+				return err
+			}
 		}
-		return nil
+		return settleErr
 	}
 	state := "submitted"
 	if billing["status"] == "pending_review" {
@@ -413,7 +576,11 @@ func (s *server) worker() {
 				defer workers.Done()
 				defer func() { <-slots }()
 				if e := s.process(row); e != nil {
-					model.DB.Model(&row).Where("state <> ?", "settled").Updates(map[string]interface{}{"last_error": "reconciliation_pending", "updated_at": time.Now().Unix()})
+					changes := map[string]interface{}{"last_error": "reconciliation_pending", "updated_at": time.Now().Unix()}
+					if errors.Is(e, model.ErrPublicVideoQuota) {
+						changes["last_error"], changes["state"] = "wallet_supplement_required", "pending_review"
+					}
+					model.DB.Model(&row).Where("state <> ?", "settled").Updates(changes)
 				}
 			}(row)
 		}

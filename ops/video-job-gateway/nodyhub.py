@@ -7,6 +7,7 @@ import re
 import urllib.error
 import urllib.request
 from adapters import AdapterError, HttpJsonTransport, JsonResponse, Observation, TransportFailure, VideoAdapter, _observation
+from nody_media_wire import build_media_body, build_candidate_body
 
 NODY_REVISION = 'nody-verified-2026-09-23.1'
 NODY_SOURCE = 'verified_upstream_1_5'
@@ -19,6 +20,14 @@ NODY_MODELS = {
     'grok-imagine-video-official': ('480p', 1, '0.45'),
     'omni-flash': ('720p', 4, '0.6375'),
     'flux-3-video': ('720p', 5, '1.425'),
+}
+# V1.0.0 provider API attachment documents image references for these models.
+# This is a wire contract only; production admission additionally requires a
+# verified per-mode quote and an explicit capability configuration.
+NODY_IMAGE_MODELS = {
+    'grok-video-3': ('720p', 6),
+    'grok-imagine-1.5-video': ('720p', 6),
+    'grok-imagine-video-official': ('480p', 1),
 }
 UUID = re.compile(r'[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}')
 
@@ -73,6 +82,8 @@ class NodyTransport(HttpJsonTransport):
         return JsonResponse(status,response_headers,data if isinstance(data,dict) else {},text[:1000])
 
 def result_url(payload: dict) -> str:
+    if isinstance(payload.get('data'), dict):
+        payload = payload['data']
     for obj in [payload,payload.get('metadata'),payload.get('video')]:
         if not isinstance(obj,dict):continue
         for key in ['video_url','url']:
@@ -91,7 +102,21 @@ class NodyHubAdapter(VideoAdapter):
         super().__init__(config,transport or NodyTransport())
 
     def request_body(self, upstream_model, payload):
+        """Keep legacy text bytes while translating explicitly admitted media modes."""
+        if payload.get('mode') != 'text':
+            try:
+                return build_media_body(upstream_model, payload)
+            except ValueError as error:
+                raise AdapterError('nodyhub_unverified_spec', 'Unsupported Nody media specification.', phase='validate', http_status=400) from error
         spec=NODY_MODELS.get(upstream_model)
+        if payload.get('_nody_operator_testing') is True and (
+                not spec or payload.get('resolution') != spec[0] or type(payload.get('duration')) is not int
+                or payload.get('duration') != spec[1] or payload.get('aspect_ratio') != '16:9'
+                or payload.get('generate_audio') is not True):
+            try:
+                return build_candidate_body(upstream_model, payload)
+            except ValueError as error:
+                raise AdapterError('nodyhub_unverified_spec', 'Unsupported Nody operator-testing specification.', phase='validate', http_status=400) from error
         if (not spec or payload.get('resolution')!=spec[0] or payload.get('duration')!=spec[1]
             or payload.get('aspect_ratio')!='16:9' or payload.get('mode')!='text'
             or any(payload.get(k) for k in ['images','videos','audios'])):
@@ -105,7 +130,7 @@ class NodyHubAdapter(VideoAdapter):
 
     def submit(self, request_id, upstream_model, payload):
         body=self.request_body(upstream_model,payload)
-        path='/v1/videos' if upstream_model=='grok-video-3' else '/v2/videos/generations'
+        path='/v1/videos' if upstream_model=='grok-video-3' and payload.get('mode')=='text' and 'seconds' in body else '/v2/videos/generations'
         try:
             response=self.transport.request_json('POST',self.config.base_url.rstrip('/')+path,headers=self._headers(request_id),payload=body,timeout=self.config.submit_timeout_seconds)
         except TransportFailure as error:
@@ -125,7 +150,8 @@ class NodyHubAdapter(VideoAdapter):
             raise AdapterError('nodyhub_poll_unavailable','Query original task again.',phase='poll',uncertain=True,retryable=True) from error
         if response.status>=400 or not response.payload:
             raise AdapterError('nodyhub_poll_unavailable','Query original task again.',phase='poll',http_status=response.status,uncertain=True,retryable=True)
-        normalized=dict(response.payload)
+        received = response.payload.get('data')
+        normalized=dict(received if isinstance(received, dict) and received.get('status') else response.payload)
         normalized['id']=upstream_task_id;normalized['task_id']=upstream_task_id
         normalized['video_url']=result_url(response.payload)
         observed=_observation(normalized,fallback_task_id=upstream_task_id)
