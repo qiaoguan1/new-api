@@ -7,7 +7,7 @@ import re
 import urllib.error
 import urllib.request
 from adapters import AdapterError, HttpJsonTransport, JsonResponse, Observation, TransportFailure, VideoAdapter, _observation
-from nody_media_wire import build_media_body
+from nody_media_wire import build_media_body, build_candidate_body
 
 NODY_REVISION = 'nody-verified-2026-09-23.1'
 NODY_SOURCE = 'verified_upstream_1_5'
@@ -109,6 +109,14 @@ class NodyHubAdapter(VideoAdapter):
             except ValueError as error:
                 raise AdapterError('nodyhub_unverified_spec', 'Unsupported Nody media specification.', phase='validate', http_status=400) from error
         spec=NODY_MODELS.get(upstream_model)
+        if payload.get('_nody_operator_testing') is True and (
+                not spec or payload.get('resolution') != spec[0] or type(payload.get('duration')) is not int
+                or payload.get('duration') != spec[1] or payload.get('aspect_ratio') != '16:9'
+                or payload.get('generate_audio') is not True):
+            try:
+                return build_candidate_body(upstream_model, payload)
+            except ValueError as error:
+                raise AdapterError('nodyhub_unverified_spec', 'Unsupported Nody operator-testing specification.', phase='validate', http_status=400) from error
         if (not spec or payload.get('resolution')!=spec[0] or payload.get('duration')!=spec[1]
             or payload.get('aspect_ratio')!='16:9' or payload.get('mode')!='text'
             or any(payload.get(k) for k in ['images','videos','audios'])):
@@ -122,7 +130,7 @@ class NodyHubAdapter(VideoAdapter):
 
     def submit(self, request_id, upstream_model, payload):
         body=self.request_body(upstream_model,payload)
-        path='/v1/videos' if upstream_model=='grok-video-3' and payload.get('mode')=='text' else '/v2/videos/generations'
+        path='/v1/videos' if upstream_model=='grok-video-3' and payload.get('mode')=='text' and 'seconds' in body else '/v2/videos/generations'
         try:
             response=self.transport.request_json('POST',self.config.base_url.rstrip('/')+path,headers=self._headers(request_id),payload=body,timeout=self.config.submit_timeout_seconds)
         except TransportFailure as error:

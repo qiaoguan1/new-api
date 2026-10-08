@@ -79,6 +79,8 @@ class FakeRuntime:
         for name in helper.TARGETS:
             config = {"Image": "old-image", "Env": ["VIDEO_JOB_NODYHUB_IMAGE_CONTRACT_FILE=" + value["image_profile"]["container_path"],
                      "VIDEO_JOB_GATEWAY_REFERENCE_MEDIA_HOSTS=upload.aixingtuyun.com", "PRIVATE_SECRET=preserve"], "Labels": {"original": "yes"}}
+            if name == helper.PUBLIC:
+                config["Entrypoint"] = ["/usr/local/bin/public-video", "--log-dir", "/tmp/public-video-logs"]
             mounts = [{"Destination": "/data", "Source": helper.DATA.get(name, ""), "RW": True},
                       {"Destination": "/run/secrets/video-billing", "Source": helper.SECRETS, "RW": False}]
             self.containers[name] = {"Id": "before-" + name, "Name": "/" + name, "Image": "old-image", "State": {"Running": True},
@@ -166,6 +168,48 @@ class FakeRuntime:
 
 
 class RolloutMediaTests(unittest.TestCase):
+    def test_explicit_approved_operator_policy_is_separate_and_digest_bound(self):
+        value = manifest()
+        value.update(allow_untested=True,
+                     operator_testing_profile={"host_path": "/opt/xtai/secrets/video-billing/nody-operator-testing-new.json",
+                         "container_path": "/run/secrets/video-billing/nody-operator-testing-new.json", "sha256": "9" * 64},
+                     expected_operator_rules=[{"model": "wan3.0-video", "verification_status": "unverified",
+                         "pricing_kind": "estimated_reservation", "admission_mode": "operator_testing", "is_upper_bound": False}])
+        value["gateway_env"]["VIDEO_JOB_NODYHUB_OPERATOR_TESTING_FILE"] = value["operator_testing_profile"]["container_path"]
+        checked = self.helper.validate_manifest(value)
+        runtime = FakeRuntime(self.helper, checked)
+        before = runtime.inspect(self.helper.GATEWAYS[0])
+        config = self.helper.create_config(before, checked, self.helper.GATEWAYS[0])
+        self.assertEqual(self.helper.environment({"Config": config})["VIDEO_JOB_NODYHUB_OPERATOR_TESTING_FILE"], value["operator_testing_profile"]["container_path"])
+        for change in ({"operator_testing_profile": None}, {"expected_operator_rules": []},
+                       {"expected_operator_rules": [{"model": "wan3.0-video", "verification_status": "verified"}]}):
+            with self.subTest(change=change), self.assertRaises(self.helper.RolloutError):
+                self.helper.validate_manifest({**value, **change})
+
+    def test_operator_text_or_private_estimate_envelope_blocks_old_code_rollback(self):
+        for payload in ({"model": "wan3.0-video", "mode": "text", "_nody_operator_testing": True},
+                        {"model": "wan3.0-video", "mode": "text", "_public_reservation": {"schema_version": "xtai-public-video-estimated-reservation-v1"}}):
+            with self.subTest(payload=payload), self.assertRaises(self.helper.RolloutError):
+                self.helper.assert_inflight([{"status": "running", "upstream_task_id": "original", "provider_id": "nodyhub", "payload": payload}], rollback=True)
+
+    def test_approved_rule_projection_is_unverified_and_does_not_fabricate_exact_profiles(self):
+        value = manifest()
+        before = snapshot(self.helper)
+        after = expanded(self.helper, before, value["expected_media_prices"])
+        rules = [{"model": "wan3.0-video-prime", "max_videos": 5, "max_audios": 5, "verification_status": "unverified",
+                  "pricing_kind": "estimated_reservation", "admission_mode": "operator_testing", "is_upper_bound": False}]
+        after["/v1/video-prices"]["operator_testing"] = {"enabled": True, "verification_status": "unverified", "admission_mode": "operator_testing", "rules": rules}
+        prime = next(row for row in after["/v1/capabilities"]["capabilities"]["video"]["models"] if row["id"] == "wan3.0-video-prime")
+        prime["operator_testing"] = {"supported": True, "available": True, "verification_status": "unverified", "admission_mode": "operator_testing", "rules": rules}
+        prime["media_reference"].update(supported=True, available=True, verification_status="unverified", admission_mode="operator_testing", rules=rules)
+        for kind in ("reference_video", "reference_audio", "reference_video_audio"):
+            prime[kind].update(supported=True, available=True, verification_status="unverified", admission_mode="operator_testing", rules=rules)
+        self.helper.compare_snapshot(before, after, value["expected_media_prices"], operator_rules=rules)
+        corrupt = copy.deepcopy(after)
+        corrupt["/v1/video-prices"]["operator_testing"]["verification_status"] = "verified"
+        with self.assertRaises(self.helper.RolloutError):
+            self.helper.compare_snapshot(before, corrupt, value["expected_media_prices"], operator_rules=rules)
+
     @classmethod
     def setUpClass(cls):
         cls.helper = load_helper()

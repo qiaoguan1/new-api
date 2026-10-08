@@ -105,5 +105,20 @@ func (s *server) preflightImage(body map[string]interface{}) (videoSpec, int, er
 	if !ok || !revisionOK || revision == "" || err != nil || !price.IsPositive() || price.GreaterThan(decimal.NewFromInt(100)) || price.Exponent() < -6 {
 		return videoSpec{}, 503, errors.New("invalid verified image input price")
 	}
+	// The existing exact response remains byte-compatible. If an enabled
+	// operator policy is ever the authenticated source for this same syntax,
+	// require its complete contract and retain the estimate label durably.
+	estimated, provenanceErr := validateOperatorEstimate(data)
+	if provenanceErr != nil {
+		return videoSpec{}, 503, provenanceErr
+	}
+	if estimated {
+		if _, err = validateMediaPreflight(body, data); err != nil {
+			return videoSpec{}, 503, err
+		}
+		if err = freezeOperatorReservation(body, data); err != nil {
+			return videoSpec{}, 503, err
+		}
+	}
 	return videoSpec{Resolution: resolution, Duration: int(duration), Reserve: price.StringFixed(6)}, 200, nil
 }

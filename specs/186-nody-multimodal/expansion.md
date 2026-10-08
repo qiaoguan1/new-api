@@ -54,7 +54,7 @@ material safety and uncertain-task no-replay rules remain intact.
 - [ ] O005 Deploy only after the chosen billing/admission policy is coherent; free-check discovery, normal-key authorization, material validation and old price preservation. No generation during deployment verification.
 - [ ] O006 Publish the truthful testing-release scope and retained limitations; retain current-data rollback and audit evidence.
 
-Financial approval is pending: a current maximum-rate estimate is not a verified
+Financial approval was given by the user's explicit A response: a current maximum-rate estimate is not a verified
 mode tariff or a guaranteed upper bound, especially for video-input billing.
 Actual authenticated cost can differ. No speculative exact sale price, free
 generation or disabled wallet reservation is authorized by the request alone.
@@ -65,3 +65,20 @@ data/native/old profiles, one scoped failure/TERM recovery, semantic unordered
 catalog metadata and strict ordered-frame/money/revision checks. Full gateway
 regression now passes276 tests. No host, container, wallet or billing-policy
 mutation was performed by these tests or this preparation.
+
+## Approved estimated holds — 2026-10-08
+
+User selected A: open the candidate implementation for manual testing, no agent
+paid generation or recharge. Missing-price candidate holds use current production
+token group maximum display-credit rate × verifiedCNY1.5 exchange × group factor
+× requested output seconds × retail1.5. Holds retain the existingCNY150 cap;
+the estimate is not a guaranteed cost upper bound. Final authenticated actual
+cost ×1.5 remains authoritative. New estimated-task supplements require available
+user/limited-token quota; shortage preserves the original result/bill pending
+funding, never resubmits and never makes that new-path wallet negative. Existing
+verified pricing, frozen requests and legacy debt semantics remain unchanged.
+
+The actual production token group was freely confirmed as 默认通道, multiplier1,
+currency exchange1.5. No key or account balance is exported. New rules are
+explicitly `verification_status=unverified`, `pricing_kind=estimated_reservation`;
+they do not reuse successful profiles or manufacture UUID evidence.

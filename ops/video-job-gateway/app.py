@@ -29,10 +29,11 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from adapters import AdapterError, PaisioAdapter, ProviderConfig, RollDekAdapter, ToonflowAdapter, VideoAdapter
-from nodyhub import NodyHubAdapter, NODY_MODELS
+from nodyhub import NodyHubAdapter, NODY_MODELS, verified_quote as nody_verified_quote
 from nody_image_contracts import NodyImageContracts
 from nody_media_contracts import NodyMediaContracts
-from nody_media_wire import build_media_body
+from nody_media_wire import build_media_body, build_candidate_body
+from nody_operator_testing import NodyOperatorTesting, SOURCE as NODY_OPERATOR_SOURCE
 from billing_collectors import (
     BillingCollectionError,
     NewAPITaskBillingCollector,
@@ -118,6 +119,7 @@ class Config:
     reference_media_hosts: tuple[str, ...] = ()
     nody_image_contract_file: Path | None = None
     nody_media_contract_file: Path | None = None
+    nody_operator_testing_file: Path | None = None
     reference_media_timeout_seconds: int = 60
     reference_verify_concurrency: int = 2
     settlement_query_concurrency: int = 2
@@ -244,6 +246,7 @@ class Config:
             providers=providers,
             nody_image_contract_file=Path(os.environ["VIDEO_JOB_NODYHUB_IMAGE_CONTRACT_FILE"]).resolve() if os.getenv("VIDEO_JOB_NODYHUB_IMAGE_CONTRACT_FILE") else None,
             nody_media_contract_file=Path(os.environ["VIDEO_JOB_NODYHUB_MEDIA_CONTRACT_FILE"]).resolve() if os.getenv("VIDEO_JOB_NODYHUB_MEDIA_CONTRACT_FILE") else None,
+            nody_operator_testing_file=Path(os.environ["VIDEO_JOB_NODYHUB_OPERATOR_TESTING_FILE"]).resolve() if os.getenv("VIDEO_JOB_NODYHUB_OPERATOR_TESTING_FILE") else None,
             pricing_url=os.getenv("VIDEO_JOB_GATEWAY_PRICING_URL", "http://new-api:3000/api/pricing").strip(),
             pricing_file=Path(
                 os.getenv("VIDEO_JOB_GATEWAY_PRICING_FILE", str(Path(__file__).with_name("relay-pricing.json")))
@@ -365,6 +368,16 @@ class Gateway:
         except ValueError:
             self.nody_media_contract_error = "media_contract_not_ready"
             self.nody_media_contracts = NodyMediaContracts.load(None)
+        self.nody_operator_testing_error = ""
+        try:
+            self.nody_operator_testing = NodyOperatorTesting.load(config.nody_operator_testing_file)
+            if self.nody_operator_testing.enabled and not config.reference_media_hosts:
+                raise ValueError("operator reference origin is not configured")
+            self.catalog = self.nody_operator_testing.catalog(self.catalog)
+        except ValueError:
+            # A missing/invalid opt-in must never disable proven Nody modes.
+            self.nody_operator_testing_error = "operator_testing_not_ready"
+            self.nody_operator_testing = NodyOperatorTesting.load(None)
         self.store = Store(
             config.data_dir,
             max_active_jobs=config.max_active_jobs,
@@ -626,6 +639,10 @@ class Gateway:
                 resolutions = [str(value) for value in row.get("resolutions") or []]
                 model = self.catalog.model(model_id)
                 if model_id in NODY_MODELS:
+                    if self.nody_operator_testing.enabled:
+                        rules = [rule for rule in self.nody_operator_testing.public_rules() if rule["model"] == model_id]
+                        row["operator_testing"] = {"supported": bool(rules), "available": bool(rules) and row.get("available") is True,
+                                                   "verification_status": "unverified", "admission_mode": "operator_testing", "rules": rules}
                     media_rows = [item for item in self.nody_media_contracts.public_rows() if item["model"] == model_id]
                     row["media_reference"] = {"supported": bool(media_rows), "available": bool(media_rows) and row.get("available") is True,
                                               "specifications": media_rows, "identity_required": True}
@@ -667,6 +684,34 @@ class Gateway:
                         row["max_total_assets"] = max(row.get("max_total_assets", 0), *(item["image_count"] + item["video_count"] + item["audio_count"] for item in media_rows))
                     row["audio_mode"] = "explicit_boolean_profiled" if any(item["generate_audio"] is False for item in media_rows) else "provider_default_only"
                     row["generate_audio_required"] = not any(item["generate_audio"] is False for item in media_rows)
+                    if self.nody_operator_testing.enabled and rules:
+                        candidate = rules[0]
+                        testing = {"verification_status": "unverified", "admission_mode": "operator_testing", "rules": rules}
+                        row["media_reference"].update(supported=True, available=row.get("available") is True, **testing)
+                        row["max_audios"] = max(row["max_audios"], candidate["max_audios"])
+                        row["max_total_assets"] = max(row.get("max_total_assets", 0), candidate["max_total_assets"])
+                        if False in candidate["generate_audio_values"]:
+                            row.update(audio_mode="operator_testing_explicit_boolean", generate_audio_required=False)
+                        for kind in ("reference_video", "reference_audio", "reference_video_audio"):
+                            count = candidate["max_audios"] if kind == "reference_audio" else candidate["max_videos"]
+                            if not count or (kind == "reference_video_audio" and not candidate["max_audios"]):
+                                continue
+                            value = row[kind]
+                            value.update(supported=True, available=row.get("available") is True, max_count=max(count, value["max_count"]),
+                                         max_total_assets=candidate["max_total_assets"], available_resolutions=candidate["resolutions"], reason="", **testing)
+                            if kind == "reference_video":
+                                value.update(supports_images_with_video=candidate["max_images"] > 0, supports_audio_with_video=candidate["max_audios"] > 0,
+                                             supports_generate_audio_with_video=True)
+                            elif kind == "reference_audio":
+                                value.update(requires_non_audio_input=False, supports_images_with_audio=candidate["max_images"] > 0,
+                                             supports_video_with_audio=candidate["max_videos"] > 0, supports_generate_audio_with_reference_audio=True)
+                            else:
+                                value.update(max_video_count=candidate["max_videos"], max_audio_count=candidate["max_audios"],
+                                             supports_images_with_video_audio=candidate["max_images"] > 0, supports_generate_audio_with_video_audio=True)
+                        if not image_rows:
+                            row["image_reference"]["operator_testing"] = {"available": row.get("available") is True, **testing}
+                            row["image_reference"].update(supported=True, available=row.get("available") is True, max_images=candidate["max_images"],
+                                                          required_input_aspect_ratio="selected_candidate_ratio", reason="", **testing)
                     continue
                 reference_video_resolutions = sorted({
                     route.resolution
@@ -793,6 +838,8 @@ class Gateway:
             "billing_v2_pricing": self.pricing.official_snapshot(self.price_pairs()),
             "image_reference_pricing": {"contract_version": VIDEO_REFERENCE_V22_CONTRACT, "currency": "CNY", "models": self.nody_image_contracts.public_rows()},
             "media_reference_pricing": {"contract_version": VIDEO_REFERENCE_V22_CONTRACT, "currency": "CNY", "models": self.nody_media_contracts.public_rows()},
+            **({"operator_testing": {"enabled": True, "verification_status": "unverified", "admission_mode": "operator_testing",
+                                       "rules": self.nody_operator_testing.public_rules()}} if self.nody_operator_testing.enabled else {}),
             "billing_v22_input_profiles": {
                 "contract_version": VIDEO_REFERENCE_V22_CONTRACT,
                 "pricing_revision": "ark-official-input-mode-1.5-2026-08-13",
@@ -1017,10 +1064,19 @@ class Gateway:
                 if not billing_v2 or not reference_v22:
                     raise GatewayError(HTTPStatus.BAD_REQUEST, "video_media_contract_required", "Nody参考素材必须使用v2.2计费合同。")
                 try:
-                    nody_quote = self.nody_media_contracts.quote(model.id, resolution, duration, mode, len(images), len(videos), len(audios), generate_audio,
-                                                               input_video_seconds_exact=input_data.get("input_video_seconds_exact"),
-                                                               input_audio_seconds_exact=input_data.get("input_audio_seconds_exact"), aspect_ratio=aspect_ratio)
-                    build_media_body(model.id, {"model": model.id, "prompt": prompt, "mode": mode, "duration": duration, "resolution": resolution,
+                    if (mode == "text" and not images and not videos and not audios and generate_audio is True
+                            and aspect_ratio == "16:9" and (resolution, duration) == NODY_MODELS[model.id][:2]):
+                        nody_quote = nody_verified_quote(model.id, resolution, duration)
+                    else:
+                        try:
+                            nody_quote = self.nody_media_contracts.quote(model.id, resolution, duration, mode, len(images), len(videos), len(audios), generate_audio,
+                                                                       input_video_seconds_exact=input_data.get("input_video_seconds_exact"),
+                                                                       input_audio_seconds_exact=input_data.get("input_audio_seconds_exact"), aspect_ratio=aspect_ratio)
+                        except ValueError:
+                            nody_quote = self.nody_operator_testing.quote(model.id, resolution, duration, mode, len(images), len(videos), len(audios), generate_audio,
+                                                                         input_video_seconds_exact=input_data.get("input_video_seconds_exact"),
+                                                                         input_audio_seconds_exact=input_data.get("input_audio_seconds_exact"), aspect_ratio=aspect_ratio)
+                    build_candidate_body(model.id, {"model": model.id, "prompt": prompt, "mode": mode, "duration": duration, "resolution": resolution,
                                                 "aspect_ratio": aspect_ratio, "generate_audio": generate_audio, "images": images, "videos": videos, "audios": audios})
                 except ValueError as error:
                     raise GatewayError(HTTPStatus.BAD_REQUEST, "video_media_spec_unverified", "此模式、素材数量、比例或输入时长尚未验证。") from error
@@ -1086,7 +1142,10 @@ class Gateway:
         if reference_v22 and isinstance(input_data.get("reference_input"), dict):
             normalized["reference_input"] = dict(input_data["reference_input"])
         if nody_media:
-            normalized["_nody_media_contract"] = True
+            if mode != "text" or nody_quote.get("price_source") == NODY_OPERATOR_SOURCE:
+                normalized["_nody_media_contract"] = True
+            if nody_quote.get("price_source") == NODY_OPERATOR_SOURCE:
+                normalized["_nody_operator_testing"] = True
             for name in ("input_video_seconds_exact", "input_audio_seconds_exact"):
                 if name in input_data:
                     normalized[name] = input_data[name]
@@ -1319,7 +1378,8 @@ class Gateway:
         mode = raw.get("mode", "text")
         images = raw.get("images")
         if mode == "text" and not images and not raw.get("image"):
-            return False
+            baseline = (raw.get("resolution"), raw.get("duration")) == NODY_MODELS[raw["model"]][:2] and raw.get("aspect_ratio", "16:9") == "16:9" and raw.get("generate_audio") is True
+            return self.nody_operator_testing.enabled and not baseline
         try:
             if raw.get("aspect_ratio", "16:9") == "16:9" and raw.get("generate_audio") is True and isinstance(images, list):
                 self.nody_image_contracts.quote(raw["model"], raw.get("resolution"), raw.get("duration"), mode, len(images))
@@ -1359,10 +1419,10 @@ class Gateway:
             inputs[target] = [{"url": item["url"], "role": "reference", "identity": item["sha256"]} for item in references[source]]
             if references[source]:
                 inputs[seconds_field] = format(sum((Decimal(item["duration_seconds"]) for item in references[source]), Decimal(0)), ".6f")
-        parameters = {"mode": raw.get("mode"), "resolution": raw["resolution"], "duration": raw["duration"],
+        parameters = {"mode": raw.get("mode", "text"), "resolution": raw["resolution"], "duration": raw["duration"],
                       "aspect_ratio": raw.get("aspect_ratio", "16:9"), "generate_audio": raw["generate_audio"]}
         try:
-            build_media_body(raw["model"], {"model": raw["model"], **parameters, **inputs})
+            build_candidate_body(raw["model"], {"model": raw["model"], **parameters, **inputs})
         except ValueError as error:
             raise GatewayError(HTTPStatus.BAD_REQUEST, "video_media_payload_invalid", "此模型不支持所选素材角色、数量或规格。") from error
         return {"protocol_version": self.catalog.protocol_version, "request_id": raw["request_id"], "model": raw["model"], "input": inputs, "parameters": parameters}, references
@@ -1403,6 +1463,9 @@ class Gateway:
                   "amount_cny_exact": quote["amount_cny_exact"], "pricing_revision": quote["pricing_revision"]}
         for field in ("input_video_seconds_exact", "input_audio_seconds_exact"):
             if field in quote:
+                result[field] = quote[field]
+        if quote.get("price_source") == NODY_OPERATOR_SOURCE:
+            for field in ("price_source", "pricing_kind", "verification_status", "admission_mode", "is_upper_bound", "policy_digest", "reserve_cap_applied"):
                 result[field] = quote[field]
         return result
 
@@ -2068,6 +2131,10 @@ class Gateway:
         except json.JSONDecodeError:
             payload = {}
         relay_price = payload.get("_relay_price") if isinstance(payload, dict) and isinstance(payload.get("_relay_price"), dict) else {}
+        if relay_price.get("price_source") == NODY_OPERATOR_SOURCE:
+            # A hold is not an actual-cost receipt. The normal authenticated
+            # collector/settlement path is the only final billing authority.
+            return result
         if relay_price:
             try:
                 amount = Decimal(str(relay_price.get("amount_cny_exact") or ""))

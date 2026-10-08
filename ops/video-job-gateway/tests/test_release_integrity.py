@@ -60,6 +60,8 @@ class ReleaseIntegrityTests(unittest.TestCase):
         self.assertIn("org.opencontainers.image.revision", dockerfile)
         self.assertIn("com.aixingtuyun.video.catalog-sha256", dockerfile)
         self.assertIn("com.aixingtuyun.video.source-sha256", dockerfile)
+        for name in ("Dockerfile", "Dockerfile.nody"):
+            self.assertIn("chmod 0644 /app/*.py /app/*.json", (ROOT / name).read_text(encoding="utf-8"))
 
     def test_media_runtime_tampering_invalidates_the_release_digest(self):
         with tempfile.TemporaryDirectory() as directory:

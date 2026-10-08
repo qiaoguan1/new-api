@@ -705,7 +705,10 @@ class NewAPITaskBillingCollector:
                 continue
             action = str(row.get("action") or "").lower()
             accepted = "video" in action or (self.provider_id == "nodyhub" and action == "textgenerate")
-            if self.provider_id == "nodyhub" and action == "generate":
+            # Installed vendor UI names frame/reference/remix video actions
+            # separately. They are accepted only with the same authenticated
+            # video model/platform/endpoint binding as generic generation.
+            if self.provider_id == "nodyhub" and action in {"generate", "firsttailgenerate", "referencegenerate", "remixgenerate"}:
                 properties = row.get("properties") if isinstance(row.get("properties"), dict) else {}
                 accepted = (str(row.get("platform")) == "48"
                             and properties.get("origin_model_name") in NODY_MODELS

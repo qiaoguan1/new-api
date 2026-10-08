@@ -21,6 +21,7 @@ RUNTIME_RELEASE_FILES = (
     "nody_image_contracts.py",
     "nody_media_contracts.py",
     "nody_media_wire.py",
+    "nody_operator_testing.py",
     "reference_contract.py",
     "relay-pricing.json",
     "relay_pricing.py",

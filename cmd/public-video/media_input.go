@@ -53,7 +53,12 @@ func normalizeNodyMediaInput(body map[string]interface{}) (bool, error) {
 	mode, _ := body["mode"].(string)
 	grok := name == "grok-video-3" || name == "grok-imagine-1.5-video" || name == "grok-imagine-video-official"
 	if !canonicalImages && !videosPresent && !audiosPresent && (mode == "" || mode == "text") {
-		return false, nil
+		legacy := specs[name]
+		aspect, hasAspect := body["aspect_ratio"]
+		audio, hasAudio := body["generate_audio"]
+		if mode != "text" || (body["duration"] == float64(legacy.Duration) && body["resolution"] == legacy.Resolution && (!hasAspect || aspect == "16:9") && (!hasAudio || audio == true)) {
+			return false, nil
+		}
 	}
 	if canonicalImages {
 		for _, field := range []string{"images", "image_roles", "image_identities"} {
@@ -87,7 +92,7 @@ func normalizeNodyMediaInput(body map[string]interface{}) (bool, error) {
 			return false, nil
 		}
 	}
-	if mode != "reference" && mode != "all_reference" && mode != "first_frame" && mode != "last_frame" && mode != "first_last_frame" {
+	if mode != "text" && mode != "reference" && mode != "all_reference" && mode != "first_frame" && mode != "last_frame" && mode != "first_last_frame" {
 		return false, errors.New("invalid media operation mode")
 	}
 	duration, durationOK := body["duration"].(float64)
@@ -162,7 +167,7 @@ func normalizeNodyMediaInput(body map[string]interface{}) (bool, error) {
 	}
 	videos, _ := body["reference_videos"].([]interface{})
 	audios, _ := body["reference_audios"].([]interface{})
-	if len(images)+len(videos)+len(audios) == 0 {
+	if (mode == "text" && len(images)+len(videos)+len(audios) != 0) || (mode != "text" && len(images)+len(videos)+len(audios) == 0) {
 		return false, errors.New("invalid media input combination")
 	}
 	if mode == "first_frame" || mode == "last_frame" || mode == "first_last_frame" {
@@ -302,12 +307,34 @@ func (s *server) preflightMedia(body map[string]interface{}) (videoSpec, int, er
 		}
 		return videoSpec{}, status, errors.New("media input validation failed")
 	}
+	spec, err := validateMediaPreflight(body, data)
+	if err != nil {
+		return videoSpec{}, 503, err
+	}
+	estimated, err := validateOperatorEstimate(data)
+	if err != nil {
+		return videoSpec{}, 503, err
+	}
+	if estimated {
+		if err = freezeOperatorReservation(body, data); err != nil {
+			return videoSpec{}, 503, err
+		}
+	}
+	return spec, 200, nil
+}
+
+// validateMediaPreflight binds a live or frozen quote to bounded request syntax.
+// Frozen replay uses this pure validator without invoking a current policy.
+func validateMediaPreflight(body, data map[string]interface{}) (videoSpec, error) {
+	if _, err := validateOperatorEstimate(data); err != nil {
+		return videoSpec{}, err
+	}
 	if data["ok"] != true || data["billing_contract_version"] != "xtai-video-billing-v2.2" || data["task_created"] != false || data["upstream_submitted"] != false || data["currency"] != "CNY" || data["operation_mode"] != body["mode"] {
-		return videoSpec{}, 503, errors.New("media validation contract mismatch")
+		return videoSpec{}, errors.New("media validation contract mismatch")
 	}
 	for _, field := range []string{"model", "mode", "resolution", "duration", "generate_audio", "aspect_ratio"} {
 		if data[field] != body[field] {
-			return videoSpec{}, 503, errors.New("media quote tuple mismatch")
+			return videoSpec{}, errors.New("media quote tuple mismatch")
 		}
 	}
 	for _, kind := range []string{"images", "reference_videos", "reference_audios"} {
@@ -319,25 +346,25 @@ func (s *server) preflightMedia(body map[string]interface{}) (videoSpec, int, er
 			countField, secondsField = "audio_count", "input_audio_seconds_exact"
 		}
 		if data[countField] != float64(len(items)) {
-			return videoSpec{}, 503, errors.New("media quote count mismatch")
+			return videoSpec{}, errors.New("media quote count mismatch")
 		}
 		if secondsField != "" {
 			if len(items) > 0 && data[secondsField] != referenceSeconds(items).StringFixed(6) {
-				return videoSpec{}, 503, errors.New("media quote measured duration mismatch")
+				return videoSpec{}, errors.New("media quote measured duration mismatch")
 			}
 			if len(items) == 0 && data[secondsField] != nil {
-				return videoSpec{}, 503, errors.New("unexpected media duration quote")
+				return videoSpec{}, errors.New("unexpected media duration quote")
 			}
 		}
 	}
 	amount, amountOK := data["reserved_cny_exact"].(string)
 	revision, revisionOK := data["pricing_revision"].(string)
 	if !amountOK || len(amount) > 10 || !mediaSecondsPattern.MatchString(amount) || !revisionOK || strings.TrimSpace(revision) == "" || len(revision) > 120 {
-		return videoSpec{}, 503, errors.New("invalid verified media price")
+		return videoSpec{}, errors.New("invalid media price")
 	}
 	price, err := decimal.NewFromString(amount)
 	if err != nil || !price.IsPositive() || price.GreaterThan(decimal.NewFromInt(150)) {
-		return videoSpec{}, 503, errors.New("invalid verified media price")
+		return videoSpec{}, errors.New("invalid media price")
 	}
-	return videoSpec{Resolution: body["resolution"].(string), Duration: int(body["duration"].(float64)), Reserve: price.StringFixed(6)}, 200, nil
+	return videoSpec{Resolution: body["resolution"].(string), Duration: int(body["duration"].(float64)), Reserve: price.StringFixed(6)}, nil
 }

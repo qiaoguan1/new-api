@@ -38,8 +38,8 @@ SOURCE_LABEL = "com.aixingtuyun.video.source-sha256"
 NODY_MODELS = ("wan3.0-video", "wan3.0-video-prime", "grok-imagine-1.5-video", "grok-video-3", "grok-imagine-video-official", "omni-flash", "flux-3-video")
 LEGACY_IMAGES = {"grok-video-3": ("720p", 6), "grok-imagine-1.5-video": ("720p", 6), "grok-imagine-video-official": ("480p", 1)}
 ACTIVE = {"queued", "submitting", "running", "reconciling", "uncertain", "pending_review"}
-PRIVATE_FIELDS = {"actual_cost_cny_exact", "reference_cost_cny_exact", "evidence_task_id", "evidence_source", "media_contract_evidence", "image_contract_evidence"}
-CAP_ADDITIONS = {"media_reference", "image_reference", "reference_video", "reference_audio", "reference_video_audio", "operation_modes", "resolutions", "aspect_ratios", "durations", "duration_min", "duration_max", "max_images", "max_videos", "max_audios", "max_total_assets", "audio_mode", "generate_audio_required"}
+PRIVATE_FIELDS = {"actual_cost_cny_exact", "reference_cost_cny_exact", "estimated_cost_cny_exact", "evidence_task_id", "evidence_source", "media_contract_evidence", "image_contract_evidence", "operator_policy_evidence", "policy_digest", "source_row_sha256"}
+CAP_ADDITIONS = {"media_reference", "image_reference", "reference_video", "reference_audio", "reference_video_audio", "operator_testing", "operation_modes", "resolutions", "aspect_ratios", "durations", "duration_min", "duration_max", "max_images", "max_videos", "max_audios", "max_total_assets", "audio_mode", "generate_audio_required"}
 UNORDERED_CATALOG_LISTS = {"models", "specifications", "enable_groups", "supported_endpoint_types", "operation_modes", "resolutions", "aspect_ratios", "durations", "mime_types", "audio_codecs", "video_codecs", "roles"}
 
 
@@ -59,9 +59,19 @@ def require(condition: bool, message: str) -> None:
 def validate_manifest(value: object) -> dict:
     """Restrict targets, paths, config changes and immutable release identities."""
     require(isinstance(value, dict), "Manifest must be an object")
-    allowed = {"schema_version", "operation_id", "private_root", "candidate_images", "candidate_sources", "source_labels", "image_profile", "media_profile", "expected_media_prices", "gateway_env", "allow_untested"}
+    allowed = {"schema_version", "operation_id", "private_root", "candidate_images", "candidate_sources", "source_labels", "image_profile", "media_profile", "operator_testing_profile", "expected_media_prices", "expected_operator_rules", "gateway_env", "allow_untested"}
     require(not set(value) - allowed and value.get("schema_version") == "xtai-nody-media-rollout-v1", "Unknown manifest schema/fields")
-    require(value.get("allow_untested", False) is False, "Untested activation requires a separately reviewed billing decision")
+    testing = value.get("allow_untested", False)
+    require(type(testing) is bool, "Testing authorization must be explicit boolean")
+    rules = value.get("expected_operator_rules", [])
+    require(isinstance(rules, list), "Expected operator rules must be an array")
+    if testing:
+        require(isinstance(value.get("operator_testing_profile"), dict) and 1 <= len(rules) <= 7, "Approved testing needs a separate policy and public rules")
+        require(all(isinstance(row, dict) and row.get("model") in NODY_MODELS and row.get("verification_status") == "unverified"
+                    and row.get("pricing_kind") == "estimated_reservation" and row.get("admission_mode") == "operator_testing" and row.get("is_upper_bound") is False for row in rules), "Operator rules must never claim verification or a price upper bound")
+        require(len({row["model"] for row in rules}) == len(rules) and not contains_private_fields(rules), "Operator public rules are duplicate/private")
+    else:
+        require(not rules and not value.get("operator_testing_profile"), "Unapproved operator policy cannot be activated")
     operation = value.get("operation_id")
     require(isinstance(operation, str) and re.fullmatch(r"[0-9a-f]{32}", operation) is not None, "Fresh 32-hex operation ID required")
     require(value.get("private_root") == "/opt/ai-api-stack/backups/nody-media-rollout-" + operation, "Operation directory is outside exact scope")
@@ -72,17 +82,23 @@ def validate_manifest(value: object) -> dict:
     labels = value.get("source_labels", {})
     require(isinstance(labels, dict) and not set(labels) - set(TARGETS)
             and all(isinstance(label, str) and re.fullmatch(r"com\.aixingtuyun\.[a-z0-9.-]*source-sha256", label) for label in labels.values()), "Source-label mapping is invalid")
-    for kind in ("image_profile", "media_profile"):
+    for kind in ("image_profile", "media_profile", *(("operator_testing_profile",) if testing else ())):
         row = value.get(kind)
         require(isinstance(row, dict) and set(row) == {"host_path", "container_path", "sha256"}, "Profile descriptor is invalid")
         require(isinstance(row["sha256"], str) and re.fullmatch(r"[0-9a-f]{64}", row["sha256"]), "Profile hash is invalid")
         basename = "nody-image-input-186.json" if kind == "image_profile" else Path(str(row["host_path"])).name
         if kind == "media_profile":
             require(re.fullmatch(r"nody-media-input-[a-z0-9-]{1,80}\.json", basename) is not None, "Media profile filename is invalid")
+        if kind == "operator_testing_profile":
+            require(re.fullmatch(r"nody-operator-testing-[a-z0-9-]{1,80}\.json", basename) is not None, "Operator policy filename is invalid")
         require(row["host_path"] == SECRETS + "/" + basename and row["container_path"] == "/run/secrets/video-billing/" + basename, "Profile paths differ from fixed secrets scope")
     environment = value.get("gateway_env", {})
-    require(isinstance(environment, dict) and not set(environment) - {"VIDEO_JOB_NODYHUB_MEDIA_CONTRACT_FILE"}, "Unreviewed gateway environment field")
-    require(not environment or environment["VIDEO_JOB_NODYHUB_MEDIA_CONTRACT_FILE"] == value["media_profile"]["container_path"], "Media config path mismatch")
+    require(isinstance(environment, dict) and not set(environment) - {"VIDEO_JOB_NODYHUB_MEDIA_CONTRACT_FILE", "VIDEO_JOB_NODYHUB_OPERATOR_TESTING_FILE"}, "Unreviewed gateway environment field")
+    require(environment.get("VIDEO_JOB_NODYHUB_MEDIA_CONTRACT_FILE", value["media_profile"]["container_path"]) == value["media_profile"]["container_path"], "Media config path mismatch")
+    if testing:
+        require(environment.get("VIDEO_JOB_NODYHUB_OPERATOR_TESTING_FILE") == value["operator_testing_profile"]["container_path"], "Approved operator config path mismatch")
+    else:
+        require("VIDEO_JOB_NODYHUB_OPERATOR_TESTING_FILE" not in environment, "Unapproved operator config path")
     prices = value.get("expected_media_prices")
     require(isinstance(prices, list) and len(prices) <= 500 and all(isinstance(row, dict) and row.get("model") in NODY_MODELS for row in prices), "Expected retail profile rows are invalid")
     require(not contains_private_fields(prices), "Private evidence cannot be expected public metadata")
@@ -132,6 +148,8 @@ def create_config(info: dict, manifest: dict, name: str) -> dict:
     if name in GATEWAYS:
         require(values.get("VIDEO_JOB_NODYHUB_IMAGE_CONTRACT_FILE") == manifest["image_profile"]["container_path"], "Existing IMAGE contract must remain unchanged")
         values["VIDEO_JOB_NODYHUB_MEDIA_CONTRACT_FILE"] = manifest["media_profile"]["container_path"]
+        if manifest.get("allow_untested") is True:
+            values["VIDEO_JOB_NODYHUB_OPERATOR_TESTING_FILE"] = manifest["operator_testing_profile"]["container_path"]
     config["Env"] = [key + "=" + value for key, value in values.items()]
     config["HostConfig"] = copy.deepcopy(info["HostConfig"])
     config["NetworkingConfig"] = {"EndpointsConfig": network_endpoints(info)}
@@ -140,7 +158,7 @@ def create_config(info: dict, manifest: dict, name: str) -> dict:
 
 def new_media_payload(payload: dict) -> bool:
     """Distinguish expansion jobs from the already-supported six Grok tuples."""
-    if payload.get("_nody_media_contract") is True:
+    if payload.get("_nody_media_contract") is True or payload.get("_nody_operator_testing") is True or "_public_reservation" in payload:
         return True
     if payload.get("model") not in NODY_MODELS:
         return False
@@ -184,7 +202,7 @@ def canonical_rows(rows: list[dict]) -> list[str]:
     return sorted(json.dumps(semantic_metadata(row), sort_keys=True, ensure_ascii=False, separators=(",", ":")) for row in rows)
 
 
-def compare_snapshot(before: dict, after: dict, expected_prices: list[dict], *, rollback: bool = False) -> None:
+def compare_snapshot(before: dict, after: dict, expected_prices: list[dict], *, rollback: bool = False, operator_rules: list[dict] | None = None) -> None:
     """Allow exact additive Nody media metadata, never baseline prices/ACL drift."""
     if rollback:
         for path in ("/v1/capabilities", "/v1/video-prices", "/v1/models", "/api/pricing"):
@@ -200,6 +218,15 @@ def compare_snapshot(before: dict, after: dict, expected_prices: list[dict], *, 
     require(len(old_images) == 6 and tuples == expected_images and canonical_rows(old_images) == canonical_rows(new_images), "The six deployed Grok image prices changed")
     media = new_prices.get("media_reference_pricing", {}).get("models", [])
     require(isinstance(media, list) and canonical_rows(media) == canonical_rows(expected_prices) and not contains_private_fields(media), "Published media prices differ or expose private evidence")
+    expected_rules = operator_rules or []
+    pricing_operator = new_prices.get("operator_testing", {})
+    if expected_rules:
+        require(isinstance(pricing_operator, dict) and pricing_operator.get("enabled") is True
+                and pricing_operator.get("verification_status") == "unverified" and pricing_operator.get("admission_mode") == "operator_testing"
+                and canonical_rows(pricing_operator.get("rules", [])) == canonical_rows(expected_rules)
+                and not contains_private_fields(pricing_operator), "Estimated operator pricing is missing, misleading or private")
+    else:
+        require(not pricing_operator or (pricing_operator.get("enabled") is not True and not pricing_operator.get("rules")), "Unapproved operator testing pricing was enabled")
     old_rows = {row["id"]: row for row in before["/v1/capabilities"]["capabilities"]["video"]["models"]}
     new_rows = {row["id"]: row for row in after["/v1/capabilities"]["capabilities"]["video"]["models"]}
     require(set(old_rows) == set(new_rows) and set(NODY_MODELS).issubset(new_rows), "Existing capability model IDs changed")
@@ -214,16 +241,35 @@ def compare_snapshot(before: dict, after: dict, expected_prices: list[dict], *, 
         for field in ("max_images", "max_videos", "max_total_assets", "duration_max"):
             require(new.get(field, old.get(field, 0)) >= old.get(field, 0), "Existing Nody limits narrowed")
         if model in LEGACY_IMAGES:
-            require(semantic_metadata(old.get("image_reference")) == semantic_metadata(new.get("image_reference")), "Deployed Grok image capabilities changed")
+            new_image = new.get("image_reference")
+            if isinstance(new_image, dict):
+                new_image = dict(new_image)
+                new_image.pop("operator_testing", None)
+            require(semantic_metadata(old.get("image_reference")) == semantic_metadata(new_image), "Deployed Grok image capabilities changed")
         profiles = [row for row in expected_prices if row["model"] == model]
+        candidates = [row for row in expected_rules if row["model"] == model]
+        operator = new.get("operator_testing", {})
+        if candidates:
+            require(isinstance(operator, dict) and operator.get("supported") is True
+                    and operator.get("available") is (new.get("available") is True)
+                    and operator.get("verification_status") == "unverified" and operator.get("admission_mode") == "operator_testing"
+                    and canonical_rows(operator.get("rules", [])) == canonical_rows(candidates), "Operator capabilities do not match explicitly approved rules")
+        else:
+            require(not operator or (operator.get("supported") is not True and not operator.get("rules")), "Unapproved operator capability appeared")
         projection = new.get("media_reference")
         require(isinstance(projection, dict) and canonical_rows(projection.get("specifications", [])) == canonical_rows(profiles), "Model media specifications differ from exact expected prices")
-        require(projection.get("supported") is bool(profiles) and projection.get("available") is (bool(profiles) and new.get("available") is True), "Media availability differs from profile coverage")
+        covered = bool(profiles) or bool(candidates)
+        require(projection.get("supported") is covered and projection.get("available") is (covered and new.get("available") is True), "Media availability differs from profile or approved candidate coverage")
         for field, count in (("reference_video", "video_count"), ("reference_audio", "audio_count"), ("reference_video_audio", "video_count")):
             matches = [row for row in profiles if row.get(count, 0) > 0 and (field != "reference_video_audio" or row.get("audio_count", 0) > 0)]
+            testing_supported = any(row.get("max_videos" if field != "reference_audio" else "max_audios", 0) > 0
+                                    and (field != "reference_video_audio" or row.get("max_audios", 0) > 0) for row in candidates)
             value = new.get(field)
             require(isinstance(value, dict) and canonical_rows(value.get("specifications", [])) == canonical_rows(matches), "AV metadata advertises an unpriced combination")
-            require(value.get("supported") is bool(matches) and value.get("available") is (bool(matches) and new.get("available") is True), "AV availability differs from exact coverage")
+            supported = bool(matches) or testing_supported
+            require(value.get("supported") is supported and value.get("available") is (supported and new.get("available") is True), "AV availability differs from exact or explicitly approved candidate coverage")
+            if testing_supported:
+                require(value.get("verification_status") == "unverified" and value.get("admission_mode") == "operator_testing", "Candidate AV capability incorrectly claims verification")
         require(not contains_private_fields(new), "Private media evidence leaked into capabilities")
     if "/v1/models" in before:
         require({row["id"] for row in before["/v1/models"]["data"]}.issubset({row["id"] for row in after["/v1/models"]["data"]}), "Existing public model disappeared")
@@ -231,9 +277,10 @@ def compare_snapshot(before: dict, after: dict, expected_prices: list[dict], *, 
         def normalized(payload: dict) -> dict:
             result = {}
             for row in payload["data"]:
-                value = {key: item for key, item in row.items() if key not in {"media_reference", "media_reference_pricing", "image_reference", "image_reference_pricing", "pricing_version"}}
+                value = {key: item for key, item in row.items() if key not in {"media_reference", "media_reference_pricing", "image_reference", "image_reference_pricing", "operator_testing", "reference_video", "reference_audio", "reference_video_audio", "pricing_version"} or (key in {"reference_video", "reference_audio", "reference_video_audio"} and row.get("model_name") not in NODY_MODELS)}
                 if row.get("model_name") in NODY_MODELS and isinstance(value.get("description"), str):
                     value["description"] = value["description"].split("另支持已验证媒体模式；", 1)[0]
+                    value["description"] = value["description"].split("另开放未验收手测候选模式；", 1)[0]
                 for key in ("enable_groups", "supported_endpoint_types"):
                     if isinstance(value.get(key), list):
                         value[key] = sorted(value[key], key=lambda item: json.dumps(item, sort_keys=True))
@@ -459,7 +506,7 @@ class Rollout:
         self.recovering = False
 
     def profiles(self) -> None:
-        for kind in ("image_profile", "media_profile"):
+        for kind in ("image_profile", "media_profile", *(("operator_testing_profile",) if self.manifest.get("allow_untested") is True else ())):
             row = self.manifest[kind]
             require(self.runtime.profile_digest(row["host_path"]) == row["sha256"], "Reviewed profile bytes changed")
 
@@ -500,6 +547,8 @@ class Rollout:
                 require(environment(info).get("VIDEO_JOB_GATEWAY_DRAIN_FILE_NAME", "DRAIN") == "DRAIN", "Nondefault drain path needs review")
                 require("upload.aixingtuyun.com" in environment(info).get("VIDEO_JOB_GATEWAY_REFERENCE_MEDIA_HOSTS", "").split(","), "Approved reference origin is absent")
             create_config(info, self.manifest, name)
+            if name == PUBLIC:
+                require((info['Config'].get('Entrypoint') or [None])[0] == '/usr/local/bin/public-video', 'Public saved entrypoint differs from the reviewed candidate binary path')
             image = r.image(self.manifest["candidate_images"][name])
             label = self.manifest.get("source_labels", {}).get(name, SOURCE_LABEL)
             require(image["Id"] == self.manifest["candidate_images"][name] and image["Config"].get("Labels", {}).get(label) == self.manifest["candidate_sources"][name], "Candidate image/source attestation differs")
@@ -554,7 +603,8 @@ class Rollout:
             if not rollback:
                 require(info["Image"] == state["targets"][name]["candidate_image"] and info["Config"].get("Labels", {}).get("com.aixingtuyun.media-operation") == self.manifest["operation_id"], "Replacement ownership differs")
             current = r.snapshot(name)
-            compare_snapshot(r.read(name + ".baseline.json"), current, self.manifest["expected_media_prices"], rollback=rollback)
+            compare_snapshot(r.read(name + ".baseline.json"), current, self.manifest["expected_media_prices"], rollback=rollback,
+                             operator_rules=self.manifest.get("expected_operator_rules", []))
             r.write(name + (".rollback-verification.json" if rollback else ".verification.json"), current)
         state["phase"] = "rolled_back_verified" if rollback else "promoted_verified"
         state["verified_at"] = int(time.time()); self.save(state)

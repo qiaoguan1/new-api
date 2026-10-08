@@ -5,7 +5,8 @@ Wan ``assembleWan3VideoBody``, Omni ``assembleOmniFlashVideoBody``, FLUX
 ``assembleFlux3VideoBody``, and the three Grok parameter mappings/transforms.
 This only describes candidate wire contracts; it does not grant production
 admission, verify downloaded media, establish prices, or authorize a paid call.
-Legacy text requests deliberately remain outside this module.
+Legacy text requests remain separate; candidate text bodies never replace
+the proven baseline adapter bytes.
 """
 
 from __future__ import annotations
@@ -220,3 +221,66 @@ def build_media_body(model: str, payload: Mapping[str, object]) -> dict[str, obj
         return body
 
     raise ValueError("unsupported Nody media model")
+
+
+def build_candidate_body(model: str, payload: Mapping[str, object]) -> dict[str, object]:
+    """Validate SDK-known candidate text/media without granting priced admission.
+
+    Text uses the same model-specific transforms as reference generation, but
+    has no invented input URL or reference discriminator in the returned body.
+    The existing adapter's seven proven text requests retain their own path.
+    """
+    if not isinstance(payload, Mapping):
+        raise ValueError("candidate payload must be an object")
+    if payload.get("mode") != "text":
+        return build_media_body(model, payload)
+    if any(_canonical_assets(payload, field) for field in ("images", "videos", "audios")):
+        raise ValueError("text mode cannot contain reference materials")
+    prompt = payload.get("prompt")
+    if not isinstance(prompt, str) or not prompt.strip():
+        raise ValueError("text mode requires a nonempty prompt")
+    role = "first_frame" if model == "flux-3-video" else "reference"
+    probe = {**payload, "mode": "first_frame" if model == "flux-3-video" else "reference",
+             "images": [{"url": "https://media.example/candidate-shape.png", "role": role}], "videos": [], "audios": []}
+    body = build_media_body(model, probe)
+    for field in ("image_urls", "images", "image", "reference_images", "generation_type"):
+        body.pop(field, None)
+    if model == "grok-video-3":
+        body["ratio"] = payload["aspect_ratio"]
+    elif model == "grok-imagine-1.5-video":
+        body["size"] = payload["aspect_ratio"]
+    elif model == "grok-imagine-video-official":
+        body["aspect_ratio"] = payload["aspect_ratio"]
+    return body
+
+
+def candidate_constraints(model: str) -> dict[str, object]:
+    """Return model-specific SDK candidate limits, never successful-test claims."""
+    if not isinstance(model, str) or model not in _ASPECT_RATIOS:
+        raise ValueError("unsupported Nody candidate model")
+    modes = ["text", "reference", "all_reference"]
+    resolutions, durations = ["480p", "720p"], list(range(6, 31))
+    images, videos, audios = 7, 0, 0
+    audio_values = [True]
+    if model in _WAN_MODELS:
+        modes = ["text", "first_frame", "last_frame", "first_last_frame", "reference", "all_reference"]
+        resolutions, durations = ["480p", "720p", "1080p"], list(range(2, 31))
+        images, videos, audios, audio_values = 10, 5, 5, [False, True]
+    elif model == "omni-flash":
+        resolutions, durations, images, videos = ["720p", "1080p", "4k"], [4, 6, 8, 10], 3, 1
+    elif model == "flux-3-video":
+        modes = ["text", "first_frame", "first_last_frame", "all_reference"]
+        resolutions, durations, images, audio_values = ["720p", "1080p"], list(range(5, 21)), 10, [False, True]
+    elif model == "grok-video-3":
+        resolutions, durations = ["720p"], [6, 10, 15, 20, 25, 30]
+    elif model == "grok-imagine-video-official":
+        durations = list(range(1, 16))
+    result: dict[str, object] = {"model": model, "operation_modes": modes, "resolutions": resolutions, "durations": durations,
+                                "duration_min": min(durations), "duration_max": max(durations), "aspect_ratios": sorted(_ASPECT_RATIOS[model]),
+                                "max_images": images, "max_videos": videos, "max_audios": audios, "max_total_assets": images + videos + audios,
+                                "generate_audio_values": audio_values,
+                                "input_video": {"max_count": videos, "min_duration_seconds": 1, "max_duration_seconds": 15, "max_total_duration_seconds": videos * 15},
+                                "input_audio": {"max_count": audios, "min_duration_seconds": 1, "max_duration_seconds": 15, "max_total_duration_seconds": audios * 15}}
+    if model == "omni-flash":
+        result.update(image_input_counts=[0, 1, 3], video_input_output_duration_min=4, video_input_output_duration_max=30)
+    return result

@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any
 from nodyhub import NODY_MODELS, NODY_IMAGE_MODELS, NODY_SOURCE, UUID, verified_quote
 from nody_media_wire import build_media_body
+from nody_operator_testing import SOURCE as NODY_OPERATOR_SOURCE, validate_operator_quote
 
 
 ACTIVE_STATUSES = {"queued", "submitting", "running", "reconciling"}
@@ -1565,7 +1566,7 @@ class Store:
             rows = connection.execute(
                 """
                 select job_id,provider_id,status,error_json,upstream_task_id,
-                       route_history_json,finished_at
+                       route_history_json,finished_at,payload_json
                 from video_jobs where updated_at>=?
                 """,
                 (min(cutoff, capacity_cutoff),),
@@ -1593,6 +1594,7 @@ class Store:
                         provider
                         and occurred_at >= cutoff
                         and not bool(error.get("uncertain", False))
+                        and not _is_operator_input_rejection(str(row["payload_json"] or ""), error)
                     ):
                         counts[provider] += 1
             if row["status"] != "failed":
@@ -1610,6 +1612,7 @@ class Store:
                 provider
                 and not str(row["upstream_task_id"] or "")
                 and not bool(error.get("uncertain", False))
+                and not _is_operator_input_rejection(str(row["payload_json"] or ""), error)
             ):
                 counts[provider] += 1
         threshold = max(1, int(failure_threshold))
@@ -1914,6 +1917,33 @@ def _is_generation_capacity_failure(error: dict[str, Any]) -> bool:
     return any(marker in message for marker in GENERATION_CAPACITY_MESSAGE_MARKERS)
 
 
+def _is_operator_input_rejection(payload_json: str, error: dict[str, Any]) -> bool:
+    """Only trusted manual-test input errors avoid poisoning proven routes.
+
+    Authentication, funded-account limits, capacity, server errors and uncertain
+    outcomes retain the existing provider-wide safety behavior.
+    """
+    payload = _json_object(payload_json) or {}
+    quote = payload.get("_relay_price")
+    if (not isinstance(quote, dict) or quote.get("price_source") != NODY_OPERATOR_SOURCE
+            or not validate_operator_quote(payload, quote) or error.get("uncertain")
+            or _is_generation_infrastructure_failure(error) or _is_generation_capacity_failure(error)):
+        return False
+    category = str(error.get("category") or "").strip().lower()
+    try:
+        status = int(error.get("http_status") or 0)
+    except (TypeError, ValueError):
+        return False
+    if status not in {0, 400, 422} or (status == 0 and category != "validation"):
+        return False
+    protected = ("authentication", "authorization", "unauthorized", "permission", "api key", "invalid token", "credential",
+                 "quota", "balance", "payment", "billing", "credit", "rate limit", "rate_limit", "capacity", "account", "pool",
+                 "infrastructure", "internal error", "server error", "service unavailable", "timeout", "network", "connection",
+                 "鉴权", "认证", "凭证", "令牌", "额度", "配额", "余额", "支付", "充值", "限流", "账号", "账户", "服务器", "内部错误", "网络", "超时")
+    text = " ".join(str(error.get(field) or "").lower() for field in ("code", "category", "message"))
+    return not any(marker in text for marker in protected)
+
+
 def _quantize_money(value: Decimal) -> str:
     return format(value.quantize(MONEY_QUANTUM, rounding=ROUND_CEILING), "f")
 
@@ -2007,6 +2037,18 @@ def _reservation_from_payload(payload_json: str) -> dict[str, str]:
     quote = payload.get("_relay_price") if isinstance(payload, dict) else None
     if not isinstance(quote, dict):
         return unavailable
+    if quote.get("price_source") == NODY_OPERATOR_SOURCE or payload.get("_nody_operator_testing") is True:
+        if (contract_version != BILLING_CONTRACT_REFERENCE_VERSION or not validate_operator_quote(payload, quote)
+                or quote.get("contract_version") != PRICE_CONTRACT_VERSION):
+            return unavailable
+        try:
+            reserved = Decimal(_money_exact(quote.get("amount_cny_exact"), allow_zero=False))
+        except (ValueError, InvalidOperation, StoreConflict):
+            return unavailable
+        if not 0 < reserved <= 150:
+            return unavailable
+        return {"status": "reserved", "reserved": _quantize_money(reserved), "official": "",
+                "revision": str(quote["pricing_revision"]), "contract_version": contract_version}
     if (
         quote.get("contract_version") != PRICE_CONTRACT_VERSION
         or str(quote.get("currency") or "").upper() != "CNY"

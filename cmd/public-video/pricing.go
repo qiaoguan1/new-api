@@ -117,6 +117,7 @@ func (s *server) marketPricing(c *gin.Context) {
 	imageCapabilities := map[string]map[string]interface{}{}
 	mediaCapabilities := map[string]map[string]interface{}{}
 	referenceMetadata := map[string]map[string]interface{}{}
+	operatorCapabilities := map[string]map[string]interface{}{}
 	for _, value := range models {
 		m, ok := value.(map[string]interface{})
 		if ok && m["available"] == true {
@@ -129,6 +130,11 @@ func (s *server) marketPricing(c *gin.Context) {
 			media, _ := m["media_reference"].(map[string]interface{})
 			if media["available"] == true {
 				mediaCapabilities[name] = media
+				referenceMetadata[name] = m
+			}
+			operator, _ := m["operator_testing"].(map[string]interface{})
+			if operator["supported"] == true && operator["available"] == true && operator["verification_status"] == "unverified" && operator["admission_mode"] == "operator_testing" {
+				operatorCapabilities[name] = operator
 				referenceMetadata[name] = m
 			}
 		}
@@ -258,6 +264,28 @@ func (s *server) marketPricing(c *gin.Context) {
 						}
 					}
 					projection["description"] = projection["description"].(string) + "另支持已验证媒体模式；模式、素材数量、音轨、比例及精确输入秒数须按media_reference.specifications选择。"
+				}
+			}
+		}
+		if operator := operatorCapabilities[name]; operator != nil {
+			operatorPricing, _ := prices["operator_testing"].(map[string]interface{})
+			if operatorPricing["enabled"] == true && operatorPricing["verification_status"] == "unverified" && operatorPricing["admission_mode"] == "operator_testing" {
+				candidates, _ := operator["rules"].([]interface{})
+				priceCandidates, _ := operatorPricing["rules"].([]interface{})
+				rules := verifiedOperatorRules(name, candidates, priceCandidates)
+				if len(rules) > 0 {
+					projection := added[len(added)-1].(gin.H)
+					projection["operator_testing"] = gin.H{"supported": true, "available": true, "enabled": true, "pricing_kind": "estimated_reservation", "verification_status": "unverified", "admission_mode": "operator_testing", "is_upper_bound": false, "warning": operatorEstimateWarning, "rules": rules}
+					for _, kind := range []string{"reference_video", "reference_audio", "reference_video_audio"} {
+						metadata, _ := referenceMetadata[name][kind].(map[string]interface{})
+						if public := operatorReferenceMetadata(kind, metadata, rules); public != nil {
+							if prior, ok := projection[kind].(map[string]interface{}); ok {
+								public["specifications"] = prior["specifications"]
+							}
+							projection[kind] = public
+						}
+					}
+					projection["description"] = projection["description"].(string) + "另开放未验收手测候选模式；预扣仅为估算、不是费用上限，最终按实际上游账单×1.5结算。"
 				}
 			}
 		}
