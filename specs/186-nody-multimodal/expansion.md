@@ -37,3 +37,31 @@ The latest authenticated funded wallet after that test is below the conservative
 Code includes Wan/Prime frame and mixed reference translation, Omni image/video reference translation, FLUX image/first-last translation and broader Grok image translation. Public admission requires successful exact profiles; empty configuration preserves the deployed text/Grok-image baseline. Profiles bind measured video AND audio seconds, role/count, output spec, aspect and generated-audio flag. Input metadata is checked against real bytes before reservation; signed URLs are excluded from durable fingerprints. Duplicate or uncertain tasks are not resubmitted.
 
 Production remains the previous successful deployment. This expansion must not be described as fully open or deployed. New rollout requires a reviewed fresh operation/backup path and an explicit decision on partial Wan rollout versus completing Omni acceptance; never reuse the already-promoted prior rollout journal.
+
+## Operator-directed testing deployment — 2026-10-08
+
+The latest explicit user request is: no recharge, deploy all, and the user will
+perform the generation tests. This supersedes the agent-run paid acceptance gate
+for this requested testing release, but does not establish missing prices or
+authorize fabricated successful billing evidence. No agent-paid test is to be
+created in this phase. Existing settled evidence, legacy pricing, authentication,
+material safety and uncertain-task no-replay rules remain intact.
+
+- [x] O001 Record the explicit waiver of agent-paid acceptance; retain original cumulative test budget, no recharge and no automatic generation.
+- [x] O002 Identify the remaining admission gate: missing exact media prices, not just the provider wallet. Request a financial choice rather than silently changing reserve policy.
+- [ ] O003 If explicitly approved, implement a separate operator-testing estimate contract, marked unverified/estimated; never insert a fake successful profile or upstream UUID. Keep final authenticated actual-cost-times1.5 settlement and existing limits.
+- [x] O004 Prepare and review a fresh, immutable-candidate release helper with unique rollback names and fresh native/container identities; never reuse the prior promoted journal. The helper is not executed, and currently accepts only the existing exact-profile policy; any separately approved estimated policy must be reviewed explicitly before activation.
+- [ ] O005 Deploy only after the chosen billing/admission policy is coherent; free-check discovery, normal-key authorization, material validation and old price preservation. No generation during deployment verification.
+- [ ] O006 Publish the truthful testing-release scope and retained limitations; retain current-data rollback and audit evidence.
+
+Financial approval is pending: a current maximum-rate estimate is not a verified
+mode tariff or a guaranteed upper bound, especially for video-input billing.
+Actual authenticated cost can differ. No speculative exact sale price, free
+generation or disabled wallet reservation is authorized by the request alone.
+
+The new helper `rollout_media.py` has19 simulated operator tests, including
+fresh immutable identities, pre-stop queue guards, preservation of current
+data/native/old profiles, one scoped failure/TERM recovery, semantic unordered
+catalog metadata and strict ordered-frame/money/revision checks. Full gateway
+regression now passes276 tests. No host, container, wallet or billing-policy
+mutation was performed by these tests or this preparation.
