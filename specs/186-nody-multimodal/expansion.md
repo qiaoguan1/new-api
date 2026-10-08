@@ -24,11 +24,14 @@ Do not infer video/audio rejection for Grok/FLUX from this older client; investi
 - [x] E005 Implement authenticated exact mode/count/audio/aspect/input-duration profiles and quote coverage; retain actual-cost-times1.5 settlement and no uncertain replay. No general tariff is inferred from a range or sample.
 - [x] E006 Extend public/gateway/catalog/price/preflight/store integration and test exact invariants. New code is not yet deployed.
 - [ ] E007 Live acceptance: Wan mixed image/video/audio case accepted with exact receipt and MP4/audio/video delivery proof. Omni remains blocked by unproven current input-versus-output billing basis and insufficient conservative funded exposure. Other branches are code-first per explicit user decision.
-- [ ] E008 Review, private backups, detached bounded rollout and public/legacy/access/price verification; document exact open capabilities and remaining external constraints.
+- [x] E008 Review, private backups, detached bounded rollout and public/legacy/access/price verification; document exact open capabilities and remaining external constraints. The later user-approved operator-testing release is live; E007 paid mode acceptance remains separate.
 
 Pricing decision must be explicit: a documented/verified per-output or per-input-second rule may cover a range; a sample alone cannot establish arbitrary modes/specs. Do not retain an old exact-count restriction merely because a field was omitted from prose, and do not declare unsupported model/mode combinations supported merely by changing the directory.
 
 ## 2026-10-08 current execution boundary
+
+This subsection is the historical boundary before the later user-approved A
+operator-testing decision. The active deployed status is recorded at the end.
 
 The user selected existing-wallet-only Wan/Omni acceptance, with remaining branches implemented first; no recharge was authorized. Wan3 at480p/2s with one image, one2.000000s MP4 and one2.040000s MP3 completed. Its authenticated exact upstream cost was CNY1.200000; the output is a658484-byte MP4 with video/audio tracks and2.020000s container duration. Original intent/receipt/fixture hashes and delivery proof are protected server-local records. The original task was queried, never repeated.
 
@@ -49,10 +52,10 @@ material safety and uncertain-task no-replay rules remain intact.
 
 - [x] O001 Record the explicit waiver of agent-paid acceptance; retain original cumulative test budget, no recharge and no automatic generation.
 - [x] O002 Identify the remaining admission gate: missing exact media prices, not just the provider wallet. Request a financial choice rather than silently changing reserve policy.
-- [ ] O003 If explicitly approved, implement a separate operator-testing estimate contract, marked unverified/estimated; never insert a fake successful profile or upstream UUID. Keep final authenticated actual-cost-times1.5 settlement and existing limits.
+- [x] O003 If explicitly approved, implement a separate operator-testing estimate contract, marked unverified/estimated; never insert a fake successful profile or upstream UUID. Keep final authenticated actual-cost-times1.5 settlement and existing limits.
 - [x] O004 Prepare and review a fresh, immutable-candidate release helper with unique rollback names and fresh native/container identities; never reuse the prior promoted journal. The helper is not executed, and currently accepts only the existing exact-profile policy; any separately approved estimated policy must be reviewed explicitly before activation.
-- [ ] O005 Deploy only after the chosen billing/admission policy is coherent; free-check discovery, normal-key authorization, material validation and old price preservation. No generation during deployment verification.
-- [ ] O006 Publish the truthful testing-release scope and retained limitations; retain current-data rollback and audit evidence.
+- [x] O005 Deploy only after the chosen billing/admission policy is coherent; free-check discovery, normal-key authorization, material validation and old price preservation. No generation during deployment verification.
+- [x] O006 Publish the truthful testing-release scope and retained limitations; retain current-data rollback and audit evidence.
 
 Financial approval was given by the user's explicit A response: a current maximum-rate estimate is not a verified
 mode tariff or a guaranteed upper bound, especially for video-input billing.
@@ -82,3 +85,36 @@ The actual production token group was freely confirmed as 默认通道, multipli
 currency exchange1.5. No key or account balance is exported. New rules are
 explicitly `verification_status=unverified`, `pricing_kind=estimated_reservation`;
 they do not reuse successful profiles or manufacture UUID evidence.
+
+## Live operator-testing release — 2026-10-08
+
+Operation `2f18e153411d44bf9ea976a0bcf5b622` reached
+`promoted_verified`. Both gateway instances and the public video service run the
+reviewed immutable candidates; the fresh native application identity is unchanged.
+WAL-aware SQLite and PostgreSQL backups, original price snapshots, preserved
+rollback containers and private audits remain server-local.
+
+The isolated canary passed seven free wide-text preflights and ordinary/denied
+authentication checks with unchanged quota, task and accounting-log counts.
+Public HTTPS ordinary-key discovery, capabilities, prices and marketplace return
+200 and expose all seven operator rules. The internal compatibility capabilities
+and price endpoints also return200 with their existing service authentication;
+ordinary user keys continue to use the main public host, not that internal host.
+Old seven text tariffs and six Grok exact image tariffs passed strict semantic
+preservation checks. This does not certify successful paid generation for every
+candidate tuple; the user explicitly owns the remaining manual acceptance.
+
+The first isolated candidate failed because copied source permissions were600;
+image packaging now makes only runtime source/data files readable0644. Production
+was never switched to that failed candidate. A canary baseline service-key404 was
+fixed by using the existing reviewed ordinary-user read-only snapshot. No ACL or
+user/key settings were changed. The final Python suite passes318 tests; public Go
+and model suites, vet and the Linux build pass. No recharge or agent-created paid
+generation occurred in this release.
+
+Both owned canary container pairs and isolated PostgreSQL databases were removed
+after zero-task/unchanged-wallet audits; final SQL/SQLite audit backups remain.
+The failed startup's absent SQLite was accepted only by the explicit reviewed
+OWNER-only/nonzero-exit cleanup path. Local generated build files were moved out
+of the checkout to a recoverable task-artifact archive. PR188 remains a draft,
+unmerged and without CI checks; live verification is not a claim of CI success.
