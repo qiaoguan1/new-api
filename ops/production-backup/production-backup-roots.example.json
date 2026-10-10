@@ -1,0 +1,14 @@
+{
+  "schema": "xtai-production-backup-roots-v1",
+  "roots": [
+    {"name": "image-gateway", "path": "/opt/xtai-image-job-gateway/data", "required": true, "required_sqlite": ["image-jobs.sqlite3"]},
+    {"name": "video-public", "path": "/opt/xtai/state/public-video-execution/data", "required": true, "required_sqlite": ["video-jobs.sqlite3"]},
+    {"name": "video-v2", "path": "/opt/xtai/state/video-billing-v2-production/data", "required": true, "required_sqlite": ["video-jobs.sqlite3"]},
+    {"name": "video-legacy", "path": "/opt/xtai/state/video-job-gateway/data", "required": true, "required_sqlite": ["video-jobs.sqlite3"]},
+    {"name": "video-billing", "path": "/opt/xtai/secrets/video-billing", "required": true},
+    {"name": "uploaded-media", "path": "/opt/ai-api-upload/data/media", "required": true},
+    {"name": "toonflow-data", "path": "/opt/xtai-toonflow-image-adapter/data", "required": true},
+    {"name": "nody-image-config", "path": "/opt/xtai-nodyhub-image-adapter/config.json", "required": true},
+    {"name": "image25-config", "path": "/opt/xtai-image25-adapter/config.json", "required": true}
+  ]
+}

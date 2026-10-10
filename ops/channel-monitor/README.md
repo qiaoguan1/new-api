@@ -73,3 +73,44 @@ daily health audit, complete positive actual-cost evidence, and the publish
 allowlist. The public candidate file contains only stable model IDs,
 resolutions, availability, and protocol/catalog revisions. Upstream names,
 channel IDs, costs, credentials, and review notes remain internal.
+
+## Read-only video patrol diagnostics
+
+Issue #192 keeps video queue observations separate from reader failures.
+`video_sqlite` checks accept only `settlement_pending` and `webhook_backlog`,
+use an absolute regular database file in SQLite read-only mode, and validate
+the required columns before counting. Missing or unreadable files, unsupported
+queries, mismatched schemas, and invalid pending timestamps produce sanitized
+`unknown` observations without an automatic restart or a fabricated zero.
+An actual overdue settlement or callback backlog retains its original alert.
+Deploy the module to the path imported by the production patrol wrapper;
+do not replace that wrapper with this module or broaden database permissions.
+The production systemd sandbox makes the host video-state mounts read-only.
+SQLite can then fail to open a valid WAL database when its transient lock files
+are absent. After an actual read-only-mount CANTOPEN/READONLY failure, only the
+three compiled production paths may use an owner-container fallback. It first
+verifies the exact `/data` bind mount, then runs fixed statistics-only queries
+as `10002:999`, with `mode=ro`, `query_only`, bounded SQL/command time, and
+strict sanitized result validation. A missing source, wrong mount, failed
+reader, invalid schema, or malformed statistics remains `unknown`, never zero.
+Host filesystem protections and existing database permissions are unchanged.
+Pricing artifacts must contain a non-dry-run for the exact expected business
+day. An absent day is `pricing_run_missing`, distinct from an executed worker
+failure, and does not invoke unrelated collection repair actions. Historical
+or future pricing runs cannot stand in for the required day.
+
+## Official-price execution audit
+
+The production `apply-official-video-pricing.py` entry point and its existing
+`official_video_pricing.py` calculation module are captured in this repository
+for issue #192. The source price formula, approved routes, group checks,
+verification-expiry checks, and atomic option transaction are unchanged.
+
+The worker now records an explicit completion status and compares each model's
+proposed option values with its current values before labeling an audit row as
+`apply` or `unchanged`. Preview runs do not report actual writes. Failed runs
+append a dated, sanitized failure without replacing earlier completed rows;
+an attempted database write with an uncertain result is reported as unknown,
+not zero. Invalid existing audit history is preserved and prevents writes.
+Neither this audit repair nor a source snapshot renews an expired official
+catalog or proves that unchanged prices were recently re-verified.

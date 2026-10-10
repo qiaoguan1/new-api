@@ -36,6 +36,48 @@ ALLOWED_REPAIR_ACTIONS = {
 ALLOWED_CHECK_KINDS = {"systemd", "docker", "http", "disk", "path_mode", "backup", "artifact", "video_sqlite"}
 MAX_JSON_BYTES = 32 * 1024 * 1024
 MAX_LEDGER_BYTES = 64 * 1024 * 1024
+VIDEO_DATABASE_OWNER_READERS = {
+    "/opt/xtai/state/public-video-execution/data/video-jobs.sqlite3": "xtai-video-public-execution",
+    "/opt/xtai/state/video-billing-v2-production/data/video-jobs.sqlite3": "xtai-video-job-gateway-v2-production",
+    "/opt/xtai/state/video-job-gateway/data/video-jobs.sqlite3": "xtai-video-job-gateway-video-job-gateway-1",
+}
+OWNER_VIDEO_SQLITE_READER = """import json,pathlib,sqlite3,stat,sys,time
+connection=None
+error_code='video_database_read_failed'
+deadline=time.monotonic()+5
+try:
+    query=sys.argv[1]
+    now=int(sys.argv[2])
+    if query not in {'settlement_pending','webhook_backlog'}:
+        error_code='video_query_not_allowed'
+        raise ValueError()
+    path=pathlib.Path('/data/video-jobs.sqlite3')
+    if not stat.S_ISREG(path.lstat().st_mode):
+        error_code='video_database_path_invalid'
+        raise ValueError()
+    connection=sqlite3.connect(path.as_uri()+'?mode=ro',uri=True,timeout=5)
+    connection.set_progress_handler(lambda: int(time.monotonic()>=deadline),1000)
+    connection.execute('pragma query_only=on')
+    table,required=('video_jobs',{'billing_status','created_at'}) if query=='settlement_pending' else ('video_webhook_outbox',{'status'})
+    columns={str(row[1]) for row in connection.execute('pragma table_info('+table+')')}
+    if not required<=columns:
+        error_code='video_database_schema_invalid'
+        raise ValueError()
+    if query=='settlement_pending':
+        count,oldest,invalid=connection.execute("select count(*),coalesce(min(created_at),0),coalesce(sum(case when typeof(created_at)<>'integer' or created_at<=0 or created_at>? then 1 else 0 end),0) from video_jobs where billing_status='settlement_pending'",(now+300,)).fetchone()
+        if invalid:
+            error_code='video_database_state_invalid'
+            raise ValueError()
+        result={'count':count,'oldest':oldest,'invalid':invalid}
+    else:
+        result={'count':connection.execute("select count(*) from video_webhook_outbox where status not in ('delivered','dead')").fetchone()[0]}
+    print(json.dumps(result))
+except Exception:
+    print(json.dumps({'error':error_code}))
+finally:
+    if connection is not None:
+        connection.close()
+"""
 
 
 def pricing_business_health(run: Mapping[str, Any]) -> tuple[str, str]:
@@ -45,6 +87,11 @@ def pricing_business_health(run: Mapping[str, Any]) -> tuple[str, str]:
     if run.get("dry_run") is True:
         return "warning", "pricing_dry_run_only"
     decisions = run.get("decisions") or []
+    if not isinstance(decisions, list) or any(
+        not isinstance(row, dict) or row.get("action") not in {"apply", "unchanged", "skip"}
+        for row in decisions
+    ):
+        return "warning", "pricing_evaluations_invalid"
     verified = any(row.get("action") in {"apply", "unchanged"} for row in decisions)
     blocked = any(row.get("action") == "skip" and row.get("reason") != "video_official_pricing_only" for row in decisions)
     status = ("partial" if verified else "blocked") if blocked else run.get("business_status", "complete")
@@ -54,7 +101,37 @@ def pricing_business_health(run: Mapping[str, Any]) -> tuple[str, str]:
         return "warning", "pricing_execution_unknown"
     if not decisions:
         return "warning", "pricing_no_evaluations"
+    if any(field in run and (
+        not isinstance(run[field], int) or isinstance(run[field], bool) or run[field] < 0
+    ) for field in ("applied", "unchanged")):
+        return "warning", "pricing_write_count_unknown"
     return "healthy", "ok"
+
+
+def pricing_execution_counts(run: Mapping[str, Any]) -> tuple[int | None, int | None]:
+    """Preserve explicit unknown writes; infer legacy counts only after completion."""
+    decisions = run.get("decisions")
+    valid_rows = isinstance(decisions, list) and bool(decisions) and all(
+        isinstance(row, dict) and row.get("action") in {"apply", "unchanged", "skip"}
+        for row in decisions
+    )
+    if (run.get("status", "complete") != "complete" or run.get("error")
+            or run.get("dry_run") is True or not valid_rows):
+        no_write_attempt = (
+            run.get("status") == "failed" and run.get("database_write_attempted") is False
+            and isinstance(run.get("applied"), int) and not isinstance(run["applied"], bool)
+            and run["applied"] == 0
+        )
+        return (0 if no_write_attempt else None), None
+    inferred = (0, sum(row.get("action") in {"apply", "unchanged"} for row in decisions)) if run.get("changed") is False else (
+        sum(row.get("action") == "apply" for row in decisions),
+        sum(row.get("action") == "unchanged" for row in decisions),
+    )
+    counts: list[int | None] = []
+    for field, fallback in zip(("applied", "unchanged"), inferred):
+        value = run[field] if field in run else fallback
+        counts.append(value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else None)
+    return counts[0], counts[1]
 
 
 class PolicyError(ValueError):
@@ -237,7 +314,7 @@ class PatrolChecks:
 
     @staticmethod
     def _result(item: Mapping[str, Any], status: str, code: str, evidence: Mapping[str, Any]) -> CheckResult:
-        allowed = {"state", "age_seconds", "percent", "count", "date", "http_status", "mode", "business_status", "applied", "unchanged", "complete", "incomplete", "skipped_manual", "skipped_paused"}
+        allowed = {"state", "age_seconds", "percent", "count", "date", "http_status", "mode", "business_status", "applied", "unchanged", "complete", "incomplete", "skipped_manual", "skipped_paused", "reader"}
         return CheckResult(
             check_id=str(item["id"]), status=status, severity=str(item.get("severity", "critical")),
             code=_safe_identifier(code), repair_action=item.get("repair_action") if status != "healthy" else None,
@@ -400,31 +477,122 @@ class PatrolChecks:
             return dataclasses.replace(result, repair_action=None) if status == "warning" else result
         if artifact_type in {"generic_pricing", "video_pricing"}:
             runs = document.get("runs") if isinstance(document, dict) else None
-            matches = [row for row in runs or [] if isinstance(row, dict) and str(row.get("date") or "") >= day and row.get("dry_run") is not True]
+            matches = [row for row in runs or [] if isinstance(row, dict) and row.get("date") == day and row.get("dry_run") is not True]
             latest = max(matches, key=lambda row: int(row.get("generated_at") or 0)) if matches else None
-            healthy = bool(latest) and not latest.get("error") and latest.get("status", "complete") != "failed"
-            if latest and artifact_type == "generic_pricing":
-                status, code = pricing_business_health(latest)
-                result = self._result(item, status, code, {"date": day, "business_status": latest.get("business_status"), "applied": sum(x.get("action") == "apply" for x in latest.get("decisions") or []), "unchanged": sum(x.get("action") == "unchanged" for x in latest.get("decisions") or [])})
-                return dataclasses.replace(result, repair_action=None) if status == "warning" else result
-            return self._result(item, "healthy" if healthy else "failed", "ok" if healthy else "scheduled_run_failed", {"date": day})
+            if latest is None:
+                return dataclasses.replace(self._result(item, "failed", "pricing_run_missing", {"date": day}), repair_action=None)
+            status, code = pricing_business_health(latest)
+            applied, unchanged = pricing_execution_counts(latest)
+            result = self._result(item, status, code, {
+                "date": day, "business_status": latest.get("business_status"),
+                "applied": applied, "unchanged": unchanged,
+            })
+            return dataclasses.replace(result, repair_action=None) if status == "warning" else result
         age = max(0, int(now - path.stat().st_mtime))
         healthy = age <= int(item.get("max_age_seconds", 7200))
         return self._result(item, "healthy" if healthy else "failed", "ok" if healthy else "artifact_stale", {"age_seconds": age})
 
-    def _video_sqlite(self, item: Mapping[str, Any], now: int) -> CheckResult:
-        connection = sqlite3.connect(f"file:{pathlib.Path(str(item['path']))}?mode=ro", uri=True, timeout=5)
+    def _video_owner_counts(self, path: pathlib.Path, query: str, now: int) -> dict[str, int]:
+        """Read fixed queue statistics through a verified production data mount."""
+        container = VIDEO_DATABASE_OWNER_READERS[str(path)]
         try:
-            if item.get("query") == "settlement_pending":
-                count, oldest = connection.execute("select count(*), coalesce(min(created_at),0) from video_jobs where billing_status='settlement_pending'").fetchone()
-                age = max(0, now - int(oldest or 0)) if oldest else 0
-                healthy = int(count) == 0 or age <= int(item.get("max_age_seconds", 1800))
-                return self._result(item, "healthy" if healthy else "failed", "ok" if healthy else "settlement_stalled", {"count": int(count), "age_seconds": age})
-            count = int(connection.execute("select count(*) from video_webhook_outbox where status not in ('delivered','dead')").fetchone()[0])
-            healthy = count <= int(item.get("max_count", 0))
-            return self._result(item, "healthy" if healthy else "failed", "ok" if healthy else "webhook_backlog", {"count": count})
+            inspected = self.runner.command(("/usr/bin/docker", "inspect", "--format", "{{json .Mounts}}", container), timeout=5)
+            if inspected.returncode != 0 or len(inspected.stdout) > 16_384:
+                raise PatrolError("video_database_owner_binding_unavailable")
+            mounts = json.loads(inspected.stdout)
+            if not isinstance(mounts, list) or not any(
+                isinstance(mount, dict) and mount.get("Type") == "bind"
+                and mount.get("Destination") == "/data" and mount.get("Source") == str(path.parent)
+                for mount in mounts
+            ):
+                raise PatrolError("video_database_owner_binding_invalid")
+            returned = self.runner.command((
+                "/usr/bin/docker", "exec", "--user", "10002:999", container,
+                "python3", "-u", "-c", OWNER_VIDEO_SQLITE_READER, query, str(now),
+            ), timeout=10)
+            if returned.returncode != 0 or len(returned.stdout) > 4096:
+                raise PatrolError("video_database_owner_reader_failed")
+            statistics = json.loads(returned.stdout)
+        except PatrolError:
+            raise
+        except Exception as error:
+            raise PatrolError("video_database_owner_reader_failed") from error
+        if isinstance(statistics, dict) and set(statistics) == {"error"}:
+            code = statistics["error"]
+            if code in {"video_query_not_allowed", "video_database_path_invalid", "video_database_read_failed",
+                        "video_database_schema_invalid", "video_database_state_invalid"}:
+                raise PatrolError(code)
+            raise PatrolError("video_database_owner_result_invalid")
+        expected = {"count", "oldest", "invalid"} if query == "settlement_pending" else {"count"}
+        if (not isinstance(statistics, dict) or set(statistics) != expected
+                or any(not isinstance(value, int) or isinstance(value, bool) or value < 0 for value in statistics.values())):
+            raise PatrolError("video_database_owner_result_invalid")
+        return statistics
+
+    def _video_sqlite(self, item: Mapping[str, Any], now: int) -> CheckResult:
+        query = item.get("query")
+        if query not in {"settlement_pending", "webhook_backlog"}:
+            raise PatrolError("video_query_not_allowed")
+        path = pathlib.Path(str(item["path"]))
+        try:
+            metadata = path.lstat()
+        except OSError as error:
+            raise PatrolError("video_database_unavailable") from error
+        if not path.is_absolute() or not stat.S_ISREG(metadata.st_mode):
+            raise PatrolError("video_database_path_invalid")
+        connection = None
+        reader = "host_sqlite"
+        deadline = time.monotonic() + 5
+        try:
+            connection = sqlite3.connect(path.as_uri() + "?mode=ro", uri=True, timeout=5)
+            connection.set_progress_handler(lambda: int(time.monotonic() >= deadline), 1000)
+            connection.execute("pragma query_only=on")
+            table, required = (
+                ("video_jobs", {"billing_status", "created_at"})
+                if query == "settlement_pending"
+                else ("video_webhook_outbox", {"status"})
+            )
+            columns = {str(row[1]) for row in connection.execute(f"pragma table_info({table})")}
+            if not required <= columns:
+                raise PatrolError("video_database_schema_invalid")
+            if query == "settlement_pending":
+                count, oldest, invalid = connection.execute(
+                    "select count(*), coalesce(min(created_at),0), "
+                    "coalesce(sum(case when typeof(created_at)<>'integer' or created_at<=0 or created_at>? then 1 else 0 end),0) "
+                    "from video_jobs where billing_status='settlement_pending'", (now + 300,),
+                ).fetchone()
+                statistics = {"count": count, "oldest": oldest, "invalid": invalid}
+            else:
+                statistics = {"count": int(connection.execute("select count(*) from video_webhook_outbox where status not in ('delivered','dead')").fetchone()[0])}
+        except sqlite3.Error as error:
+            if connection is not None:
+                connection.close()
+                connection = None
+            error_code = getattr(error, "sqlite_errorcode", None)
+            base_error_code = error_code & 0xFF if isinstance(error_code, int) else None
+            try:
+                readonly_mount = bool(os.statvfs(path).f_flag & os.ST_RDONLY)
+            except (AttributeError, OSError):
+                readonly_mount = False
+            if str(path) in VIDEO_DATABASE_OWNER_READERS and readonly_mount and base_error_code in {sqlite3.SQLITE_CANTOPEN, sqlite3.SQLITE_READONLY}:
+                statistics = self._video_owner_counts(path, str(query), now)
+                reader = "container_owner"
+            else:
+                code = "video_database_unavailable" if base_error_code == sqlite3.SQLITE_CANTOPEN else "video_database_read_failed"
+                raise PatrolError(code) from error
         finally:
-            connection.close()
+            if connection is not None:
+                connection.close()
+        count = statistics["count"]
+        if query == "settlement_pending":
+            oldest = statistics["oldest"]
+            if statistics["invalid"] or count and (not isinstance(oldest, int) or oldest <= 0 or oldest > now + 300):
+                raise PatrolError("video_database_state_invalid")
+            age = max(0, now - int(oldest or 0)) if oldest else 0
+            healthy = int(count) == 0 or age <= int(item.get("max_age_seconds", 1800))
+            return self._result(item, "healthy" if healthy else "failed", "ok" if healthy else "settlement_stalled", {"count": int(count), "age_seconds": age, "reader": reader})
+        healthy = count <= int(item.get("max_count", 0))
+        return self._result(item, "healthy" if healthy else "failed", "ok" if healthy else "webhook_backlog", {"count": count, "reader": reader})
 
 
 class RepairCoordinator:

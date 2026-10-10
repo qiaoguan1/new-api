@@ -22,6 +22,23 @@
 # Shell scripts
 *.sh text eol=lf
 
+# Keep the issue190 scoped Python release hashes reproducible on Windows.
+ops/banana-chat-adapter/*.py text eol=lf
+ops/image25-adapter/*.py text eol=lf
+ops/nodyhub-image-adapter/app.py text eol=lf
+ops/nodyhub-image-adapter/test_app.py text eol=lf
+ops/channel-monitor/official_video_pricing.py text eol=lf
+ops/channel-monitor/scripts/patrol_repair.py text eol=lf
+ops/channel-monitor/scripts/apply-official-video-pricing.py text eol=lf
+ops/channel-monitor/tests/test_patrol_pricing_business.py text eol=lf
+ops/channel-monitor/tests/test_official_video_pricing_execution.py text eol=lf
+ops/channel-monitor/tests/test_patrol_video_sqlite.py text eol=lf
+ops/production-backup/newapi_daily_backup.py text eol=lf
+ops/production-backup/tests/test_newapi_daily_backup.py text eol=lf
+specs/190-model-repair/*.py text eol=lf
+# This byte-identical legacy helper includes its original final empty line.
+ops/image25-adapter/image_io.py whitespace=-blank-at-eof
+
 # Binary files
 *.png binary
 *.jpg binary
