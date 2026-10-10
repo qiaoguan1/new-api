@@ -128,3 +128,13 @@ its temporary gate path; the production root-owned0600 guard remains intact.
 
 Independent findings were fixed or remain explicit blockers. No CI-green, merge,
 full-model output, exact attributable spend or complete restoration is claimed.
+
+Final readback confirmed the site HTTP200, original native instance/image still
+healthy, three repaired adapters healthy, gateway healthy, video instances
+running, no owned image drain remaining and no native rollout journal. The
+completed backup was independently verified again. Reviewed source is published
+as attached draft PR194, stacked on the existing Nody branch without rewriting
+it. Its status-check rollup is empty: no CI result or merge is claimed. Temporary
+source audit copies and simulated fixtures are archived outside the checkout;
+the deletion attempt was refused by the tool safety policy, so they were retained
+recoverably rather than removed by an alternative deletion mechanism.

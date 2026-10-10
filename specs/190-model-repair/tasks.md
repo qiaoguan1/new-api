@@ -11,7 +11,7 @@
 - [x] T009 Fresh private rollback copies and scoped adapter/metadata/monitor/backup deployment; unsafe native promotion deferred for a human maintenance choice and exact reviewed ingress evidence.
 - [x] T010 Free ordinary-key/endpoint/spec/health checks and one approved bounded Flare test. Exact attributable receipt unresolved; no further paid POST or recharge.
 - [x] T011 Read back live metadata/scripts, price-write/skips, strict-sandbox queue reader and backup hashes/quick checks; per-model proof levels documented.
-- [ ] T012 Publish reviewed source/PR status, user handoff and task-owned temporary cleanup.
+- [x] T012 Reviewed source published as attached draft PR194; handoff records partial delivery and pending gates. Temporary source copies and simulated fixtures preserved in the audit archive outside checkout; no user files deleted.
 
 ## Deferred work is not complete
 
