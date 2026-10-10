@@ -57,6 +57,28 @@ func TestImageSafeFailoverDoesNotReplayUnknownSubmission(t *testing.T) {
 	require.True(t, IsSafeImageRejection(types.NewErrorWithStatusCode(errors.New("no available image quota"), types.ErrorCodeBadResponseStatusCode, 429)))
 }
 
+func TestImagePaymentRequiredFailoverNeedsDefiniteQuotaRejection(t *testing.T) {
+	for _, message := range []string{"insufficient quota", "insufficient balance", "no available image quota"} {
+		err := types.NewErrorWithStatusCode(errors.New(message), types.ErrorCodeBadResponseStatusCode, http.StatusPaymentRequired)
+		require.True(t, IsSafeImageRejection(err), "message %q", message)
+	}
+	for _, message := range []string{"payment required", "charge pending", "resolution_requires_other_route"} {
+		err := types.NewErrorWithStatusCode(errors.New(message), types.ErrorCodeBadResponseStatusCode, http.StatusPaymentRequired)
+		require.False(t, IsSafeImageRejection(err), "message %q", message)
+	}
+}
+
+func TestImagePaymentRequiredQuotaCooldownDoesNotDisableOtherModels(t *testing.T) {
+	c := imageContext("/v1/images/generations", `{}`)
+	channel := &model.Channel{Id: 996}
+	err := types.NewErrorWithStatusCode(errors.New("insufficient balance"), types.ErrorCodeBadResponseStatusCode, http.StatusPaymentRequired)
+	RecordImageRouteRejection(c, channel.Id, "banana-flash", err)
+	require.True(t, imageRequestExclusions(c)[channel.Id])
+	require.False(t, ImageChannelAllowed(imageContext("/v1/images/generations", `{}`), channel, "banana-flash"))
+	require.True(t, ImageChannelAllowed(imageContext("/v1/images/generations", `{}`), channel, "banana-pro"))
+	require.True(t, ImageChannelAllowed(imageContext("/v1/responses", `{}`), channel, "gpt-5.5"))
+}
+
 func TestImageQuotaCooldownIsScopedToModelAndEndpoint(t *testing.T) {
 	c := imageContext("/v1/images/generations", "{}")
 	channel := &model.Channel{Id: 993}
@@ -87,4 +109,97 @@ func TestImageLocalBackupErrorIsNotAnUnknownSubmission(t *testing.T) {
 	unknown := NormalizeImageSubmissionError(c, err)
 	require.Equal(t, types.ErrorCode("image_submit_uncertain"), unknown.GetErrorCode())
 	require.True(t, types.IsSkipRetryError(unknown))
+}
+
+func TestImageAdapterUnconfirmedResultCannotMasqueradeAsSafeHTTPRejection(t *testing.T) {
+	for _, code := range []types.ErrorCode{"upstream_outcome_unconfirmed", "upstream_no_image", "invalid_result", "result_fetch_failed"} {
+		for _, status := range []int{http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusBadGateway} {
+			c := imageContext("/v1/images/generations", `{}`)
+			c.Set("xtai_image_submit_started", true)
+			err := types.NewErrorWithStatusCode(errors.New("Adapter could not confirm the generation result"), code, status)
+			require.False(t, IsSafeImageRejection(err), "code %q status %d", code, status)
+			unknown := NormalizeImageSubmissionError(c, err)
+			require.Equal(t, types.ErrorCode("image_submit_uncertain"), unknown.GetErrorCode())
+			require.Equal(t, http.StatusBadGateway, unknown.StatusCode)
+			require.Same(t, err, unknown.Unwrap())
+			require.Equal(t, status, err.StatusCode)
+			require.True(t, types.IsSkipRetryError(unknown))
+			require.Equal(t, "uncertain", c.Writer.Header().Get("X-XingTu-Image-Submission-State"))
+		}
+	}
+}
+
+func TestImageQuotaMarkersCannotOverrideNoRetryOrViolationFee(t *testing.T) {
+	for _, err := range []*types.NewAPIError{
+		types.NewErrorWithStatusCode(errors.New("insufficient quota"), types.ErrorCodeBadResponseStatusCode, http.StatusPaymentRequired, types.ErrOptionWithSkipRetry()),
+		types.NewErrorWithStatusCode(errors.New("insufficient balance"), types.ErrorCodeViolationFeeGrokCSAM, http.StatusPaymentRequired),
+	} {
+		require.False(t, IsSafeImageRejection(err))
+	}
+}
+
+func TestImageForbiddenRequiresExplicitNoTaskProof(t *testing.T) {
+	for _, message := range []string{"permission denied", "policy blocked", "unknown forbidden response"} {
+		c := imageContext("/v1/images/generations", `{}`)
+		c.Set("xtai_image_submit_started", true)
+		err := types.NewErrorWithStatusCode(errors.New(message), types.ErrorCodeBadResponseStatusCode, http.StatusForbidden)
+		require.False(t, IsSafeImageRejection(err), "message %q", message)
+		unknown := NormalizeImageSubmissionError(c, err)
+		require.Equal(t, types.ErrorCode("image_submit_uncertain"), unknown.GetErrorCode())
+		require.Equal(t, http.StatusBadGateway, unknown.StatusCode)
+		require.True(t, types.IsSkipRetryError(unknown))
+	}
+	err := types.NewErrorWithStatusCode(errors.New("upstream_rejected_no_task: model permission rejected before generation"), types.ErrorCodeBadResponseStatusCode, http.StatusForbidden)
+	require.True(t, IsSafeImageRejection(err))
+}
+
+func TestImageTaskMetadataOverridesQuotaOrNoTaskMessage(t *testing.T) {
+	for _, metadata := range []string{`{"task_id":"original-task"}`, `{"job_id":"original-job"}`, `{"data":{"taskId":"original-task"}}`, `{"task":{"jobId":"original-job"}}`} {
+		err := types.WithOpenAIError(types.OpenAIError{Message: "upstream_rejected_no_task: insufficient quota", Code: "upstream_rejected_no_task", Metadata: []byte(metadata)}, http.StatusPaymentRequired)
+		require.False(t, IsSafeImageRejection(err), "metadata %s", metadata)
+		c := imageContext("/v1/images/generations", `{}`)
+		c.Set("xtai_image_submit_started", true)
+		unknown := NormalizeImageSubmissionError(c, err)
+		require.Equal(t, http.StatusBadGateway, unknown.StatusCode)
+		require.Equal(t, types.ErrorCode("image_submit_uncertain"), unknown.GetErrorCode())
+		require.True(t, types.IsSkipRetryError(unknown))
+		require.Same(t, err, unknown.Unwrap())
+		require.Equal(t, metadata, string(err.Metadata))
+	}
+	for _, metadata := range []string{`{"request_id":"relay-only","id":"request-only","uuid":"request-correlation"}`, `{"task_id":"","data":{"jobId":""}}`} {
+		err := types.WithOpenAIError(types.OpenAIError{Message: "insufficient quota", Code: "quota_rejection", Metadata: []byte(metadata)}, http.StatusPaymentRequired)
+		require.True(t, IsSafeImageRejection(err), "request metadata must not be guessed as task identity: %s", metadata)
+	}
+}
+
+func TestImagePreSubmissionFailuresAndTextAuthKeepOriginalHTTPStatus(t *testing.T) {
+	for _, code := range []types.ErrorCode{types.ErrorCodeAccessDenied, "upstream_outcome_unconfirmed"} {
+		c := imageContext("/v1/images/generations", `{}`)
+		c.Set("xtai_image_submit_started", false)
+		err := types.NewErrorWithStatusCode(errors.New("not sent"), code, http.StatusForbidden)
+		require.Same(t, err, NormalizeImageSubmissionError(c, err))
+		require.Equal(t, http.StatusForbidden, err.StatusCode)
+	}
+	c := imageContext("/v1/chat/completions", `{}`)
+	err := types.NewErrorWithStatusCode(errors.New("login required"), types.ErrorCodeAccessDenied, http.StatusUnauthorized)
+	require.Same(t, err, NormalizeImageSubmissionError(c, err))
+	require.Equal(t, http.StatusUnauthorized, err.StatusCode)
+}
+
+func TestImageCallerACLAndViolationChargeCannotBecomeRouteFallback(t *testing.T) {
+	c := imageContext("/v1/images/generations", `{}`)
+	caller := types.NewErrorWithStatusCode(errors.New("upstream_rejected_no_task: caller model access denied"), types.ErrorCodeAccessDenied, http.StatusForbidden)
+	require.False(t, IsSafeImageRejection(caller))
+	for _, submitted := range []bool{false, true} {
+		c.Set("xtai_image_submit_started", submitted)
+		require.Same(t, caller, NormalizeImageSubmissionError(c, caller))
+		require.Equal(t, http.StatusForbidden, caller.StatusCode)
+	}
+
+	fee := types.NewErrorWithStatusCode(errors.New("violation fee already identified"), types.ErrorCodeViolationFeeGrokCSAM, http.StatusForbidden, types.ErrOptionWithSkipRetry())
+	c.Set("xtai_image_submit_started", true)
+	require.False(t, IsSafeImageRejection(fee))
+	require.Same(t, fee, NormalizeImageSubmissionError(c, fee))
+	require.Equal(t, types.ErrorCodeViolationFeeGrokCSAM, fee.GetErrorCode())
+	require.True(t, types.IsSkipRetryError(fee))
 }

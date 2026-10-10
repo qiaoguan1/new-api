@@ -1,48 +1,37 @@
-"""Restricted NodyHub image routes; only verified models/specifications are enabled."""
-import base64,hmac,ipaddress,json,os,pathlib,re,threading,time,urllib.request,urllib.error,urllib.parse
+"""Restricted image-only proxy for verified Image-2.5 tiers; no automatic replay."""
+import base64,hmac,ipaddress,json,os,pathlib,threading,time,urllib.request,urllib.error,urllib.parse
 from http.server import BaseHTTPRequestHandler,ThreadingHTTPServer
 from image_io import image_bytes
 
-MODELS={'gpt-image-2.5-flare','gpt-image-2.5-sunburst'}
-SIZES={'1024x1024'}
+MODEL='gpt-image-2.5'
+SIZES={'1024x1024','2048x2048','4096x4096'}
 CONFIG={}
 ACTIVE=threading.BoundedSemaphore(2)
-
-def valid_request_id(value: object) -> str:
-    """Allow only bounded correlation identifiers, never credential/header values."""
-    if not isinstance(value,str) or value.startswith('sk-') or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._:-]{0,127}',value):return ''
-    return value
-
-def upstream_request_id(headers) -> str:
-    """Capture the provider's returned ID; never invent one from an input ID."""
-    if headers is None:return ''
-    for name in ('X-Oneapi-Request-Id','X-Request-ID'):
-        identifier=valid_request_id(headers.get(name))
-        if identifier:return identifier
-    return ''
 
 class Rejection(Exception):
     def __init__(self,code,message,status=400,*,submission_state='not_submitted'):
         self.code,self.message,self.status,self.submission_state=code,message,status,submission_state
 
-def image_capabilities() -> dict[str, object]:
-    """Advertise the exact independently verified image SKU, not generic API support."""
-    return {'endpoints':['/v1/images/generations'],'sizes':sorted(SIZES),'image_count':[1],
+def image_capabilities(provider: str) -> dict[str, object]:
+    """Expose the configured provider-specific whitelist without inventing editing."""
+    sizes = {'1024x1024'} if provider == 'rolldek' else SIZES
+    return {'endpoints':['/v1/images/generations'],'sizes':sorted(sizes),'image_count':[1],
             'quality':['auto'],'image_edit':False,'reference_images':False,
-            'verification_status':'verified'}
+            'verification_status':'configured'}
 
 def validate(raw,provider):
     if not isinstance(raw,dict):raise Rejection('invalid_request','JSON object required')
     if set(raw)-{'model','prompt','size','n','response_format','quality'}:raise Rejection('unsupported_parameter','Only text-to-image with verified parameters is enabled')
-    if not isinstance(raw.get('model'),str) or raw['model'] not in MODELS:raise Rejection('invalid_model','Unsupported or unverified model')
+    if raw.get('model')!=MODEL:raise Rejection('invalid_model','Unsupported model')
     if not isinstance(raw.get('prompt'),str) or not raw['prompt'].strip() or len(raw['prompt'])>32000:raise Rejection('invalid_prompt','A prompt of 1 to 32000 characters is required')
     if isinstance(raw.get('n',1),bool) or raw.get('n',1)!=1:raise Rejection('invalid_n','unsupported_count_no_submit: Only one image per request is enabled')
-    size=raw.get('size','1024x1024')
-    if not isinstance(size,str) or size not in SIZES:raise Rejection('invalid_size','resolution_requires_other_route: This verified route accepts 1024x1024 only')
+    size=raw.get('size') or '1024x1024'
+    if not isinstance(size,str) or size not in SIZES:raise Rejection('invalid_size','resolution_requires_other_route: Use 1024x1024, 2048x2048 or 4096x4096')
     if raw.get('quality') not in (None,'auto'):raise Rejection('unsupported_quality','quality_requires_other_route: Only default auto quality has verified pricing')
     fmt=raw.get('response_format') or 'url'
     if fmt not in ('url','b64_json'):raise Rejection('invalid_response_format','Use url or b64_json')
-    return {'model':raw['model'],'prompt':raw['prompt'],'size':size,'n':1,'response_format':fmt}
+    if provider=='rolldek' and size!='1024x1024':raise Rejection('unsupported_tier','resolution_requires_other_route: This route supports 1K only; use the other verified route',429)
+    return {'model':MODEL,'prompt':raw['prompt'],'size':size,'n':1,'response_format':fmt}
 
 def response_payload(data,fmt):
     if isinstance(data,dict) and data.get('error'):raise Rejection('upstream_no_image','Upstream returned an error; not automatically replayed',502,submission_state='uncertain')
@@ -72,11 +61,10 @@ def response_payload(data,fmt):
 
 class Handler(BaseHTTPRequestHandler):
     def log_message(self,*args):pass
-    def send(self,status,data,*,submission_state=None,upstream_id=''):
+    def send(self,status,data,*,submission_state=None):
         body=json.dumps(data,separators=(',',':')).encode()
         self.send_response(status);self.send_header('Content-Type','application/json');self.send_header('Content-Length',str(len(body)))
         if submission_state is not None:self.send_header('X-XingTu-Image-Submission-State',submission_state)
-        if valid_request_id(upstream_id):self.send_header('X-Oneapi-Request-Id',upstream_id)
         self.end_headers();self.wfile.write(body)
     def provider(self):
         parts=self.path.split('/')
@@ -89,11 +77,10 @@ class Handler(BaseHTTPRequestHandler):
         try:
             self.authenticate();provider,path=self.provider()
             if path!='/v1/models':raise Rejection('not_found','Unknown endpoint',404)
-            self.send(200,{'object':'list','data':[{'id':model,'object':'model','owned_by':'nodyhub-relay','image_capabilities':image_capabilities()} for model in sorted(MODELS)]})
+            self.send(200,{'object':'list','data':[{'id':MODEL,'object':'model','owned_by':'upstream-relay','image_capabilities':image_capabilities(provider)}]})
         except Rejection as e:self.send(e.status,{'error':{'code':e.code,'message':e.message}})
     def do_POST(self):
         acquired=False
-        upstream_id=''
         try:
             self.authenticate();provider,path=self.provider()
             if path!='/v1/images/generations':raise Rejection('unsupported_endpoint','endpoint_requires_other_route: Only images/generations is validated',400)
@@ -109,27 +96,20 @@ class Handler(BaseHTTPRequestHandler):
             acquired=ACTIVE.acquire(blocking=False)
             if not acquired:raise Rejection('busy','upstream_rejected_no_task: Generation concurrency limit reached',429)
             conf=CONFIG['providers'][provider]
-            req=urllib.request.Request(conf['base_url'].rstrip('/')+'/v1/images/generations',data=json.dumps(body).encode(),headers={'Authorization':'Bearer '+conf['key'],'Content-Type':'application/json','User-Agent':'XingTuNodyHub/1'})
-            for name in ('X-Oneapi-Request-Id','X-XingTu-Relay-Request-ID','X-Request-ID'):
-                identifier=valid_request_id(self.headers.get(name))
-                if identifier:
-                    req.add_header('X-Request-ID',identifier)
-                    break
+            req=urllib.request.Request(conf['base_url'].rstrip('/')+'/v1/images/generations',data=json.dumps(body).encode(),headers={'Authorization':'Bearer '+conf['key'],'Content-Type':'application/json','User-Agent':'XingTuImage25/1'})
             opener=urllib.request.build_opener(urllib.request.ProxyHandler({}),NoRedirect())
             try:
                 with opener.open(req,timeout=180) as r:
-                    upstream_id=upstream_request_id(r.headers)
                     content=r.read(32*1024*1024+1)
                 if len(content)>32*1024*1024:raise ValueError('response too large')
                 data=json.loads(content)
             except urllib.error.HTTPError as error:
-                upstream_id=upstream_request_id(error.headers)
                 try:error.close()
                 finally:raise Rejection('upstream_outcome_unconfirmed','Upstream result unconfirmed; not automatically replayed',502,submission_state='uncertain')
             except Exception:raise Rejection('upstream_outcome_unconfirmed','Upstream result unconfirmed; not automatically replayed',502,submission_state='uncertain')
-            self.send(200,response_payload(data,body['response_format']),submission_state='submitted',upstream_id=upstream_id)
+            self.send(200,response_payload(data,body['response_format']),submission_state='submitted')
         except Rejection as e:
-            self.send(e.status,{'error':{'code':e.code,'message':e.message,'type':'nodyhub_adapter_error'}},submission_state=e.submission_state,upstream_id=upstream_id)
+            self.send(e.status,{'error':{'code':e.code,'message':e.message,'type':'image25_adapter_error'}},submission_state=e.submission_state)
         except (BrokenPipeError,ConnectionResetError):pass
         finally:
             if acquired:ACTIVE.release()
@@ -139,4 +119,4 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
 
 if __name__=='__main__':
     CONFIG=json.loads(pathlib.Path('/run/secrets/config.json').read_text())
-    ThreadingHTTPServer(('0.0.0.0',8097),Handler).serve_forever()
+    ThreadingHTTPServer(('0.0.0.0',8095),Handler).serve_forever()
