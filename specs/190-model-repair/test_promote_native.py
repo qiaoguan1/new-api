@@ -23,7 +23,9 @@ def native_fixture():
     """A fully represented private native instance, with no external credentials."""
     identity = "a" * 64
     return {"Id": identity, "Image": "sha256:" + "b" * 64,
-            "Name": "/" + n.h.NATIVE, "State": {"Running": True},
+            "Name": "/" + n.h.NATIVE, "RestartCount": 0,
+            "State": {"Running": True, "Restarting": False, "Status": "running", "Pid": 111,
+                      "StartedAt": "2026-10-10T01:00:00Z"},
             "Config": {"Env": ["QUOTA_DB_AUTHORITATIVE=true", "BATCH_UPDATE_ENABLED=false"],
                        "Labels": {}, "User": "10001", "Entrypoint": ["/new-api"],
                        "Cmd": ["--log-dir", "/logs"], "WorkingDir": "/data"},
@@ -63,6 +65,65 @@ class RootOwnedGateFixturePath(type(Path())):
 
 
 class NativeGuardTests(unittest.TestCase):
+    def test_approval_expiring_before_drain_never_writes_admission_or_stops_native(self):
+        with tempfile.TemporaryDirectory() as directory:
+            stack, containers, operations, journal, conf, drain = self.release_fixture(directory)
+            with stack, patch.object(n.time, "time", side_effect=[1100, 1201]):
+                with self.assertRaises(n.h.DeploymentError): n.run_locked()
+            self.assertFalse(drain.exists())
+            self.assertEqual(conf.read_bytes(), b"untouched existing nginx")
+            self.assertTrue(containers["a" * 64]["State"]["Running"])
+            self.assertFalse(any("/kill" in path or "/containers/create" in path for path, _, _ in operations))
+
+    def test_approval_expiring_before_gate_restores_owned_drain_without_native_stop(self):
+        with tempfile.TemporaryDirectory() as directory:
+            stack, containers, operations, journal, conf, drain = self.release_fixture(directory)
+            with stack, patch.object(n.time, "time", side_effect=[1100, 1100, 1201]):
+                with self.assertRaises(n.h.DeploymentError): n.run_locked()
+            self.assertFalse(drain.exists())
+            self.assertEqual(conf.read_bytes(), b"untouched existing nginx")
+            self.assertTrue(containers["a" * 64]["State"]["Running"])
+            self.assertFalse(any("/kill" in path or "/containers/create" in path for path, _, _ in operations))
+            self.assertEqual(journal[-1]["phase"], "rolled_back")
+
+    def test_approval_expiring_before_term_reopens_without_native_stop(self):
+        with tempfile.TemporaryDirectory() as directory:
+            stack, containers, operations, journal, conf, drain = self.release_fixture(directory)
+            with stack, patch.object(n.time, "time", side_effect=[1100, 1100, 1100, 1201]):
+                with self.assertRaises(n.h.DeploymentError): n.run_locked()
+            self.assertFalse(drain.exists())
+            self.assertEqual(conf.read_bytes(), b"untouched existing nginx")
+            self.assertTrue(containers["a" * 64]["State"]["Running"])
+            self.assertFalse(any("/kill" in path or "/containers/create" in path for path, _, _ in operations))
+            self.assertEqual(journal[-1]["phase"], "rolled_back")
+
+    def test_empty_version_requires_explicit_matching_attestation(self):
+        manifest = manifest_fixture(); manifest["version"] = ""
+        with self.assertRaises(n.h.DeploymentError): n.validate_manifest(manifest, native_fixture())
+        manifest["explicit_empty_version_attestation"] = {"serving_status_version": "", "frozen_source_version_sha256": hashlib.sha256(b"").hexdigest()}
+        n.validate_manifest(manifest, native_fixture())
+        for invalid in (None, {}, {"serving_status_version": "v1", "frozen_source_version_sha256": hashlib.sha256(b"").hexdigest()},
+                        {"serving_status_version": "", "frozen_source_version_sha256": "f" * 64}):
+            manifest["explicit_empty_version_attestation"] = invalid
+            with self.subTest(invalid=invalid), self.assertRaises(n.h.DeploymentError):
+                n.validate_manifest(manifest, native_fixture())
+
+    def test_empty_version_is_checked_against_live_status_and_source(self):
+        manifest = manifest_fixture(); manifest["version"] = ""
+        manifest["explicit_empty_version_attestation"] = {"serving_status_version": "", "frozen_source_version_sha256": hashlib.sha256(b"").hexdigest()}
+        payload = {"success": True, "data": {"quota_db_authoritative": True, "enable_batch_update": False, "version": ""}}
+        manifest["public_assets"] = {"/": hashlib.sha256(b"index").hexdigest()}
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory); (root / "VERSION").write_bytes(b"")
+            with patch.object(n.h, "LIVE_NATIVE_SOURCE", root), patch.object(n.a, "inspect", return_value=native_fixture()), \
+                 patch.object(n, "native_get", side_effect=lambda identity, path: (200, json.dumps(payload).encode() if path == "/api/status" else b"index")):
+                n.verify_native_http("a" * 64, manifest)
+                payload["data"]["version"] = "drift"
+                with self.assertRaises(n.h.DeploymentError): n.verify_native_http("a" * 64, manifest)
+                payload["data"]["version"] = ""
+                (root / "VERSION").write_bytes(b"changed")
+                with self.assertRaises(n.h.DeploymentError): n.verify_native_http("a" * 64, manifest)
+
     def release_fixture(self, directory, *, create_failure=None, reopen_failure=False, disconnect_failure=False):
         """Exercise real run/rollback orchestration against an in-memory Docker model."""
         root = Path(directory); conf = root / "nginx.conf"; drain = root / "DRAIN"
@@ -97,7 +158,9 @@ class NativeGuardTests(unittest.TestCase):
                 config = {key: value for key, value in body.items() if key not in {"HostConfig", "NetworkingConfig"}}
                 containers["d" * 64] = {"Id": "d" * 64, "Image": n.CANDIDATE_IMAGE, "Name": "/" + n.h.NATIVE,
                     "Config": copy.deepcopy(config), "HostConfig": copy.deepcopy(body["HostConfig"]),
-                    "Mounts": copy.deepcopy(old["Mounts"]), "State": {"Running": False},
+                    "Mounts": copy.deepcopy(old["Mounts"]), "RestartCount": 0,
+                    "State": {"Running": False, "Restarting": False, "Status": "created", "Pid": 0,
+                              "StartedAt": "0001-01-01T00:00:00Z"},
                     "NetworkSettings": {"Networks": {name: {**copy.deepcopy(endpoint), "IPAddress": "172.18.0.19"}
                                                        for name, endpoint in body["NetworkingConfig"]["EndpointsConfig"].items()}}}
                 if create_failure == "lost": raise TimeoutError("lost response after exact create")
@@ -111,9 +174,12 @@ class NativeGuardTests(unittest.TestCase):
                     containers[identity]["NetworkSettings"]["Networks"][network] = {**copy.deepcopy(body["EndpointConfig"]), "IPAddress": "172.18.0.20"}
                 return {}
             identity = path.split("/")[2].split("?")[0]
-            if "/kill?signal=SIGTERM" in path: containers[identity]["State"]["Running"] = False
+            if "/kill?signal=SIGTERM" in path:
+                containers[identity]["State"].update(Running=False, Restarting=False, Status="exited", Pid=0)
             elif "/rename?name=" in path: containers[identity]["Name"] = "/" + path.split("name=")[1]
-            elif path.endswith("/start"): containers[identity]["State"]["Running"] = True
+            elif path.endswith("/start"):
+                containers[identity]["State"].update(Running=True, Restarting=False, Status="running", Pid=222,
+                    StartedAt="2026-10-10T02:00:00Z")
             else: raise AssertionError("Unexpected mock Docker mutation")
             return {}
 
@@ -237,7 +303,7 @@ class NativeGuardTests(unittest.TestCase):
 
     def test_stop_is_sigterm_only_never_docker_stop_or_sigkill(self):
         original = native_fixture()
-        stopped = copy.deepcopy(original); stopped["State"]["Running"] = False
+        stopped = copy.deepcopy(original); stopped["State"].update(Running=False, Restarting=False, Status="exited", Pid=0)
         with patch.object(n.a, "docker") as docker, patch.object(n.a, "inspect", return_value=stopped), patch.object(n, "save"):
             n.terminate_original({"before": original, "phase": "drained"})
         self.assertEqual(docker.call_count, 1)
@@ -245,7 +311,7 @@ class NativeGuardTests(unittest.TestCase):
 
     def test_signal_outcome_unknown_is_observed_not_sent_again(self):
         original = native_fixture()
-        stopped = copy.deepcopy(original); stopped["State"]["Running"] = False
+        stopped = copy.deepcopy(original); stopped["State"].update(Running=False, Restarting=False, Status="exited", Pid=0)
         with patch.object(n.a, "docker", side_effect=TimeoutError) as docker, patch.object(n.a, "inspect", return_value=stopped), patch.object(n, "save"):
             n.terminate_original({"before": original})
         self.assertEqual(docker.call_count, 1)
@@ -255,6 +321,96 @@ class NativeGuardTests(unittest.TestCase):
         with patch.object(n.a, "docker") as docker, patch.object(n.a, "inspect", return_value=original), patch.object(n, "save"), patch.object(n.time, "monotonic", side_effect=[0, 1, 151]), patch.object(n.time, "sleep"):
             with self.assertRaises(n.h.DeploymentError): n.terminate_original({"before": original})
         self.assertEqual(docker.call_count, 1)
+
+    def test_original_exit_requires_two_consecutive_complete_stopped_observations(self):
+        original = native_fixture()
+        stopped = copy.deepcopy(original)
+        stopped["State"].update(Running=False, Restarting=False, Status="exited", Pid=0)
+        with patch.object(n.a, "docker") as docker, patch.object(n.a, "inspect", return_value=stopped) as inspect, patch.object(n, "save"), patch.object(n.time, "sleep"):
+            state = {"before": original}
+            n.terminate_original(state)
+        self.assertEqual(inspect.call_count, 2)
+        self.assertEqual(docker.call_count, 1)
+        self.assertTrue(state["original_stopped"])
+
+    def test_bare_running_false_or_restarting_dead_state_never_counts_as_stopped(self):
+        original = native_fixture()
+        for state_bits in ({"Running": False},
+                {"Running": False, "Restarting": True, "Status": "restarting", "Pid": 0},
+                {"Running": False, "Restarting": False, "Status": "dead", "Pid": 0},
+                {"Running": False, "Restarting": False, "Status": "exited", "Pid": 111}):
+            stopped = copy.deepcopy(original); stopped["State"] = state_bits
+            with self.subTest(state=state_bits), patch.object(n.a, "docker") as docker, patch.object(n.a, "inspect", return_value=stopped), patch.object(n, "save"), self.assertRaises(n.h.DeploymentError):
+                n.terminate_original({"before": original})
+            self.assertEqual(docker.call_count, 1)
+
+    def test_post_term_restart_count_host_config_or_mount_drift_blocks_stop_evidence(self):
+        original = native_fixture()
+        mutations = (lambda item: item.update(RestartCount=1),
+                     lambda item: item["HostConfig"].update(RestartPolicy={"Name": "always"}),
+                     lambda item: item["Mounts"][0].update(RW=False))
+        for mutation in mutations:
+            observed = copy.deepcopy(original)
+            observed["State"].update(Running=False, Restarting=False, Status="exited", Pid=0)
+            mutation(observed)
+            with self.subTest(mutation=mutation), patch.object(n.a, "docker") as docker, patch.object(n.a, "inspect", return_value=observed), patch.object(n, "save"), self.assertRaises(n.h.DeploymentError):
+                n.terminate_original({"before": original})
+            self.assertEqual(docker.call_count, 1)
+
+    def test_process_running_again_after_first_exit_observation_preserves_maintenance(self):
+        original = native_fixture(); stopped = copy.deepcopy(original)
+        stopped["State"].update(Running=False, Restarting=False, Status="exited", Pid=0)
+        with patch.object(n.a, "docker") as docker, patch.object(n.a, "inspect", side_effect=[stopped, original]), patch.object(n, "save"), patch.object(n.time, "sleep"), self.assertRaises(n.h.DeploymentError):
+            n.terminate_original({"before": original})
+        self.assertEqual(docker.call_count, 1)
+
+    def test_existing_original_term_intent_does_not_send_second_signal(self):
+        with patch.object(n.a, "docker") as docker, patch.object(n.a, "inspect") as inspect, patch.object(n, "save"), self.assertRaises(n.h.DeploymentError):
+            n.terminate_original({"before": native_fixture(), "terminate_intent": True})
+        docker.assert_not_called(); inspect.assert_not_called()
+
+    def candidate_fixture(self, *, created=False):
+        original = native_fixture(); manifest = manifest_fixture()
+        payload = n.h.clone_create_config(original, n.CANDIDATE_IMAGE, n.OP,
+            image_labels={"com.aixingtuyun.image-fixes-policy-sha256": n.POLICY_SHA256})
+        candidate = copy.deepcopy(original)
+        candidate.update(Id="d" * 64, Image=n.CANDIDATE_IMAGE,
+            Config={key: value for key, value in payload.items() if key not in {"HostConfig", "NetworkingConfig"}})
+        if created:
+            candidate["State"].update(Running=False, Restarting=False, Status="created", Pid=0,
+                StartedAt="0001-01-01T00:00:00Z")
+        return original, manifest, candidate
+
+    def test_never_started_created_candidate_is_retained_without_signal_or_start(self):
+        original, manifest, candidate = self.candidate_fixture(created=True)
+        with patch.object(n.a, "inspect", return_value=candidate), patch.object(n.a, "docker") as docker, patch.object(n, "assert_owned_admission"), patch.object(n.time, "sleep"), patch.object(n, "save"):
+            n.retain_failed_candidate({"before": original, "new_id": candidate["Id"]}, manifest)
+        paths = [call.args[0] for call in docker.call_args_list]
+        self.assertTrue(any("/rename?name=" in path for path in paths))
+        self.assertFalse(any("/kill" in path or path.endswith("/start") for path in paths))
+
+    def test_created_candidate_with_start_or_restart_evidence_cannot_be_retained_as_inert(self):
+        mutations = (lambda item: item.update(RestartCount=1),
+                     lambda item: item["State"].update(StartedAt="2026-10-10T02:00:00Z"),
+                     lambda item: item["State"].update(Restarting=True),
+                     lambda item: item["HostConfig"].update(RestartPolicy={"Name": "always"}))
+        for mutation in mutations:
+            original, manifest, candidate = self.candidate_fixture(created=True); mutation(candidate)
+            with self.subTest(mutation=mutation), patch.object(n.a, "inspect", return_value=candidate), patch.object(n.a, "docker") as docker, patch.object(n, "assert_owned_admission"), self.assertRaises(n.h.DeploymentError):
+                n.retain_failed_candidate({"before": original, "new_id": candidate["Id"]}, manifest)
+            docker.assert_not_called()
+
+    def test_existing_rollback_term_intent_does_not_resignal_running_candidate(self):
+        original, manifest, candidate = self.candidate_fixture()
+        with patch.object(n.a, "inspect", return_value=candidate), patch.object(n.a, "docker") as docker, patch.object(n, "assert_replacement_idle"), patch.object(n, "save"), patch.object(n.time, "sleep"), patch.object(n.time, "monotonic", side_effect=[0, 1, 151]), self.assertRaises(n.h.DeploymentError):
+            n.retain_failed_candidate({"before": original, "new_id": candidate["Id"], "rollback_term_intent": True}, manifest)
+        docker.assert_not_called()
+
+    def test_unknown_original_stop_during_recovery_does_not_restart_or_release(self):
+        original = native_fixture(); observed = copy.deepcopy(original); observed["State"] = {"Running": False}
+        with patch.object(n.a, "inspect", return_value=observed), patch.object(n.a, "docker") as docker, patch.object(n, "save"), patch.object(n, "await_native"), self.assertRaises(n.h.DeploymentError):
+            n.restore_original({"before": original, "terminate_intent": True}, manifest_fixture())
+        docker.assert_not_called()
 
     def test_unknown_create_only_reconciles_exact_owned_instance(self):
         manifest = manifest_fixture()
@@ -295,7 +451,7 @@ class NativeGuardTests(unittest.TestCase):
 
     def test_still_running_after_sigterm_is_not_restarted_or_released(self):
         state = {"before": native_fixture(), "terminate_intent": True, "original_stopped": False}
-        with patch.object(n.a, "inspect", return_value=state["before"]), patch.object(n.a, "docker") as docker:
+        with patch.object(n.a, "inspect", return_value=state["before"]), patch.object(n.a, "docker") as docker, patch.object(n.time, "monotonic", side_effect=[0, 1, 151]), patch.object(n.time, "sleep"):
             with self.assertRaises(n.h.DeploymentError): n.restore_original(state, manifest_fixture())
             docker.assert_not_called()
 

@@ -114,7 +114,9 @@ def validate_manifest(manifest: Mapping[str, object], before: Mapping[str, objec
               "Candidate/source scope differs from reviewed native-only image policy")
     h._identity(str(manifest.get("binary_sha256", "")))
     version = manifest.get("version")
-    h.require(isinstance(version, str) and re.fullmatch(r"[A-Za-z0-9_.+-]{1,128}", version) is not None,
+    empty_attestation = {"serving_status_version": "", "frozen_source_version_sha256": hashlib.sha256(b"").hexdigest()}
+    h.require(isinstance(version, str) and (re.fullmatch(r"[A-Za-z0-9_.+-]{1,128}", version) is not None
+              or (version == "" and manifest.get("explicit_empty_version_attestation") == empty_attestation)),
               "Frozen version evidence is missing")
     assets = manifest.get("public_assets")
     h.require(isinstance(assets, dict) and "/" in assets and 2 <= len(assets) <= 32,
@@ -278,6 +280,14 @@ def verify_native_http(identity: str, manifest: Mapping[str, object]) -> None:
     except ValueError: raise h.DeploymentError("Native status JSON cannot be verified") from None
     h.require(isinstance(payload, dict), "Native status object is unavailable")
     assert_financial_mode(a.inspect(identity), payload)
+    h.require(payload["data"].get("version") == manifest["version"], "Serving native version differs from freeze")
+    if manifest["version"] == "":
+        source_version = h.LIVE_NATIVE_SOURCE / "VERSION"
+        h.require(source_version.is_file() and not source_version.is_symlink()
+                  and source_version.resolve() == source_version.absolute()
+                  and hashlib.sha256(source_version.read_bytes()).hexdigest()
+                  == manifest["explicit_empty_version_attestation"]["frozen_source_version_sha256"],
+                  "Explicit empty source version attestation differs")
     for path, expected in manifest["public_assets"].items():
         code, content = native_get(identity, path)
         h.require(code == 200 and hashlib.sha256(content).hexdigest() == expected,
@@ -401,24 +411,91 @@ def assert_quiet(state: Mapping[str, object], identity: str) -> dict[str, object
     raise h.DeploymentError("Native/task drain did not become proven quiet; no native stop")
 
 
+def assert_process_profile(info: Mapping[str, object], expected: Mapping[str, object], *,
+                           names: set[str]) -> None:
+    """Keep the complete private process profile fixed across a stop observation."""
+    h.require(info.get("Id") == expected.get("Id") and info.get("Image") == expected.get("Image")
+              and info.get("Name") in names, "Native process ownership drifted during stop proof")
+    for key in ("Config", "HostConfig"):
+        h.require(info.get(key) == expected.get(key), "Native private runtime drifted during stop proof")
+    h.require(h._canonical_mounts(info.get("Mounts")) == h._canonical_mounts(expected.get("Mounts")),
+              "Native financial mounts drifted during stop proof")
+
+
+def process_state(info: Mapping[str, object], *, restart_count: int,
+                  allow_created: bool = False) -> str:
+    """Never mistake missing/dead/restarting state for an exited process.
+
+    No restart-policy mutation is made. The expected counter is pinned before
+    TERM (zero for a freshly created replacement), not adopted after a restart.
+    Created is permitted only for an owned candidate proven never to have run;
+    it grants retention, never permission to start that failed candidate.
+    """
+    count = info.get("RestartCount"); status = info.get("State")
+    h.require(type(restart_count) is int and restart_count >= 0
+              and type(count) is int and count == restart_count,
+              "Native restart count changed or cannot be proven")
+    h.require(isinstance(status, dict) and type(status.get("Running")) is bool
+              and status.get("Restarting") is False and type(status.get("Pid")) is int
+              and status["Pid"] >= 0, "Native process state is unknown or restarting")
+    if status.get("Status") == "running":
+        h.require(status["Running"] is True and status["Pid"] > 0,
+                  "Native running state is inconsistent")
+        return "running"
+    h.require(status["Running"] is False and status["Pid"] == 0,
+              "Native stopped state is inconsistent")
+    if status.get("Status") == "exited": return "exited"
+    if allow_created and status.get("Status") == "created":
+        h.require(count == 0 and status.get("StartedAt") == "0001-01-01T00:00:00Z",
+                  "Created candidate has prior start/restart evidence")
+        return "created"
+    raise h.DeploymentError("Native process has no proven exited/never-started state")
+
+
+def await_stopped(identity: str, expected: Mapping[str, object], *, names: set[str],
+                  restart_count: int, allow_created: bool = False,
+                  timeout: float = 150) -> Mapping[str, object]:
+    """Read two consecutive stopped observations; never signal or escalate.
+
+    A process running again after the first exited/created sample is drift, not
+    a reason to reset the evidence and send another TERM. Unknown observations
+    immediately preserve maintenance instead of becoming an invented stop.
+    """
+    deadline = time.monotonic() + timeout; stopped: str | None = None
+    while time.monotonic() < deadline:
+        info = a.inspect(identity); assert_process_profile(info, expected, names=names)
+        mode = process_state(info, restart_count=restart_count, allow_created=allow_created)
+        if mode == "running":
+            h.require(stopped is None, "Native restarted after a stopped observation; preserve maintenance")
+        elif stopped is not None:
+            h.require(mode == stopped, "Native stopped state changed during proof; preserve maintenance")
+            return info
+        else:
+            stopped = mode
+        time.sleep(0.5)
+    raise h.DeploymentError("Native stop did not become proven; current stores retained, no second signal or SIGKILL")
+
+
+def candidate_profile(state: Mapping[str, object], manifest: Mapping[str, object]) -> dict[str, object]:
+    """Bind rollback observations to the exact frozen create profile, not new drift."""
+    payload = h.clone_create_config(state["before"], manifest["candidate_image"], OP,
+        image_labels={"com.aixingtuyun.image-fixes-policy-sha256": manifest["policy_sha256"]})
+    return {"Id": state["new_id"], "Image": manifest["candidate_image"],
+            "Config": {key: value for key, value in payload.items() if key not in {"HostConfig", "NetworkingConfig"}},
+            "HostConfig": payload["HostConfig"], "Mounts": state["before"]["Mounts"]}
+
+
 def terminate_original(state: dict[str, object]) -> None:
-    """Terminate a proven idle process once; the frozen runtime is NOT graceful."""
-    old = state["before"]
+    """Terminate once and prove exited/nonrestarting; runtime is NOT graceful."""
+    h.require(not state.get("terminate_intent"), "Prior TERM intent forbids another signal; reconcile privately")
+    old = state["before"]; count = old.get("RestartCount")
+    h.require(process_state(old, restart_count=count) == "running", "Original native was not proven running")
     state["terminate_intent"] = True; save(state)
     try: a.docker("/containers/" + old["Id"] + "/kill?signal=SIGTERM", "POST")
     except Exception:
         state["terminate_outcome_unknown"] = True; save(state)
-    deadline = time.monotonic() + 150
-    while time.monotonic() < deadline:
-        info = a.inspect(old["Id"])
-        h.require(info.get("Id") == old["Id"] and info.get("Image") == old["Image"]
-                  and info.get("Name") == old["Name"] and info.get("Config") == old["Config"],
-                  "Original native ownership drifted after TERM")
-        if info.get("State", {}).get("Running") is False:
-            state["original_stopped"] = True; save(state); return
-        h.require(info.get("State", {}).get("Running") is True, "Original termination state is unknown")
-        time.sleep(0.5)
-    raise h.DeploymentError("Native did not exit after TERM; current stores retained, no SIGKILL")
+    await_stopped(old["Id"], old, names={old["Name"]}, restart_count=count)
+    state["original_stopped"] = True; state["original_exit_observations"] = 2; save(state)
 
 
 def assert_candidate_owned(info: Mapping[str, object], manifest: Mapping[str, object]) -> None:
@@ -443,13 +520,19 @@ def reconcile_create(state: dict[str, object], manifest: Mapping[str, object]) -
 
 def assert_replacement_idle(state: Mapping[str, object], manifest: Mapping[str, object]) -> None:
     """Never terminate an unknown/busy replacement during rollback."""
-    identity = state["new_id"]
-    deadline = time.monotonic() + 45; quiet = 0
+    identity = state["new_id"]; expected = candidate_profile(state, manifest)
+    deadline = time.monotonic() + 45; quiet = 0; stopped: str | None = None
     while time.monotonic() < deadline:
         info = a.inspect(identity); assert_candidate_owned(info, manifest)
+        assert_process_profile(info, expected, names={"/" + h.NATIVE, "/" + FAILED_NAME})
+        mode = process_state(info, restart_count=0, allow_created=True)
         assert_owned_admission(state)
-        if info.get("State", {}).get("Running") is False: return
-        h.require(info.get("State", {}).get("Running") is True, "Replacement running state is unknown")
+        if mode != "running":
+            if stopped is not None:
+                h.require(mode == stopped, "Replacement stopped state changed; preserve maintenance")
+                return
+            stopped = mode; time.sleep(0.5); continue
+        h.require(stopped is None, "Replacement ran after a stopped observation; preserve maintenance")
         a.assert_internal_submitters(info)
         quiet = quiet + 1 if native_connections(identity) == 0 else 0
         if quiet == 3: return
@@ -460,20 +543,21 @@ def assert_replacement_idle(state: Mapping[str, object], manifest: Mapping[str, 
 def retain_failed_candidate(state: dict[str, object], manifest: Mapping[str, object]) -> None:
     """Retain only a proven idle owned candidate; do not revert any mounted data."""
     assert_replacement_idle(state, manifest)
-    identity = state["new_id"]
+    identity = state["new_id"]; expected = candidate_profile(state, manifest)
     info = a.inspect(identity); assert_candidate_owned(info, manifest)
-    if info["State"].get("Running") is True:
+    names = {"/" + h.NATIVE, "/" + FAILED_NAME}
+    assert_process_profile(info, expected, names=names)
+    mode = process_state(info, restart_count=0, allow_created=True)
+    if mode == "running":
+        h.require(not state.get("rollback_term_intent"), "Prior rollback TERM intent forbids another signal")
         state["rollback_term_intent"] = True; save(state)
         try: a.docker("/containers/" + identity + "/kill?signal=SIGTERM", "POST")
         except Exception:
             state["rollback_term_unknown"] = True; save(state)
-        deadline = time.monotonic() + 150
-        while time.monotonic() < deadline:
-            info = a.inspect(identity); assert_candidate_owned(info, manifest)
-            if info.get("State", {}).get("Running") is False: break
-            time.sleep(0.5)
-        else: raise h.DeploymentError("Replacement did not exit after TERM; no force kill")
-    h.require(info.get("State", {}).get("Running") is False, "Replacement stop is unconfirmed")
+        info = await_stopped(identity, expected, names=names, restart_count=0)
+    else:
+        info = await_stopped(identity, expected, names=names, restart_count=0, allow_created=True)
+    h.require(process_state(info, restart_count=0, allow_created=True) != "running", "Replacement stop is unconfirmed")
     a.docker("/containers/" + identity + "/rename?name=" + FAILED_NAME, "POST")
     for network in a.inspect(identity)["NetworkSettings"]["Networks"]:
         a.docker("/networks/" + network + "/disconnect", "POST", {"Container": identity, "Force": False})
@@ -484,11 +568,9 @@ def restore_original(state: dict[str, object], manifest: Mapping[str, object]) -
     if state.get("terminate_intent") and not state.get("original_stopped"):
         # A SIGTERM response/timeout does not mean the still-running process is
         # safe to release. It may exit later, dropping otherwise reopened work.
-        observed = a.inspect(state["before"]["Id"])
-        h.require(observed.get("Id") == state["before"]["Id"]
-                  and observed.get("State", {}).get("Running") is False,
-                  "Original native is still terminating/unknown; do not reopen")
-        state["original_stopped"] = True; save(state)
+        old = state["before"]
+        await_stopped(old["Id"], old, names={old["Name"], "/" + ROLLBACK_NAME}, restart_count=old.get("RestartCount"))
+        state["original_stopped"] = True; state["original_exit_observations"] = 2; save(state)
     if state.get("create_intent") and not state.get("new_id"): reconcile_create(state, manifest)
     if state.get("new_id"): retain_failed_candidate(state, manifest)
     old = state["before"]; current = a.inspect(old["Id"])
@@ -498,16 +580,20 @@ def restore_original(state: dict[str, object], manifest: Mapping[str, object]) -
         h.require(current.get(key) == old.get(key), "Retained original private runtime drifted")
     h.require(h._canonical_mounts(current.get("Mounts")) == h._canonical_mounts(old.get("Mounts")),
               "Retained original financial mounts drifted")
+    mode = process_state(current, restart_count=old.get("RestartCount"))
+    h.require(not state.get("terminate_intent") or mode == "exited",
+              "Original ran after prior TERM/stop evidence; preserve maintenance")
+    if mode == "exited":
+        current = await_stopped(old["Id"], old, names={old["Name"], "/" + ROLLBACK_NAME}, restart_count=old.get("RestartCount"))
     if current["Name"] != old["Name"]:
         a.docker("/containers/" + old["Id"] + "/rename?name=" + h.NATIVE, "POST")
     for network, endpoint in h.network_endpoints(old).items():
         if network not in current["NetworkSettings"]["Networks"]:
             a.docker("/networks/" + network + "/connect", "POST", {"Container": old["Id"], "EndpointConfig": endpoint})
-    if current.get("State", {}).get("Running") is False:
+    if mode == "exited":
         a.docker("/containers/" + old["Id"] + "/start", "POST")
     else:
-        h.require(current.get("State", {}).get("Running") is True,
-                  "Retained original running state is unknown")
+        h.require(mode == "running", "Retained original running state is unknown")
     await_native(old["Id"], manifest)
     h.require(h.network_endpoints(a.inspect(old["Id"])) == h.network_endpoints(old), "Restored native DNS profile differs")
 
@@ -584,15 +670,21 @@ def run_locked() -> None:
     verify_inert_version(state, manifest)
     fd = os.open(ROOT / "native-nginx.before.conf", os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
     with os.fdopen(fd, "wb") as output: output.write(original); output.flush(); os.fsync(output.fileno())
+    # Preparation never extends the original one-hour human authorization.
+    assert_approval(private_json(APPROVAL), now=time.time())
     fd = os.open(DRAIN, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
     with os.fdopen(fd, "wb") as output: output.write(MARKER); output.flush(); os.fsync(output.fileno())
     committed = False
     try:
+        assert_approval(private_json(APPROVAL), now=time.time())
         a.write_conf(gated, original)
         state["phase"] = "draining"; save(state)
         state["idle"] = assert_quiet(state, old["Id"]); save(state)
         h.assert_fresh_baseline(old, a.inspect(h.NATIVE))
         assert_owned_admission(state, native_identity=old["Id"])
+        # Expiry here follows the normal owned-ingress recovery path while
+        # the original is still running: no TERM or native create is allowed.
+        assert_approval(private_json(APPROVAL), now=time.time())
         state["phase"] = "replacing"; save(state)
         terminate_original(state)
         a.docker("/containers/" + old["Id"] + "/rename?name=" + ROLLBACK_NAME, "POST")
