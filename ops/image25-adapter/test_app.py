@@ -2,11 +2,13 @@
 
 import http.client
 import importlib.util
+import io
 import json
 import pathlib
 import sys
 import threading
 import unittest
+import urllib.error
 from unittest import mock
 
 io_spec = importlib.util.spec_from_file_location("image25_test_io", pathlib.Path(__file__).with_name("image_io.py"))
@@ -23,15 +25,17 @@ class Image25CallabilityTests(unittest.TestCase):
     def body(self, **changes):
         return {"model": "gpt-image-2.5", "prompt": "fixture", **changes}
 
-    def request(self, provider, path="/v1/images/generations", body=None, method="POST"):
+    def request(self, provider, path="/v1/images/generations", body=None, method="POST", *, headers=None, include_headers=False):
         server = app.ThreadingHTTPServer(("127.0.0.1", 0), app.Handler)
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
         try:
             client = http.client.HTTPConnection("127.0.0.1", server.server_port)
-            client.request(method, "/" + provider + path, body=json.dumps(body) if body is not None else None, headers={"Authorization": "Bearer fixture", "Content-Type": "application/json"})
+            client.request(method, "/" + provider + path, body=json.dumps(body) if body is not None else None, headers={"Authorization": "Bearer fixture", "Content-Type": "application/json", **(headers or {})})
             response = client.getresponse()
             value = response.status, response.getheader("X-XingTu-Image-Submission-State"), json.loads(response.read())
+            if include_headers:
+                value = (*value, dict(response.getheaders()))
             client.close()
             return value
         finally:
@@ -90,6 +94,92 @@ class Image25CallabilityTests(unittest.TestCase):
             self.assertIn("upstream_rejected_no_task", data["error"]["message"])
             upstream.assert_not_called()
             active.release.assert_not_called()
+
+    def test_request_id_validation_is_bounded_and_rejects_credentials_or_control_chars(self):
+        for value in [None, 123, "", "with space", "a" * 129, "sk-accidental-key", "request\r\nAuthorization: secret", "request\tvalue", "/path"]:
+            with self.subTest(value=value):
+                self.assertEqual(app.valid_request_id(value), "")
+        for value in ["ops191.a-b_1:2", "a", "a" * 128]:
+            self.assertEqual(app.valid_request_id(value), value)
+
+    def test_safe_input_request_id_priority_without_forwarding_unrelated_headers(self):
+        cases = [
+            ({"X-Oneapi-Request-Id": "native-first", "X-XingTu-Relay-Request-ID": "relay-second", "X-Request-ID": "caller-third"}, "native-first"),
+            ({"X-Oneapi-Request-Id": "sk-accidental-key", "X-XingTu-Relay-Request-ID": "relay-second", "X-Request-ID": "caller-third"}, "relay-second"),
+            ({"X-Oneapi-Request-Id": "invalid space", "X-XingTu-Relay-Request-ID": "invalid space", "X-Request-ID": "caller-third"}, "caller-third"),
+            ({"X-Oneapi-Request-Id": "sk-accidental-key", "X-Request-ID": "invalid space"}, None),
+        ]
+        for headers, expected in cases:
+            with self.subTest(expected=expected), self.config(), mock.patch.object(app.urllib.request, "build_opener") as upstream:
+                response = upstream.return_value.open.return_value.__enter__.return_value
+                response.headers = {}
+                response.read.return_value = b'{"data":[{"url":"https://example.invalid/image.png"}]}'
+                status, state, _, returned = self.request("haina", body=self.body(), headers={**headers, "Cookie": "do-not-forward"}, include_headers=True)
+                self.assertEqual((status, state), (200, "submitted"))
+                request = upstream.return_value.open.call_args.args[0]
+                self.assertEqual(request.get_header("X-request-id"), expected)
+                self.assertIsNone(request.get_header("Cookie"))
+                self.assertEqual(request.get_header("Authorization"), "Bearer fixture-only")
+                self.assertNotIn("X-Oneapi-Request-Id", returned)
+                self.assertEqual(upstream.return_value.open.call_count, 1)
+
+    def test_returned_upstream_id_comes_from_provider_not_input(self):
+        cases = [
+            ({"X-Oneapi-Request-Id": "provider-first", "X-Request-ID": "provider-second"}, "provider-first"),
+            ({"X-Oneapi-Request-Id": "sk-accidental-key", "X-Request-ID": "provider-second"}, "provider-second"),
+            ({"X-Oneapi-Request-Id": "invalid\r\nheader", "X-Request-ID": "sk-secret"}, None),
+            ({}, None),
+        ]
+        for headers, expected in cases:
+            with self.subTest(expected=expected), self.config(), mock.patch.object(app.urllib.request, "build_opener") as upstream:
+                response = upstream.return_value.open.return_value.__enter__.return_value
+                response.headers = {**headers, "Authorization": "Bearer never-forward"}
+                response.read.return_value = b'{"data":[{"url":"https://example.invalid/image.png"}]}'
+                status, state, _, returned = self.request("haina", body=self.body(), headers={"X-Request-ID": "input-not-a-receipt"}, include_headers=True)
+                self.assertEqual((status, state), (200, "submitted"))
+                self.assertEqual(returned.get("X-Oneapi-Request-Id"), expected)
+                self.assertNotIn("Authorization", returned)
+
+    def test_actual_upstream_id_survives_http_error_without_replay(self):
+        error_body = io.BytesIO(b'unknown')
+        error = urllib.error.HTTPError("https://example.invalid", 503, "unavailable", {"X-Oneapi-Request-Id": "provider-original"}, error_body)
+        with self.config(), mock.patch.object(app.urllib.request, "build_opener") as upstream:
+            upstream.return_value.open.side_effect = error
+            status, state, data, returned = self.request("haina", body=self.body(), headers={"X-Request-ID": "input-id"}, include_headers=True)
+            self.assertEqual((status, state), (502, "uncertain"))
+            self.assertEqual(data["error"]["code"], "upstream_outcome_unconfirmed")
+            self.assertEqual(returned.get("X-Oneapi-Request-Id"), "provider-original")
+            self.assertTrue(error_body.closed)
+            self.assertEqual(upstream.return_value.open.call_count, 1)
+
+    def test_known_provider_id_survives_body_or_transfer_failure(self):
+        for content in [b'not JSON', b'{"data":[]}', b'{"data":[{"url":"https://example.invalid/image.png"}]}']:
+            with self.subTest(content=content), self.config(), mock.patch.object(app.urllib.request, "build_opener") as upstream, mock.patch.object(app, "image_bytes", side_effect=TimeoutError("transfer")):
+                response = upstream.return_value.open.return_value.__enter__.return_value
+                response.headers = {"X-Request-ID": "provider-body-id"}
+                response.read.return_value = content
+                status, state, _, returned = self.request("haina", body=self.body(response_format="b64_json"), include_headers=True)
+                self.assertEqual((status, state), (502, "uncertain"))
+                self.assertEqual(returned.get("X-Oneapi-Request-Id"), "provider-body-id")
+                self.assertEqual(upstream.return_value.open.call_count, 1)
+
+    def test_timeout_does_not_invent_provider_id_from_input(self):
+        with self.config(), mock.patch.object(app.urllib.request, "build_opener") as upstream:
+            upstream.return_value.open.side_effect = TimeoutError("fixture timeout")
+            status, state, _, returned = self.request("haina", body=self.body(), headers={"X-Request-ID": "input-not-receipt"}, include_headers=True)
+            self.assertEqual((status, state), (502, "uncertain"))
+            self.assertNotIn("X-Oneapi-Request-Id", returned)
+            self.assertEqual(upstream.return_value.open.call_count, 1)
+
+    def test_provider_id_is_saved_before_body_read_timeout(self):
+        with self.config(), mock.patch.object(app.urllib.request, "build_opener") as upstream:
+            response = upstream.return_value.open.return_value.__enter__.return_value
+            response.headers = {"X-Oneapi-Request-Id": "provider-before-timeout"}
+            response.read.side_effect = TimeoutError("fixture body timeout")
+            status, state, _, returned = self.request("haina", body=self.body(), include_headers=True)
+            self.assertEqual((status, state), (502, "uncertain"))
+            self.assertEqual(returned.get("X-Oneapi-Request-Id"), "provider-before-timeout")
+            self.assertEqual(upstream.return_value.open.call_count, 1)
 
 
 if __name__ == "__main__":
