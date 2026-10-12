@@ -30,8 +30,15 @@ recharge, original uncertain task replay or customer/key mutation occurred.
 - Rolldek exact Fable group quotes13/65 original credits per million tokens,
   but no cash recharge conversion is available (voucher arrival only). Its
   confirmed negative account balance needs funds before a true test.
-- Maolao Fable channel72's key/account monetary evidence is not replaced by
-  channel23's balance; a current corresponding authenticated account is needed.
+- Maolao Fable channel72 has now been uniquely bound to its corresponding
+  authenticated account/key group, with current balance0.046186 display
+  credits. Standard original-unit input/output costs13/65 per million tokens;
+  Max effort multiplies by3. An arrival log says100 credits/payment103 but
+  does not state currency, so1.03CNY/credit remains supported inference rather
+  than a currency-confirmed receipt. Normal use requires added funds.
+- Initial recharge preference is Maolao based on prior usage and the reference
+  lower tariff, not a proven cheapest-CNY ranking. Rolldek's confirmed negative
+  balance also requires funds; both remain cost candidates despite low balance.
 
 ## Remaining work
 
